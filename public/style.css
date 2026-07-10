@@ -251,6 +251,15 @@ body {
   margin-top: 22px; padding-top: 16px; border-top: 1px solid #2a2e3c;
 }
 
+.sub-account { margin-top: 22px; padding-top: 16px; border-top: 1px solid #2a2e3c; }
+.sa-title { font-size: 15px; margin: 0 0 6px; }
+.sa-input {
+  display: block; width: 100%; margin: 8px 0;
+  background: var(--panel-2); border: 1px solid #2a2e3c; color: var(--text);
+  padding: 9px 12px; border-radius: 8px; outline: none;
+}
+.sa-input:focus { border-color: var(--accent); }
+
 /* Update progress overlay */
 .update-overlay {
   position: fixed; inset: 0; z-index: 50;

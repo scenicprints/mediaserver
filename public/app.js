@@ -384,6 +384,43 @@ const pickerChoose = document.getElementById('picker-choose');
 const versionEl = document.getElementById('version');
 const updateBtn = document.getElementById('update-btn');
 const updatePill = document.getElementById('update-pill');
+const osKey = document.getElementById('os-key');
+const osUser = document.getElementById('os-user');
+const osPass = document.getElementById('os-pass');
+const osStatus = document.getElementById('os-status');
+const osSave = document.getElementById('os-save');
+
+async function loadSettings() {
+  try {
+    const s = await (await fetch('/api/settings')).json();
+    if (s.openSubtitles.configured) {
+      osStatus.textContent = '✓ Subtitle search is on' + (s.openSubtitles.username ? ' (' + s.openSubtitles.username + ')' : '') + '. Re-enter to change.';
+      osUser.value = s.openSubtitles.username || '';
+    } else {
+      osStatus.textContent = 'Add your free OpenSubtitles account to enable subtitle search.';
+    }
+  } catch {
+    osStatus.textContent = '';
+  }
+}
+
+osSave.addEventListener('click', async () => {
+  osSave.textContent = 'Saving…';
+  osSave.disabled = true;
+  let d = {};
+  try {
+    const r = await fetch('/api/settings/opensubtitles', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ apiKey: osKey.value.trim(), username: osUser.value.trim(), password: osPass.value })
+    });
+    d = await r.json().catch(() => ({}));
+  } catch {}
+  osSave.textContent = 'Save subtitle account';
+  osSave.disabled = false;
+  osStatus.textContent = d.configured ? '✓ Saved — subtitle search is on.' : 'Saved.';
+  osKey.value = '';
+  osPass.value = '';
+});
 
 const pickerState = { path: null, parent: null, type: 'movie' };
 
@@ -496,6 +533,7 @@ async function openSettings() {
   settingsModal.classList.remove('hidden');
   loadVersion();
   checkForUpdate();
+  loadSettings();
   await renderLibraries();
 }
 

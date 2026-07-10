@@ -9,14 +9,15 @@ import { scanLibraries, seedLibraries } from './scan.js';
 import { enrichLibrary, enrichShows, enrichEpisodes } from './tmdb.js';
 import { ext, qualityRank } from './parse.js';
 import { listDrives, listDirs } from './fsbrowse.js';
-import { osEnabled, searchSubtitles, downloadSubtitle } from './opensubtitles.js';
+import { osEnabled, searchSubtitles, downloadSubtitle, clearAuth } from './opensubtitles.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 
 // Strip a leading UTF-8 BOM if present — some editors/PowerShell add one, and
 // JSON.parse rejects it.
-const configText = fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8').replace(/^﻿/, '');
+const CONFIG_PATH = path.join(ROOT, 'config.json');
+const configText = fs.readFileSync(CONFIG_PATH, 'utf8').replace(/^﻿/, '');
 const config = JSON.parse(configText);
 // Resolve relative media roots against the project folder (not the CWD the
 // process happens to be launched from). Absolute paths like H:\Movies pass
@@ -430,6 +431,33 @@ app.post('/api/subtitles/download', async (req, reply) => {
     return reply.code(500).send({ error: 'Could not save subtitle: ' + e.message });
   }
   return { ok: true };
+});
+
+// ---- Settings (in-app config, e.g. OpenSubtitles account) ----
+
+app.get('/api/settings', async () => ({
+  tmdb: { configured: !!config.tmdbApiKey },
+  openSubtitles: {
+    configured: osEnabled(config.openSubtitles),
+    username: (config.openSubtitles && config.openSubtitles.username) || ''
+  }
+}));
+
+app.post('/api/settings/opensubtitles', async (req, reply) => {
+  const { apiKey, username, password } = req.body || {};
+  config.openSubtitles = {
+    apiKey: (apiKey || '').trim(),
+    username: (username || '').trim(),
+    password: password || ''
+  };
+  try {
+    // Persist to config.json (stays local — it's git-ignored).
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), 'utf8');
+  } catch (e) {
+    return reply.code(500).send({ error: 'could not save: ' + e.message });
+  }
+  clearAuth();
+  return { ok: true, configured: osEnabled(config.openSubtitles) };
 });
 
 // ---- Boot ----

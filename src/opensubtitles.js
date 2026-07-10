@@ -9,6 +9,11 @@ export function osEnabled(cfg) {
   return !!(cfg && cfg.apiKey);
 }
 
+// Drop the cached login token (call after credentials change).
+export function clearAuth() {
+  tokenCache = { token: null, expires: 0 };
+}
+
 async function login(cfg) {
   if (tokenCache.token && Date.now() < tokenCache.expires) return tokenCache.token;
   if (!cfg.username || !cfg.password) return null;
