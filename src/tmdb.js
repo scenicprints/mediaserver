@@ -5,6 +5,42 @@ const BASE = 'https://api.themoviedb.org/3';
 const POSTER = 'https://image.tmdb.org/t/p/w500';
 const BACKDROP = 'https://image.tmdb.org/t/p/w1280';
 const STILL = 'https://image.tmdb.org/t/p/w300';
+const PROFILE = 'https://image.tmdb.org/t/p/w185';
+
+// Rich detail for a single movie: genres, runtime, cast, director(s), a trailer,
+// and recommendations. One request (append_to_response) so it's cheap.
+export async function movieExtra(apiKey, tmdbId) {
+  if (!apiKey || !tmdbId) return null;
+  const url = new URL(`${BASE}/movie/${tmdbId}`);
+  url.searchParams.set('api_key', apiKey);
+  url.searchParams.set('append_to_response', 'credits,videos,recommendations');
+
+  let res;
+  try { res = await fetch(url); } catch { return null; }
+  if (!res.ok) return null;
+  const d = await res.json();
+
+  const cast = (d.credits?.cast || []).slice(0, 14).map((c) => ({
+    name: c.name, character: c.character, profile: c.profile_path ? PROFILE + c.profile_path : null
+  }));
+  const crew = d.credits?.crew || [];
+  const directors = [...new Set(crew.filter((c) => c.job === 'Director').map((c) => c.name))];
+  const vids = d.videos?.results || [];
+  const trailer = vids.find((v) => v.site === 'YouTube' && v.type === 'Trailer') || vids.find((v) => v.site === 'YouTube');
+  const recommendations = (d.recommendations?.results || []).slice(0, 20).map((r) => ({
+    tmdb_id: r.id, title: r.title, poster: r.poster_path ? POSTER + r.poster_path : null,
+    year: r.release_date ? parseInt(r.release_date.slice(0, 4), 10) : null
+  }));
+
+  return {
+    genres: (d.genres || []).map((g) => g.name),
+    runtime: d.runtime || null,
+    tagline: d.tagline || null,
+    cast, directors,
+    trailer: trailer ? { key: trailer.key, name: trailer.name } : null,
+    recommendations
+  };
+}
 
 export async function searchMovie(apiKey, title, year) {
   if (!apiKey) return null;

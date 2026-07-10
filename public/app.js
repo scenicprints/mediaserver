@@ -212,59 +212,102 @@ async function toggleMovieWatched(it) {
   it.watched = next; if (next) it.resume_position = 0;
 }
 
-// ---------- Movie detail ----------
+// ---------- Movie detail (full page) ----------
+function fmtSize(n) { if (!n) return ''; const gb = n / 1e9; return gb >= 1 ? gb.toFixed(1) + ' GB' : Math.round(n / 1e6) + ' MB'; }
+function fileTags(name) {
+  const s = (name || '').toLowerCase(); const t = [];
+  if (/x ?265|h ?265|hevc/.test(s)) t.push('HEVC'); else if (/x ?264|h ?264|avc/.test(s)) t.push('H.264');
+  if (/blu-?ray|bdrip|brrip/.test(s)) t.push('BluRay'); else if (/web-?dl|webrip|\bweb\b/.test(s)) t.push('WEB'); else if (/hdtv/.test(s)) t.push('HDTV'); else if (/dvd/.test(s)) t.push('DVD');
+  if (/hdr|dolby ?vision|dovi/.test(s)) t.push('HDR');
+  if (/atmos|truehd|\bdts\b/.test(s)) t.push('Surround');
+  return t;
+}
+function versionLabel(f, i) {
+  const parts = [f.quality || 'Version ' + (i + 1)];
+  const sz = fmtSize(f.size); if (sz) parts.push(sz);
+  const tags = fileTags(f.filename); if (tags.length) parts.push(tags.join(' · '));
+  return parts.join('   ·   ');
+}
+function playTrailer(key) {
+  const ov = document.createElement('div');
+  ov.className = 'update-overlay'; ov.style.zIndex = 90;
+  ov.innerHTML = `<div style="width:min(92vw,1040px);aspect-ratio:16/9;position:relative">
+    <iframe src="https://www.youtube.com/embed/${key}?autoplay=1" allow="autoplay; fullscreen" allowfullscreen
+      style="width:100%;height:100%;border:0;border-radius:12px"></iframe></div>`;
+  ov.addEventListener('click', (e) => { if (e.target === ov) ov.remove(); });
+  document.body.appendChild(ov);
+}
+
 async function openDetail(id, autoplay = true) {
-  const m = await (await fetch('/api/movies/' + id)).json();
+  const [m, extra] = await Promise.all([
+    fetch('/api/movies/' + id).then((r) => r.json()),
+    fetch('/api/movies/' + id + '/extra').then((r) => r.json()).catch(() => ({}))
+  ]);
   const files = m.files || [];
   let current = files[0];
   const resume = m.resume_position && m.resume_position > 5 ? m.resume_position : 0;
+  const runtime = extra.runtime ? `${Math.floor(extra.runtime / 60)}h ${extra.runtime % 60}m` : '';
+  const genres = extra.genres || [];
 
-  const versionRow = files.length > 1
-    ? `<div class="versions"><span class="vlabel">Version</span>${files.map((f, i) => `<button class="qbtn${i === 0 ? ' active' : ''}" data-fid="${f.id}">${escapeHtml(f.quality || 'V' + (i + 1))}</button>`).join('')}</div>`
-    : '';
+  const versionControl = files.length > 1
+    ? `<span class="dp-version"><span>Version</span><select class="dp-select" id="ver-select">${files.map((f, i) => `<option value="${f.id}">${escapeHtml(versionLabel(f, i))}</option>`).join('')}</select></span>`
+    : (current ? `<span class="dp-version"><span>${escapeHtml(versionLabel(current, 0))}</span></span>` : '');
 
   detailInner.innerHTML = `
-    <div class="detail-sheet">
-      <div class="detail-hero" style="background-image:url('${m.backdrop || m.poster || ''}')">
-        <video id="player" controls playsinline ${autoplay ? 'autoplay' : ''} poster="${m.backdrop || ''}" src="${current ? '/api/stream/' + current.id : ''}"></video>
-      </div>
-      <div class="detail-body">
-        <h2>${escapeHtml(m.title)}</h2>
-        <div class="detail-meta">
-          ${m.year ? `<span class="chip">${m.year}</span>` : ''}
-          ${m.rating ? `<span class="chip rating">★ ${m.rating.toFixed(1)}</span>` : ''}
-          ${current && current.quality ? `<span class="chip q">${current.quality}</span>` : ''}
+    <div class="dp-splash" id="dp-splash" style="background-image:url('${m.backdrop || m.poster || ''}')">
+      <video id="player" controls playsinline poster="${m.backdrop || ''}" src="${current ? '/api/stream/' + current.id : ''}"></video>
+      <div class="dp-hero">
+        <div class="dp-poster">${m.poster ? `<img src="${m.poster}" alt="">` : ''}</div>
+        <div class="dp-info">
+          <h1 class="dp-title">${escapeHtml(m.title)}</h1>
+          <div class="dp-meta">
+            ${m.year ? `<span class="chip">${m.year}</span>` : ''}
+            ${m.rating ? `<span class="chip rating">★ ${m.rating.toFixed(1)}</span>` : ''}
+            ${runtime ? `<span class="chip">${runtime}</span>` : ''}
+            ${current && current.quality ? `<span class="chip q">${current.quality}</span>` : ''}
+          </div>
+          ${genres.length ? `<div class="dp-genres">${genres.map((g) => `<span class="dp-genre">${escapeHtml(g)}</span>`).join('')}</div>` : ''}
+          <div class="dp-actions">
+            <button class="btn btn-play" id="d-play">▶ ${resume ? 'Resume' : 'Play'}</button>
+            <button class="btn" id="favBtn">${m.favorite ? '★ Favorited' : '☆ Favorite'}</button>
+            <button class="btn" id="watchedBtn">${m.watched ? '✓ Watched' : 'Mark watched'}</button>
+            <button class="btn" id="subBtn">🔍 Subtitles</button>
+            ${versionControl}
+          </div>
         </div>
-        <div class="detail-actions">
-          <button class="btn btn-play" id="d-play">▶ ${resume ? 'Resume' : 'Play'}</button>
-          <button class="btn" id="favBtn">${m.favorite ? '★ Favorited' : '☆ Favorite'}</button>
-          <button class="btn" id="watchedBtn">${m.watched ? '✓ Watched' : 'Mark watched'}</button>
-          <button class="btn" id="subBtn">🔍 Subtitles</button>
-        </div>
-        ${versionRow}
-        <p class="detail-overview">${escapeHtml(m.overview || 'No description yet.')}</p>
-        ${current ? `<p class="filename">${escapeHtml(current.filename)}</p>` : ''}
       </div>
+    </div>
+    <div class="dp-body">
+      ${extra.tagline ? `<p class="dp-tagline">${escapeHtml(extra.tagline)}</p>` : ''}
+      <p class="overview">${escapeHtml(m.overview || 'No description yet.')}</p>
+      ${current ? `<p class="filename">${escapeHtml(current.filename)}</p>` : ''}
+      <div id="dp-sections"></div>
     </div>`;
   openDetailModal();
+  detail.scrollTop = 0;
 
+  const splash = document.getElementById('dp-splash');
   const player = document.getElementById('player');
-  if (resume) player.currentTime = resume;
   attachSubtitle(player, current && current.subtitle ? '/api/subtitle/' + current.id : null);
-  document.getElementById('d-play').addEventListener('click', () => { player.scrollIntoView({ behavior: 'smooth', block: 'center' }); player.play(); });
-
   bindProgress(player, `/api/movies/${m.id}/progress`);
 
-  detailInner.querySelectorAll('.qbtn').forEach((btn) => btn.addEventListener('click', () => {
-    const f = files.find((x) => String(x.id) === btn.dataset.fid);
-    if (!f || (current && current.id === f.id)) return;
-    current = f;
+  function startPlayback() {
+    splash.classList.add('playing');
+    if (resume && player.currentTime < 1) player.currentTime = resume;
+    player.play();
+  }
+  document.getElementById('d-play').addEventListener('click', startPlayback);
+  if (autoplay) startPlayback();
+
+  const sel = document.getElementById('ver-select');
+  if (sel) sel.addEventListener('change', () => {
+    const f = files.find((x) => String(x.id) === sel.value);
+    if (!f) return; current = f;
     const at = player.currentTime, was = !player.paused;
     player.src = '/api/stream/' + f.id;
     player.addEventListener('loadedmetadata', () => { player.currentTime = at; if (was) player.play(); }, { once: true });
     attachSubtitle(player, f.subtitle ? '/api/subtitle/' + f.id : null);
-    detailInner.querySelectorAll('.qbtn').forEach((b) => b.classList.toggle('active', b === btn));
-  }));
+  });
 
   document.getElementById('favBtn').addEventListener('click', async (e) => {
     const { favorite } = await (await fetch(`/api/movies/${m.id}/favorite`, { method: 'POST' })).json();
@@ -276,6 +319,39 @@ async function openDetail(id, autoplay = true) {
     m.watched = next; e.target.textContent = next ? '✓ Watched' : 'Mark watched';
   });
   document.getElementById('subBtn').addEventListener('click', () => { if (current) openSubSearch('movie', current.id, player); });
+
+  // Cast & Crew, Trailers, More Like This
+  const sections = document.getElementById('dp-sections');
+  let html = '';
+  const people = [];
+  (extra.directors || []).forEach((d) => people.push({ name: d, role: 'Director', profile: null }));
+  (extra.cast || []).forEach((c) => people.push({ name: c.name, role: c.character, profile: c.profile }));
+  if (people.length) {
+    html += `<div class="dp-section"><h3>Cast & Crew</h3><div class="dp-hscroll">${people.map((p) => `
+      <div class="person">
+        ${p.profile ? `<img class="pfp" src="${p.profile}" alt="">` : `<div class="pfp ph">${escapeHtml((p.name || '?')[0])}</div>`}
+        <div class="pname">${escapeHtml(p.name)}</div>
+        <div class="prole">${escapeHtml(p.role || '')}</div>
+      </div>`).join('')}</div></div>`;
+  }
+  if (extra.trailer) {
+    html += `<div class="dp-section"><h3>Trailers &amp; Extras</h3><div class="dp-hscroll">
+      <div class="trailer-card" data-key="${extra.trailer.key}">
+        <div class="trailer-thumb" style="background-image:url('https://img.youtube.com/vi/${extra.trailer.key}/hqdefault.jpg')"></div>
+        <div class="trailer-name">${escapeHtml(extra.trailer.name || 'Trailer')}</div>
+      </div></div></div>`;
+  }
+  const recs = (extra.recommendations || []).filter((r) => r.poster);
+  if (recs.length) {
+    html += `<div class="dp-section"><h3>More Like This</h3><div class="dp-hscroll">${recs.map((r) => `
+      <div class="rec${r.localId ? ' owned' : ''}" data-local="${r.localId || ''}">
+        <div class="poster"><img src="${r.poster}" alt="" loading="lazy"></div>
+        <div class="rec-title">${escapeHtml(r.title)}</div>
+      </div>`).join('')}</div></div>`;
+  }
+  sections.innerHTML = html;
+  sections.querySelectorAll('.trailer-card').forEach((c) => c.addEventListener('click', () => playTrailer(c.dataset.key)));
+  sections.querySelectorAll('.rec.owned').forEach((c) => c.addEventListener('click', () => openDetail(+c.dataset.local, false)));
 }
 
 // ---------- Show detail ----------
@@ -284,29 +360,32 @@ async function openShow(id, autoEpId, autoplay = true) {
   const seasons = show.seasons || [];
 
   detailInner.innerHTML = `
-    <div class="detail-sheet">
-      <div class="detail-hero" style="background-image:url('${show.backdrop || show.poster || ''}')">
-        <video id="player" controls playsinline poster="${show.backdrop || ''}"></video>
-      </div>
-      <div class="detail-body">
-        <h2>${escapeHtml(show.title)}</h2>
-        <div class="detail-meta">
-          ${show.year ? `<span class="chip">${show.year}</span>` : ''}
-          ${show.rating ? `<span class="chip rating">★ ${show.rating.toFixed(1)}</span>` : ''}
-          <span class="chip">${show.episodeCount} episode${show.episodeCount === 1 ? '' : 's'}</span>
+    <div class="dp-splash" id="dp-splash" style="background-image:url('${show.backdrop || show.poster || ''}')">
+      <video id="player" controls playsinline poster="${show.backdrop || ''}"></video>
+      <div class="dp-hero">
+        <div class="dp-poster">${show.poster ? `<img src="${show.poster}" alt="">` : ''}</div>
+        <div class="dp-info">
+          <h1 class="dp-title">${escapeHtml(show.title)}</h1>
+          <div class="dp-meta">
+            ${show.year ? `<span class="chip">${show.year}</span>` : ''}
+            ${show.rating ? `<span class="chip rating">★ ${show.rating.toFixed(1)}</span>` : ''}
+            <span class="chip">${show.episodeCount} episode${show.episodeCount === 1 ? '' : 's'}</span>
+          </div>
+          <div class="dp-actions"><button class="btn btn-play" id="s-play">▶ Play</button></div>
         </div>
-        <div class="detail-actions">
-          <button class="btn btn-play" id="s-play">▶ Play</button>
-          <button class="btn hidden" id="ep-sub-btn">🔍 Subtitles</button>
-        </div>
-        <div class="versions hidden" id="ep-versions"></div>
-        <p class="detail-overview">${escapeHtml(show.overview || '')}</p>
-        <div class="season-tabs" id="season-tabs"></div>
-        <div class="episode-list" id="episode-list"></div>
       </div>
+    </div>
+    <div class="dp-body">
+      <p class="overview">${escapeHtml(show.overview || '')}</p>
+      <div class="dp-actions" style="margin:10px 0 2px"><button class="btn hidden" id="ep-sub-btn">🔍 Search subtitles</button></div>
+      <div class="versions hidden" id="ep-versions"></div>
+      <div class="season-tabs" id="season-tabs"></div>
+      <div class="episode-list" id="episode-list"></div>
     </div>`;
   openDetailModal();
+  detail.scrollTop = 0;
 
+  const splash = document.getElementById('dp-splash');
   const seasonTabs = document.getElementById('season-tabs');
   const epList = document.getElementById('episode-list');
   const epVersions = document.getElementById('ep-versions');
@@ -342,6 +421,7 @@ async function openShow(id, autoEpId, autoplay = true) {
     currentEpFile = current;
     epSubBtn.classList.remove('hidden');
 
+    splash.classList.add('playing');
     player.src = '/api/stream/episode/' + current.id;
     player.play();
     player.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -468,7 +548,18 @@ async function openSubSearch(kind, fileId, player) {
   let results;
   try {
     const r = await fetch(`/api/subtitles/search?kind=${kind}&fileId=${fileId}`);
-    if (!r.ok) { subsStatus.textContent = (await r.json().catch(() => ({}))).error || 'Search failed.'; return; }
+    if (!r.ok) {
+      const err = (await r.json().catch(() => ({}))).error || 'Search failed.';
+      subsStatus.textContent = err;
+      if (/configured/i.test(err)) {
+        subsList.innerHTML = '';
+        const btn = document.createElement('button');
+        btn.className = 'btn primary'; btn.textContent = '⚙ Open Settings to add your OpenSubtitles key';
+        btn.addEventListener('click', () => { subsModal.classList.add('hidden'); openSettings(); });
+        subsList.appendChild(btn);
+      }
+      return;
+    }
     results = await r.json();
   } catch { subsStatus.textContent = 'Search failed.'; return; }
   if (!results.length) { subsStatus.textContent = 'No subtitles found for this title.'; return; }

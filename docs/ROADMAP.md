@@ -29,6 +29,11 @@ Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed
   (Continue Watching, Recently Added, Top Rated, …); **hover-preview cards** with quick
   play/watched; **cinematic detail modal** (backdrop hero, meta chips, version picker,
   season/episode browser). `/api/movies` & `/api/shows` now expose backdrop/overview/added_at.
+- **Full cinematic detail page** (movies + shows): full-page takeover with a big backdrop splash
+  (distinct from the poster), genres, runtime, a discreet **version dropdown** showing file
+  differences (quality · size · codec/source), **Cast & Crew** and **Trailers** and **More
+  Like This** (TMDB, recommendations cross-referenced with the local library). New
+  `/api/movies/:id/extra` via `tmdb.movieExtra()`.
 
 ---
 

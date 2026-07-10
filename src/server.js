@@ -6,7 +6,7 @@ import Fastify from 'fastify';
 import fastifyStatic from '@fastify/static';
 import { openDb } from './db.js';
 import { scanLibraries, seedLibraries } from './scan.js';
-import { enrichLibrary, enrichShows, enrichEpisodes } from './tmdb.js';
+import { enrichLibrary, enrichShows, enrichEpisodes, movieExtra } from './tmdb.js';
 import { ext, qualityRank } from './parse.js';
 import { listDrives, listDirs } from './fsbrowse.js';
 import { osEnabled, searchSubtitles, downloadSubtitle, clearAuth } from './opensubtitles.js';
@@ -57,6 +57,19 @@ app.get('/api/movies', async () => {
      GROUP BY m.id
      ORDER BY m.title COLLATE NOCASE`
   ).all();
+});
+
+// Rich TMDB detail (genres, cast, director, trailer, recommendations). Owned
+// recommendations get a localId so the UI can make them playable.
+app.get('/api/movies/:id/extra', async (req, reply) => {
+  const m = db.prepare('SELECT tmdb_id FROM movies WHERE id = ?').get(req.params.id);
+  if (!m) return reply.code(404).send({ error: 'not found' });
+  const extra = await movieExtra(config.tmdbApiKey, m.tmdb_id);
+  if (!extra) return { genres: [], runtime: null, cast: [], directors: [], trailer: null, recommendations: [] };
+  const owned = db.prepare('SELECT id, tmdb_id FROM movies WHERE tmdb_id IS NOT NULL').all();
+  const byTmdb = new Map(owned.map((o) => [o.tmdb_id, o.id]));
+  for (const r of extra.recommendations) r.localId = byTmdb.get(r.tmdb_id) || null;
+  return extra;
 });
 
 app.get('/api/movies/:id', async (req, reply) => {
