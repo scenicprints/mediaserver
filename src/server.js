@@ -48,8 +48,8 @@ app.register(fastifyStatic, {
 
 app.get('/api/movies', async () => {
   return db.prepare(
-    `SELECT m.id, m.title, m.year, m.poster, m.rating, m.watched, m.favorite,
-            m.resume_position, m.duration, m.runtime,
+    `SELECT m.id, m.title, m.year, m.poster, m.backdrop, m.overview, m.rating,
+            m.watched, m.favorite, m.resume_position, m.duration, m.runtime, m.added_at,
             COUNT(f.id) AS versions,
             GROUP_CONCAT(DISTINCT f.quality) AS qualities
      FROM movies m
@@ -140,9 +140,10 @@ app.get('/api/continue', async () => {
 
 app.get('/api/shows', async () => {
   return db.prepare(
-    `SELECT s.id, s.title, s.year, s.poster, s.rating,
+    `SELECT s.id, s.title, s.year, s.poster, s.backdrop, s.overview, s.rating, s.added_at,
             COUNT(e.id) AS episodes,
-            SUM(CASE WHEN e.watched = 0 THEN 1 ELSE 0 END) AS unwatched
+            SUM(CASE WHEN e.watched = 0 THEN 1 ELSE 0 END) AS unwatched,
+            MAX(e.last_played_at) AS last_played_at
      FROM shows s LEFT JOIN episodes e ON e.show_id = s.id
      GROUP BY s.id
      ORDER BY s.title COLLATE NOCASE`

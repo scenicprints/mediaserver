@@ -7,43 +7,47 @@
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
-  <header class="topbar">
-    <h1 class="brand">My Library</h1>
-    <div class="tabs">
-      <button class="tab active" data-tab="movies">Movies</button>
-      <button class="tab" data-tab="tv">TV Shows</button>
+  <nav class="nav" id="nav">
+    <h1 class="brand">MYFLIX</h1>
+    <div class="nav-links">
+      <button class="nav-link active" data-view="home">Home</button>
+      <button class="nav-link" data-view="movies">Movies</button>
+      <button class="nav-link" data-view="tv">TV Shows</button>
     </div>
-    <input id="search" class="search" type="search" placeholder="Search…" />
     <div class="spacer"></div>
-    <button id="update-pill" class="pill-update hidden">⟳ Update available</button>
-    <button id="rescan" class="btn">Rescan</button>
-    <button id="settings-btn" class="btn" title="Settings">⚙ Folders</button>
-  </header>
+    <input id="search" class="nav-search" type="search" placeholder="Search…" />
+    <button id="update-pill" class="pill-update hidden">⟳ Update</button>
+    <button id="settings-btn" class="icon-btn" title="Settings">⚙</button>
+  </nav>
 
-  <section id="continue" class="continue hidden">
-    <h2 class="row-title">Continue Watching</h2>
-    <div id="continue-row" class="continue-row"></div>
+  <section id="hero" class="hero hidden">
+    <div class="hero-bg" id="hero-bg"></div>
+    <div class="hero-content" id="hero-content"></div>
+    <div class="hero-dots" id="hero-dots"></div>
   </section>
 
-  <main id="grid" class="grid"></main>
-  <main id="show-grid" class="grid hidden"></main>
+  <main id="rows" class="rows"></main>
 
-  <!-- Settings: manage which folders are Movies vs TV Shows -->
+  <!-- Cinematic detail -->
+  <div id="detail" class="detail hidden">
+    <button class="detail-close" id="detail-close" aria-label="Close">✕</button>
+    <div id="detail-inner"></div>
+  </div>
+
+  <!-- Settings -->
   <div id="settings" class="modal hidden">
     <div class="sheet">
       <button class="close" data-close="settings" aria-label="Close">✕</button>
       <h2>Library folders</h2>
       <p class="muted">Add the folders your media lives in. Sub-folders are included automatically.</p>
-
       <div class="add-row">
         <button class="btn primary" data-add="movie">＋ Add Movies folder</button>
         <button class="btn primary" data-add="tv">＋ Add TV Shows folder</button>
       </div>
-
       <div id="lib-list" class="lib-list"></div>
 
       <div class="sub-account">
-        <h3 class="sa-title">Subtitle search (OpenSubtitles)</h3>
+        <h3>Subtitle search (OpenSubtitles)</h3>
         <p class="muted" id="os-status">Add your free OpenSubtitles account to enable subtitle search.</p>
         <input id="os-key" class="sa-input" placeholder="API key" autocomplete="off" />
         <input id="os-user" class="sa-input" placeholder="Username" autocomplete="off" />
@@ -53,7 +57,22 @@
 
       <div class="settings-footer">
         <span class="muted" id="version">version …</span>
-        <button class="btn" id="update-btn">⟳ Update app</button>
+        <button class="btn" id="update-btn">⟳ Check for updates</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Folder picker -->
+  <div id="picker" class="modal hidden">
+    <div class="sheet">
+      <button class="close" data-close="picker" aria-label="Close">✕</button>
+      <h2 id="picker-title">Choose a folder</h2>
+      <div class="picker-path" id="picker-path"></div>
+      <div class="picker-list" id="picker-list"></div>
+      <div class="picker-actions">
+        <button class="btn" id="picker-up">↑ Up</button>
+        <div class="spacer" style="flex:1"></div>
+        <button class="btn primary" id="picker-choose">Use this folder</button>
       </div>
     </div>
   </div>
@@ -80,26 +99,6 @@
         <li id="ustep-reload">Reload on the new version</li>
       </ol>
     </div>
-  </div>
-
-  <!-- Folder picker: browse the server's drives/folders -->
-  <div id="picker" class="modal hidden">
-    <div class="sheet">
-      <button class="close" data-close="picker" aria-label="Close">✕</button>
-      <h2 id="picker-title">Choose a folder</h2>
-      <div class="picker-path" id="picker-path"></div>
-      <div class="picker-list" id="picker-list"></div>
-      <div class="picker-actions">
-        <button class="btn" id="picker-up">↑ Up</button>
-        <div class="spacer"></div>
-        <button class="btn primary" id="picker-choose">Use this folder</button>
-      </div>
-    </div>
-  </div>
-
-  <div id="detail" class="detail hidden">
-    <button id="close" class="close" aria-label="Close">✕</button>
-    <div class="detail-inner" id="detail-inner"></div>
   </div>
 
   <script src="/app.js"></script>

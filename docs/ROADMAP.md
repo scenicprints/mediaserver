@@ -24,12 +24,17 @@ Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed
 - **Self-update**: push to GitHub → owner clicks "⟳ Update" in-app → server pulls & restarts,
   with a progress overlay. Auto-checks for updates.
 - Deployed on the Dell; managed from the browser.
+- **"MYFLIX" UI overhaul** (streaming-grade): cinematic dark identity with a gradient accent;
+  fixed nav with Home/Movies/TV views; rotating **hero billboard**; horizontal **content rows**
+  (Continue Watching, Recently Added, Top Rated, …); **hover-preview cards** with quick
+  play/watched; **cinematic detail modal** (backdrop hero, meta chips, version picker,
+  season/episode browser). `/api/movies` & `/api/shows` now expose backdrop/overview/added_at.
 
 ---
 
 ## 🔜 Next
-- **Handoff docs** (this file + `CLAUDE.md`) — ✅ in place; keep updated every session.
-- _Owner has a large backlog to enumerate — capture it here as it comes in._
+- Handoff docs + the MYFLIX UI overhaul are done. **Owner has a large backlog still to
+  enumerate — capture each item in the Backlog below as it comes in.**
 
 ## 📋 Backlog (owner-requested — fill in)
 > The owner said there's "a massive amount of things to get done." List them here with
