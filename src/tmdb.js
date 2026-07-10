@@ -7,6 +7,25 @@ const BACKDROP = 'https://image.tmdb.org/t/p/w1280';
 const STILL = 'https://image.tmdb.org/t/p/w300';
 const PROFILE = 'https://image.tmdb.org/t/p/w185';
 
+// Season list (with poster art) for a show.
+export async function showExtra(apiKey, tmdbId) {
+  if (!apiKey || !tmdbId) return null;
+  const url = new URL(`${BASE}/tv/${tmdbId}`);
+  url.searchParams.set('api_key', apiKey);
+  let res;
+  try { res = await fetch(url); } catch { return null; }
+  if (!res.ok) return null;
+  const d = await res.json();
+  return {
+    seasons: (d.seasons || []).map((s) => ({
+      season: s.season_number,
+      name: s.name,
+      poster: s.poster_path ? POSTER + s.poster_path : null,
+      episodes: s.episode_count
+    }))
+  };
+}
+
 // Rich detail for a single movie: genres, runtime, cast, director(s), a trailer,
 // and recommendations. One request (append_to_response) so it's cheap.
 export async function movieExtra(apiKey, tmdbId) {
@@ -32,13 +51,33 @@ export async function movieExtra(apiKey, tmdbId) {
     year: r.release_date ? parseInt(r.release_date.slice(0, 4), 10) : null
   }));
 
+  // Franchise / collection (e.g. "Star Wars Collection") — all entries, in order.
+  let collection = null;
+  if (d.belongs_to_collection) {
+    try {
+      const cu = new URL(`${BASE}/collection/${d.belongs_to_collection.id}`);
+      cu.searchParams.set('api_key', apiKey);
+      const cr = await fetch(cu);
+      if (cr.ok) {
+        const cd = await cr.json();
+        collection = {
+          name: cd.name,
+          parts: (cd.parts || []).map((p) => ({
+            tmdb_id: p.id, title: p.title, poster: p.poster_path ? POSTER + p.poster_path : null,
+            year: p.release_date ? parseInt(p.release_date.slice(0, 4), 10) : null
+          })).sort((a, b) => (a.year || 0) - (b.year || 0))
+        };
+      }
+    } catch {}
+  }
+
   return {
     genres: (d.genres || []).map((g) => g.name),
     runtime: d.runtime || null,
     tagline: d.tagline || null,
     cast, directors,
     trailer: trailer ? { key: trailer.key, name: trailer.name } : null,
-    recommendations
+    recommendations, collection
   };
 }
 

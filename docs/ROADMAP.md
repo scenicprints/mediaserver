@@ -35,6 +35,14 @@ Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed
   **version/quality**, and **subtitle delay/offset** (fixes audio↔subtitle lag) without
   leaving the movie. **Play from Beginning** vs **Resume**. **Up Next** card + auto-advance
   for episodes. (Best-effort audio-track list where the browser supports it.)
+  **Skip Intro** button (heuristic: appears ~5–90s in, jumps ahead). Bug fixes: control-bar
+  clicks (pointer-events) and Continue-Watching opening details vs auto-playing.
+- **Browse-all grids** — Movies/TV views end with a Plex-style full wrapping grid of the whole
+  library (with a count).
+- **Season cards with artwork** — the show view uses TMDB season poster cards (via
+  `/api/shows/:id/extra`) instead of number pills.
+- **Franchise / collection grouping** — movie detail shows a "… Collection" section (TMDB
+  `belongs_to_collection` → `/collection/{id}`), entries in order, owned ones playable.
 - **Full cinematic detail page** (movies + shows): full-page takeover with a big backdrop splash
   (distinct from the poster), genres, runtime, a discreet **version dropdown** showing file
   differences (quality · size · codec/source), **Cast & Crew** and **Trailers** and **More
@@ -53,29 +61,19 @@ Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed
 >
 > - **<feature>** — what it should do, why, any specifics / acceptance criteria.
 
-- **Skip Intro / Skip Credits** — during playback show a floating **Skip Intro** button
-  early on, and a **Skip Credits → Next Episode** button near the end (TV). Approaches, in
-  order of effort/accuracy:
-  1. **Heuristic default** (no data needed): "Skip Intro" appears ~5–90s in and jumps
-     ~+85s; "Next Episode" button appears in the last ~40s of an episode. Ship this first.
-  2. **Chapter markers** via `ffprobe` — many `.mkv` files tag "Intro"/"Credits" chapters;
-     read them for accurate skip points when present. (Needs ffprobe on the server.)
-  3. **Per-show manual intro/outro ranges** the owner sets once, applied to all episodes.
-  Recommendation: heuristic + ffprobe chapters, manual override later.
+- **Skip Intro — accuracy upgrade** — the heuristic Skip Intro button is done. Upgrade with
+  real skip points: **ffprobe chapter markers** (many `.mkv`s tag "Intro"/"Credits") and/or
+  **per-show manual intro/outro ranges** the owner sets once.
 
 - **Audio track selection** — pick among multiple embedded audio tracks. Browser `<video>`
   can't reliably switch embedded audio tracks, so this needs **ffprobe** (detect tracks) +
   **ffmpeg** to remux/transcode the chosen track server-side. Bigger infra (same ffmpeg work
   as transcoding). Player exposes `audioTracks` as a best-effort stopgap where the browser
   supports it.
-- **Season cards with artwork** — replace the little season-number pills in the show view with
-  **season poster cards** (TMDB season `poster_path`); click a card to open that season.
-- **"Coming Up Next"** — covered by the player's Up Next card (above).
-- **Sequel / franchise detection** — use TMDB `belongs_to_collection` (e.g. "Star Wars
-  Collection") stored at enrich time; show a **Collection** row/section so scattered sequels
-  group together in order.
-- **Browse-all grids** — a Plex-style "All Movies" / "All Shows" full wrapping grid (with
-  sort) so you can see the entire library at once, not just horizontal rows.
+- **Franchise home row (refinement)** — the movie detail already shows a Collection section;
+  a follow-up is a Home "Your Collections" row grouping *owned* movies by franchise (needs
+  collection_id stored at enrich time).
+- **Sort / filter options** on the browse-all grids (by year, rating, recently added, unwatched).
 
 ## 🧭 Major milestone: Apple TV app (decision pending)
 Owner wants a native Apple TV client but has no Mac. Options:

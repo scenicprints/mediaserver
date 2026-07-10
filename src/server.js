@@ -6,7 +6,7 @@ import Fastify from 'fastify';
 import fastifyStatic from '@fastify/static';
 import { openDb } from './db.js';
 import { scanLibraries, seedLibraries } from './scan.js';
-import { enrichLibrary, enrichShows, enrichEpisodes, movieExtra } from './tmdb.js';
+import { enrichLibrary, enrichShows, enrichEpisodes, movieExtra, showExtra } from './tmdb.js';
 import { ext, qualityRank } from './parse.js';
 import { listDrives, listDirs } from './fsbrowse.js';
 import { osEnabled, searchSubtitles, downloadSubtitle, clearAuth } from './opensubtitles.js';
@@ -69,6 +69,7 @@ app.get('/api/movies/:id/extra', async (req, reply) => {
   const owned = db.prepare('SELECT id, tmdb_id FROM movies WHERE tmdb_id IS NOT NULL').all();
   const byTmdb = new Map(owned.map((o) => [o.tmdb_id, o.id]));
   for (const r of extra.recommendations) r.localId = byTmdb.get(r.tmdb_id) || null;
+  if (extra.collection) for (const p of extra.collection.parts) p.localId = byTmdb.get(p.tmdb_id) || null;
   return extra;
 });
 
@@ -161,6 +162,12 @@ app.get('/api/shows', async () => {
      GROUP BY s.id
      ORDER BY s.title COLLATE NOCASE`
   ).all();
+});
+
+app.get('/api/shows/:id/extra', async (req, reply) => {
+  const s = db.prepare('SELECT tmdb_id FROM shows WHERE id = ?').get(req.params.id);
+  if (!s) return reply.code(404).send({ error: 'not found' });
+  return (await showExtra(config.tmdbApiKey, s.tmdb_id)) || { seasons: [] };
 });
 
 app.get('/api/shows/:id', async (req, reply) => {

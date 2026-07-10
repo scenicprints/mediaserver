@@ -57,13 +57,13 @@ function renderView() {
     rows.push(['Recently Added', mediaCards([...movies].sort(byRecent).slice(0, 20), 'movie')]);
     rows.push(['Top Rated', mediaCards([...movies].sort(byRating).slice(0, 20), 'movie')]);
     rows.push(['Favorites', mediaCards(movies.filter((m) => m.favorite), 'movie')]);
-    rows.push(['All Movies', mediaCards([...movies].sort((a, b) => a.title.localeCompare(b.title)), 'movie')]);
+    rows.push(['All Movies', mediaCards([...movies].sort((a, b) => a.title.localeCompare(b.title)), 'movie'), { grid: true }]);
   } else if (currentView === 'tv') {
     setHero(shows.filter((s) => s.backdrop));
     rows.push(['Continue Watching', continueCards(continueItems.filter((c) => c.kind === 'episode'))]);
     rows.push(['Recently Added', mediaCards([...shows].sort(byRecent).slice(0, 20), 'show')]);
     rows.push(['Top Rated', mediaCards([...shows].sort(byRating).slice(0, 20), 'show')]);
-    rows.push(['All Shows', mediaCards([...shows].sort((a, b) => a.title.localeCompare(b.title)), 'show')]);
+    rows.push(['All Shows', mediaCards([...shows].sort((a, b) => a.title.localeCompare(b.title)), 'show'), { grid: true }]);
   } else {
     const mixed = [...movies.filter((m) => m.backdrop), ...shows.filter((s) => s.backdrop)].sort(byRating);
     setHero(mixed);
@@ -121,8 +121,17 @@ function drawHero() {
 // ---------- Rows & cards ----------
 function drawRows(rows) {
   rowsEl.innerHTML = '';
-  for (const [title, cards] of rows) {
+  for (const [title, cards, opts] of rows) {
     if (!cards.length) continue;
+    if (opts && opts.grid) {
+      const sec = document.createElement('section');
+      sec.className = 'row';
+      sec.innerHTML = `<div class="row-head"><h3 class="row-title">${escapeHtml(title)}</h3><span class="row-count">${cards.length}</span></div><div class="lib-grid"></div>`;
+      const grid = sec.querySelector('.lib-grid');
+      cards.forEach((c) => grid.appendChild(c));
+      rowsEl.appendChild(sec);
+      continue;
+    }
     const row = document.createElement('section');
     row.className = 'row';
     row.innerHTML = `<div class="row-head"><h3 class="row-title">${escapeHtml(title)}</h3></div>
@@ -158,8 +167,8 @@ function continueCards(items) {
     const sub = it.kind === 'episode' ? `S${it.season}·E${String(it.episode).padStart(2, '0')}` : 'Movie';
     return cardEl({
       poster: it.poster, title: it.title, sub, badge: '', pct,
-      onOpen: () => openContinue(it),
-      onPlay: () => openContinue(it),
+      onOpen: () => openContinue(it, false),
+      onPlay: () => openContinue(it, true),
       dismiss: () => dismissContinue(it)
     });
   });
@@ -196,9 +205,9 @@ function openMedia(it, kind, autoplay) {
   if (kind === 'show') openShow(it.id, null, autoplay);
   else openDetail(it.id, autoplay);
 }
-function openContinue(it) {
-  if (it.kind === 'movie') openDetail(it.id, true);
-  else openShow(it.show_id, it.id, true);
+function openContinue(it, autoplay) {
+  if (it.kind === 'movie') openDetail(it.id, autoplay);
+  else openShow(it.show_id, autoplay ? it.id : null, autoplay);
 }
 async function dismissContinue(it) {
   const url = it.kind === 'movie' ? `/api/movies/${it.id}/watched` : `/api/episodes/${it.id}/watched`;
@@ -326,6 +335,14 @@ async function openDetail(id, autoplay = true) {
         <div class="prole">${escapeHtml(p.role || '')}</div>
       </div>`).join('')}</div></div>`;
   }
+  if (extra.collection && extra.collection.parts && extra.collection.parts.length > 1) {
+    const parts = extra.collection.parts.filter((p) => p.poster);
+    html += `<div class="dp-section"><h3>${escapeHtml(extra.collection.name)}</h3><div class="dp-hscroll">${parts.map((p) => `
+      <div class="rec${p.localId ? ' owned' : ''}" data-local="${p.localId || ''}">
+        <div class="poster"><img src="${p.poster}" alt="" loading="lazy"></div>
+        <div class="rec-title">${escapeHtml(p.title)}${p.year ? ' (' + p.year + ')' : ''}</div>
+      </div>`).join('')}</div></div>`;
+  }
   if (extra.trailer) {
     html += `<div class="dp-section"><h3>Trailers &amp; Extras</h3><div class="dp-hscroll">
       <div class="trailer-card" data-key="${extra.trailer.key}">
@@ -348,8 +365,13 @@ async function openDetail(id, autoplay = true) {
 
 // ---------- Show detail ----------
 async function openShow(id, autoEpId, autoplay = true) {
-  const show = await (await fetch('/api/shows/' + id)).json();
+  const [show, extra] = await Promise.all([
+    fetch('/api/shows/' + id).then((r) => r.json()),
+    fetch('/api/shows/' + id + '/extra').then((r) => r.json()).catch(() => ({ seasons: [] }))
+  ]);
   const seasons = show.seasons || [];
+  const seasonPoster = {};
+  (extra.seasons || []).forEach((s) => { seasonPoster[s.season] = s.poster; });
 
   detailInner.innerHTML = `
     <div class="dp-splash" style="background-image:url('${show.backdrop || show.poster || ''}')">
@@ -368,13 +390,14 @@ async function openShow(id, autoEpId, autoplay = true) {
     </div>
     <div class="dp-body">
       <p class="overview">${escapeHtml(show.overview || '')}</p>
-      <div class="season-tabs" id="season-tabs"></div>
+      <h3 class="seasons-h">Seasons</h3>
+      <div class="season-cards" id="season-cards"></div>
       <div class="episode-list" id="episode-list"></div>
     </div>`;
   openDetailModal();
   detail.scrollTop = 0;
 
-  const seasonTabs = document.getElementById('season-tabs');
+  const seasonCards = document.getElementById('season-cards');
   const epList = document.getElementById('episode-list');
   const seasonLabel = (s) => (s === 0 ? 'Specials' : 'Season ' + s);
 
@@ -389,7 +412,7 @@ async function openShow(id, autoEpId, autoplay = true) {
   function playByFlatIndex(i) {
     if (i < 0 || i >= flat.length) return;
     const { ep, si } = flat[i];
-    seasonTabs.querySelectorAll('.season-tab').forEach((b, bi) => b.classList.toggle('active', bi === si));
+    seasonCards.querySelectorAll('.season-card').forEach((c, ci) => c.classList.toggle('active', ci === si));
     renderSeason(seasons[si]);
     const ei = seasons[si].episodes.findIndex((e) => e.id === ep.id);
     playEpisode(ep, epList.children[ei], i);
@@ -446,15 +469,19 @@ async function openShow(id, autoEpId, autoplay = true) {
   }
 
   seasons.forEach((s, i) => {
-    const btn = document.createElement('button');
-    btn.className = 'season-tab' + (i === 0 ? ' active' : '');
-    btn.textContent = seasonLabel(s.season);
-    btn.addEventListener('click', () => {
-      seasonTabs.querySelectorAll('.season-tab').forEach((b) => b.classList.remove('active'));
-      btn.classList.add('active');
+    const poster = seasonPoster[s.season] || show.poster || '';
+    const card = document.createElement('div');
+    card.className = 'season-card' + (i === 0 ? ' active' : '');
+    card.innerHTML = `
+      <div class="sc-poster">${poster ? `<img src="${poster}" alt="" loading="lazy">` : `<span class="ph">${escapeHtml(seasonLabel(s.season))}</span>`}</div>
+      <div class="sc-label">${escapeHtml(seasonLabel(s.season))}</div>
+      <div class="sc-count">${s.episodes.length} ep</div>`;
+    card.addEventListener('click', () => {
+      seasonCards.querySelectorAll('.season-card').forEach((c) => c.classList.remove('active'));
+      card.classList.add('active');
       renderSeason(s);
     });
-    seasonTabs.appendChild(btn);
+    seasonCards.appendChild(card);
   });
   if (seasons.length) renderSeason(seasons[0]);
 
@@ -521,6 +548,7 @@ function openPlayer(ctx) {
         <button class="vp-fs" title="Fullscreen">⛶</button>
       </div>
     </div>
+    <button class="vp-skipintro hidden">Skip Intro ⏭</button>
     <div class="vp-menu hidden"></div>
     <div class="vp-upnext hidden"></div>`;
   document.body.appendChild(vp);
@@ -535,6 +563,8 @@ function openPlayer(ctx) {
   const seek = vp.querySelector('.vp-seek');
   const timeEl = vp.querySelector('.vp-time');
   const playBtns = [vp.querySelector('.vp-play'), vp.querySelector('.vp-bigplay')];
+  const skipIntro = vp.querySelector('.vp-skipintro');
+  skipIntro.addEventListener('click', () => { video.currentTime = Math.min((video.duration || 9e9), video.currentTime + 80); skipIntro.classList.add('hidden'); });
 
   function applyOffset() { baseCues.forEach(({ c, s, e }) => { c.startTime = Math.max(0, s + subOffset); c.endTime = Math.max(0, e + subOffset); }); }
   function setSubtitle(url) {
@@ -574,6 +604,7 @@ function openPlayer(ctx) {
     if (!seeking && video.duration) { const p = video.currentTime / video.duration; playedBar.style.width = p * 100 + '%'; seek.value = p * 1000; }
     timeEl.textContent = `${fmtTime(video.currentTime)} / ${fmtTime(video.duration)}`;
     if (video.buffered.length) bufferedBar.style.width = (video.buffered.end(video.buffered.length - 1) / (video.duration || 1)) * 100 + '%';
+    skipIntro.classList.toggle('hidden', !(video.currentTime >= 5 && video.currentTime <= 90));
     maybeUpNext();
     throttledSave();
   });
