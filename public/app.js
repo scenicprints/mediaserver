@@ -58,6 +58,7 @@ function switchTab(tab) {
   if (tab === 'tv' && !shows.length) loadShows();
   else if (tab === 'tv') renderShows(shows);
   else render(movies);
+  renderContinue();
 }
 
 tabs.forEach((t) => t.addEventListener('click', () => switchTab(t.dataset.tab)));
@@ -115,6 +116,8 @@ async function openDetail(id) {
     ${versionRow}
     <div class="row">
       <button class="btn" id="favBtn">${m.favorite ? '★ Favorited' : '☆ Favorite'}</button>
+      <button class="btn" id="watchedBtn">${m.watched ? '✓ Watched' : 'Mark watched'}</button>
+      <button class="btn" id="subBtn">🔍 Subtitles</button>
       ${current ? `<span class="pill" id="fileName">${escapeHtml(current.filename)}</span>` : ''}
     </div>
     <p class="overview">${escapeHtml(m.overview || 'No description yet.')}</p>
@@ -168,6 +171,20 @@ async function openDetail(id) {
     const { favorite } = await r.json();
     e.target.textContent = favorite ? '★ Favorited' : '☆ Favorite';
   });
+
+  document.getElementById('watchedBtn').addEventListener('click', async (e) => {
+    const next = m.watched ? 0 : 1;
+    await fetch(`/api/movies/${m.id}/watched`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ watched: next })
+    });
+    m.watched = next;
+    e.target.textContent = next ? '✓ Watched' : 'Mark watched';
+    loadContinue();
+  });
+
+  document.getElementById('subBtn').addEventListener('click', () => {
+    if (current) openSubSearch('movie', current.id, player);
+  });
 }
 
 async function openShow(id, autoEpId) {
@@ -177,6 +194,7 @@ async function openShow(id, autoEpId) {
   detailInner.innerHTML = `
     <video id="player" controls playsinline poster="${show.backdrop || ''}"></video>
     <div class="row versions hidden" id="ep-versions"></div>
+    <button class="btn hidden" id="ep-sub-btn" style="margin:2px 0 6px">🔍 Search subtitles</button>
     <h2>${escapeHtml(show.title)}</h2>
     <div class="sub">${show.year ?? ''}${show.rating ? ' · ★ ' + show.rating.toFixed(1) : ''} · ${show.episodeCount} episode${show.episodeCount === 1 ? '' : 's'}</div>
     <p class="overview">${escapeHtml(show.overview || '')}</p>
@@ -189,14 +207,33 @@ async function openShow(id, autoEpId) {
   const epList = document.getElementById('episode-list');
   const epVersions = document.getElementById('ep-versions');
   const player = document.getElementById('player');
+  const epSubBtn = document.getElementById('ep-sub-btn');
   const seasonLabel = (s) => (s === 0 ? 'Specials' : 'Season ' + s);
 
-  function playEpisode(ep, row) {
+  let currentEpFile = null;
+  epSubBtn.addEventListener('click', () => { if (currentEpFile) openSubSearch('episode', currentEpFile.id, player); });
+
+  // Flat, ordered list of every episode so we can auto-advance across seasons.
+  const flat = [];
+  seasons.forEach((s, si) => s.episodes.forEach((ep) => flat.push({ ep, si })));
+
+  function playByFlatIndex(i) {
+    if (i < 0 || i >= flat.length) return;
+    const { ep, si } = flat[i];
+    seasonTabs.querySelectorAll('.season-tab').forEach((b, bi) => b.classList.toggle('active', bi === si));
+    renderSeason(seasons[si]);
+    const ei = seasons[si].episodes.findIndex((e) => e.id === ep.id);
+    playEpisode(ep, epList.children[ei], i);
+  }
+
+  function playEpisode(ep, row, flatIndex) {
     epList.querySelectorAll('.episode').forEach((r) => r.classList.remove('playing'));
     if (row) row.classList.add('playing');
     const files = ep.files || [];
     let current = files[0];
     if (!current) return;
+    currentEpFile = current;
+    epSubBtn.classList.remove('hidden');
 
     player.src = '/api/stream/episode/' + current.id;
     player.play();
@@ -216,6 +253,7 @@ async function openShow(id, autoEpId) {
           const f = files.find((x) => String(x.id) === btn.dataset.fid);
           if (!f || current.id === f.id) return;
           current = f;
+          currentEpFile = f;
           const at = player.currentTime;
           const wasPlaying = !player.paused;
           player.src = '/api/stream/episode/' + f.id;
@@ -243,6 +281,11 @@ async function openShow(id, autoEpId) {
     };
     player.ontimeupdate = () => { if (Date.now() - lastSave > 5000) { lastSave = Date.now(); save(); } };
     player.onpause = save;
+    // Binge: when an episode ends, mark it watched and roll into the next one.
+    player.onended = () => {
+      save();
+      if (typeof flatIndex === 'number') playByFlatIndex(flatIndex + 1);
+    };
   }
 
   function renderSeason(seasonObj) {
@@ -257,9 +300,22 @@ async function openShow(id, autoEpId) {
         ${ep.still ? `<img class="ethumb" src="${ep.still}" alt="" loading="lazy">` : ''}
         <span class="num">${ep.season}·${String(ep.episode).padStart(2, '0')}</span>
         <span class="etitle">${escapeHtml(ep.title || 'Episode ' + ep.episode)}${qtext}</span>
-        <span class="badges">${ep.watched ? '<span class="watched">✓ Watched</span>' : (pct > 1 ? '<span class="dot"></span>' : '')}</span>
+        <button class="wtoggle${ep.watched ? ' on' : ''}" title="Mark watched/unwatched">${ep.watched ? '✓' : '○'}</button>
         ${pct > 1 ? `<div class="eprog" style="width:${pct}%"></div>` : ''}`;
-      row.addEventListener('click', () => playEpisode(ep, row));
+      const fi = flat.findIndex((f) => f.ep.id === ep.id);
+      row.addEventListener('click', () => playByFlatIndex(fi));
+      row.querySelector('.wtoggle').addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const next = ep.watched ? 0 : 1;
+        await fetch(`/api/episodes/${ep.id}/watched`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ watched: next })
+        });
+        ep.watched = next;
+        if (next) { ep.resume_position = 0; row.querySelector('.eprog')?.remove(); }
+        e.target.textContent = next ? '✓' : '○';
+        e.target.classList.toggle('on', !!next);
+        loadContinue();
+      });
       epList.appendChild(row);
     }
   }
@@ -279,14 +335,8 @@ async function openShow(id, autoEpId) {
 
   // Continue Watching deep-link: jump to and play a specific episode.
   if (autoEpId) {
-    for (let i = 0; i < seasons.length; i++) {
-      const idx = seasons[i].episodes.findIndex((e) => e.id === autoEpId);
-      if (idx < 0) continue;
-      seasonTabs.querySelectorAll('.season-tab').forEach((b, bi) => b.classList.toggle('active', bi === i));
-      renderSeason(seasons[i]);
-      playEpisode(seasons[i].episodes[idx], epList.children[idx]);
-      break;
-    }
+    const fi = flat.findIndex((f) => f.ep.id === autoEpId);
+    if (fi >= 0) playByFlatIndex(fi);
   }
 }
 
@@ -532,9 +582,17 @@ function qualityLabel(f, i) {
 }
 
 // ---- Continue Watching ----
+let continueItems = [];
+
 async function loadContinue() {
-  let items = [];
-  try { items = await (await fetch('/api/continue')).json(); } catch { return; }
+  try { continueItems = await (await fetch('/api/continue')).json(); } catch { continueItems = []; }
+  renderContinue();
+}
+
+function renderContinue() {
+  // Show movies on the Movies tab, episodes on the TV tab.
+  const want = currentTab === 'tv' ? 'episode' : 'movie';
+  const items = continueItems.filter((it) => it.kind === want);
   if (!items.length) { continueEl.classList.add('hidden'); return; }
   continueEl.classList.remove('hidden');
   continueRow.innerHTML = '';
@@ -546,12 +604,20 @@ async function loadContinue() {
     card.innerHTML = `
       <div class="poster">
         ${it.poster ? `<img src="${it.poster}" alt="" loading="lazy">` : `<span class="ph">${escapeHtml(it.title)}</span>`}
+        <button class="cw-done" title="Mark watched">✓</button>
         <div class="progress"><i style="width:${pct}%"></i></div>
       </div>
       <div class="meta"><div class="t">${escapeHtml(it.title)}</div><div class="y">${sub}</div></div>`;
     card.addEventListener('click', () => {
       if (it.kind === 'movie') openDetail(it.id);
       else openShow(it.show_id, it.id);
+    });
+    card.querySelector('.cw-done').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const url = it.kind === 'movie' ? `/api/movies/${it.id}/watched` : `/api/episodes/${it.id}/watched`;
+      await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ watched: 1 }) });
+      continueItems = continueItems.filter((x) => !(x.kind === it.kind && x.id === it.id));
+      renderContinue();
     });
     continueRow.appendChild(card);
   }
@@ -567,6 +633,57 @@ function attachSubtitle(player, url) {
   track.srclang = 'en';
   track.src = url;
   player.appendChild(track);
+}
+
+// ---- Subtitle search (OpenSubtitles) ----
+const subsModal = document.getElementById('subs');
+const subsList = document.getElementById('subs-list');
+const subsStatus = document.getElementById('subs-status');
+subsModal.addEventListener('click', (e) => { if (e.target === subsModal) subsModal.classList.add('hidden'); });
+
+async function openSubSearch(kind, fileId, player) {
+  subsModal.classList.remove('hidden');
+  subsStatus.textContent = 'Searching OpenSubtitles…';
+  subsList.innerHTML = '';
+  let results;
+  try {
+    const r = await fetch(`/api/subtitles/search?kind=${kind}&fileId=${fileId}`);
+    if (!r.ok) { const e = await r.json().catch(() => ({})); subsStatus.textContent = e.error || 'Search failed.'; return; }
+    results = await r.json();
+  } catch { subsStatus.textContent = 'Search failed.'; return; }
+
+  if (!results.length) { subsStatus.textContent = 'No subtitles found for this title.'; return; }
+  subsStatus.textContent = `${results.length} result${results.length === 1 ? '' : 's'} — pick one to download:`;
+  for (const s of results) {
+    const item = document.createElement('div');
+    item.className = 'lib-item';
+    item.innerHTML = `
+      <span class="tag movie">${(s.language || 'en').toUpperCase()}</span>
+      <span class="path">${escapeHtml(s.release)} · ↓${s.downloads}${s.hearing_impaired ? ' · HI' : ''}</span>
+      <button class="btn primary">Get</button>`;
+    item.querySelector('button').addEventListener('click', async (e) => {
+      e.target.textContent = 'Downloading…';
+      e.target.disabled = true;
+      let dr;
+      try {
+        dr = await fetch('/api/subtitles/download', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ kind, fileId, file_id: s.file_id })
+        });
+      } catch { e.target.textContent = 'Failed'; e.target.disabled = false; return; }
+      if (dr.ok) {
+        e.target.textContent = '✓ Added';
+        subsStatus.textContent = 'Subtitle added — use the CC button in the player to turn it on.';
+        if (player) attachSubtitle(player, kind === 'episode' ? '/api/subtitle/episode/' + fileId : '/api/subtitle/' + fileId);
+      } else {
+        const er = await dr.json().catch(() => ({}));
+        e.target.textContent = 'Failed';
+        e.target.disabled = false;
+        subsStatus.textContent = er.error || 'Download failed.';
+      }
+    });
+    subsList.appendChild(item);
+  }
 }
 
 function escapeHtml(s) {

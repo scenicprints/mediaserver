@@ -9,6 +9,7 @@ import { scanLibraries, seedLibraries } from './scan.js';
 import { enrichLibrary, enrichShows, enrichEpisodes } from './tmdb.js';
 import { ext, qualityRank } from './parse.js';
 import { listDrives, listDirs } from './fsbrowse.js';
+import { osEnabled, searchSubtitles, downloadSubtitle } from './opensubtitles.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -88,6 +89,17 @@ app.post('/api/movies/:id/favorite', async (req, reply) => {
   const next = row.favorite ? 0 : 1;
   db.prepare('UPDATE movies SET favorite = ? WHERE id = ?').run(next, req.params.id);
   return { favorite: next };
+});
+
+app.post('/api/movies/:id/watched', async (req, reply) => {
+  const { watched } = req.body || {};
+  const row = db.prepare('SELECT watched FROM movies WHERE id = ?').get(req.params.id);
+  if (!row) return reply.code(404).send({ error: 'not found' });
+  const next = watched != null ? (watched ? 1 : 0) : (row.watched ? 0 : 1);
+  db.prepare(
+    'UPDATE movies SET watched = ?, resume_position = CASE WHEN ? = 1 THEN 0 ELSE resume_position END WHERE id = ?'
+  ).run(next, next, req.params.id);
+  return { watched: next };
 });
 
 // Trigger a rescan of all libraries on demand.
@@ -177,6 +189,17 @@ app.post('/api/episodes/:id/progress', async (req, reply) => {
      watched = COALESCE(?, watched), last_played_at = ? WHERE id = ?`
   ).run(position ?? 0, duration ?? null, watched ?? null, Date.now(), req.params.id);
   return { ok: true };
+});
+
+app.post('/api/episodes/:id/watched', async (req, reply) => {
+  const { watched } = req.body || {};
+  const row = db.prepare('SELECT watched FROM episodes WHERE id = ?').get(req.params.id);
+  if (!row) return reply.code(404).send({ error: 'not found' });
+  const next = watched != null ? (watched ? 1 : 0) : (row.watched ? 0 : 1);
+  db.prepare(
+    'UPDATE episodes SET watched = ?, resume_position = CASE WHEN ? = 1 THEN 0 ELSE resume_position END WHERE id = ?'
+  ).run(next, next, req.params.id);
+  return { watched: next };
 });
 
 // ---- Self-update (git pull + restart, driven by run.bat) ----
@@ -366,6 +389,47 @@ app.get('/api/subtitle/episode/:fileId', (req, reply) => {
 app.get('/api/subtitle/:fileId', (req, reply) => {
   const row = db.prepare('SELECT path FROM movie_files WHERE id = ?').get(req.params.fileId);
   return serveSubtitle(row && row.path, reply);
+});
+
+// ---- Subtitle search + download (OpenSubtitles) ----
+
+app.get('/api/subtitles/search', async (req, reply) => {
+  if (!osEnabled(config.openSubtitles)) return reply.code(400).send({ error: 'OpenSubtitles is not configured yet — add your API key.' });
+  const { kind, fileId } = req.query;
+  let params;
+  if (kind === 'episode') {
+    const f = db.prepare('SELECT episode_id FROM episode_files WHERE id = ?').get(fileId);
+    if (!f) return reply.code(404).send({ error: 'not found' });
+    const ep = db.prepare(
+      'SELECT e.season, e.episode, s.title AS showTitle FROM episodes e JOIN shows s ON s.id = e.show_id WHERE e.id = ?'
+    ).get(f.episode_id);
+    params = { query: ep.showTitle, season: ep.season, episode: ep.episode };
+  } else {
+    const f = db.prepare('SELECT movie_id FROM movie_files WHERE id = ?').get(fileId);
+    if (!f) return reply.code(404).send({ error: 'not found' });
+    const mv = db.prepare('SELECT title, tmdb_id FROM movies WHERE id = ?').get(f.movie_id);
+    params = mv.tmdb_id ? { tmdb_id: mv.tmdb_id } : { query: mv.title };
+  }
+  return searchSubtitles(config.openSubtitles, params);
+});
+
+app.post('/api/subtitles/download', async (req, reply) => {
+  if (!osEnabled(config.openSubtitles)) return reply.code(400).send({ error: 'OpenSubtitles is not configured.' });
+  const { kind, fileId, file_id } = req.body || {};
+  const table = kind === 'episode' ? 'episode_files' : 'movie_files';
+  const row = db.prepare(`SELECT path FROM ${table} WHERE id = ?`).get(fileId);
+  if (!row) return reply.code(404).send({ error: 'not found' });
+
+  const srt = await downloadSubtitle(config.openSubtitles, file_id);
+  if (!srt) return reply.code(502).send({ error: 'Download failed — check your login, or you may have hit the daily limit.' });
+
+  const dest = row.path.replace(/\.[^.]+$/, '') + '.en.srt';
+  try {
+    fs.writeFileSync(dest, srt, 'utf8');
+  } catch (e) {
+    return reply.code(500).send({ error: 'Could not save subtitle: ' + e.message });
+  }
+  return { ok: true };
 });
 
 // ---- Boot ----

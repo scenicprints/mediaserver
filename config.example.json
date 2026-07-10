@@ -3,5 +3,6 @@
   "host": "::",
   "dbPath": "./data/library.db",
   "mediaRoots": [],
-  "tmdbApiKey": ""
+  "tmdbApiKey": "",
+  "openSubtitles": { "apiKey": "", "username": "", "password": "" }
 }

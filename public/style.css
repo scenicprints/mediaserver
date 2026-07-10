@@ -71,6 +71,23 @@ body {
 .continue-row { display: flex; gap: 16px; overflow-x: auto; padding-bottom: 8px; }
 .cw-card { flex: 0 0 140px; cursor: pointer; transition: transform 0.12s ease; }
 .cw-card:hover { transform: translateY(-4px); }
+.cw-card .poster { position: relative; }
+.cw-done {
+  position: absolute; top: 8px; right: 8px; z-index: 2;
+  width: 30px; height: 30px; border-radius: 50%;
+  background: rgba(10, 12, 18, 0.82); border: 1px solid rgba(255, 255, 255, 0.18);
+  color: #fff; cursor: pointer; opacity: 0; transition: opacity 0.12s ease;
+}
+.cw-card:hover .cw-done { opacity: 1; }
+.cw-done:hover { background: #2e7d4f; border-color: #2e7d4f; }
+
+.wtoggle {
+  background: none; border: 1px solid #2a2e3c; color: var(--muted);
+  width: 26px; height: 26px; border-radius: 50%; cursor: pointer; flex: 0 0 auto;
+  font-size: 13px; line-height: 1;
+}
+.wtoggle:hover { border-color: var(--accent); color: var(--text); }
+.wtoggle.on { background: #2e7d4f; border-color: #2e7d4f; color: #fff; }
 
 .search {
   background: var(--panel);
