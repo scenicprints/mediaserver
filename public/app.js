@@ -162,12 +162,19 @@ const pickerState = { path: null, parent: null, type: 'movie' };
 
 settingsBtn.addEventListener('click', openSettings);
 
+let currentVersion = null;
+
 async function loadVersion() {
   try {
-    const v = await (await fetch('/api/version', { cache: 'no-store' })).json();
-    versionEl.textContent = 'version ' + v.sha;
+    const r = await fetch('/api/version', { cache: 'no-store' });
+    if (!r.ok) throw new Error('no version endpoint');
+    const v = await r.json();
+    currentVersion = v.sha && v.sha !== 'unknown' ? v.sha : null;
+    versionEl.textContent = currentVersion
+      ? `version ${v.sha}${v.date ? ' · ' + v.date : ''}`
+      : 'updates not enabled yet';
   } catch {
-    versionEl.textContent = '';
+    versionEl.textContent = 'version unavailable';
   }
 }
 
@@ -187,23 +194,58 @@ async function checkForUpdate() {
   }
 }
 
+const updateOverlay = document.getElementById('update-overlay');
+const updateStage = document.getElementById('update-stage');
+const updateDetail = document.getElementById('update-detail');
+const uSteps = {
+  fetch: document.getElementById('ustep-fetch'),
+  restart: document.getElementById('ustep-restart'),
+  reload: document.getElementById('ustep-reload')
+};
+
+function setStage(title, detail) {
+  updateStage.textContent = title;
+  updateDetail.textContent = detail || '';
+}
+
+function markStep(activeKey, doneKeys) {
+  Object.values(uSteps).forEach((el) => el.classList.remove('active'));
+  doneKeys.forEach((k) => uSteps[k].classList.add('done'));
+  if (activeKey) uSteps[activeKey].classList.add('active');
+}
+
 async function runUpdate() {
   if (!confirm('Update to the latest version?\n\nThe server will restart and this page will reload automatically.')) return;
-  updatePill.textContent = 'Updating…';
-  updateBtn.textContent = 'Updating…';
-  updateBtn.disabled = true;
+
+  Object.values(uSteps).forEach((el) => el.classList.remove('active', 'done'));
+  updateOverlay.classList.remove('hidden');
+  setStage('Starting update…', 'Asking the server to fetch the latest code');
+  markStep('fetch', []);
+
   try { await fetch('/api/update', { method: 'POST' }); } catch {}
-  // Wait for the server to come back after its restart, then reload.
+  setStage('Applying update…', 'Pulling changes and restarting the server');
+  markStep('restart', ['fetch']);
+
   const start = Date.now();
   const poll = async () => {
     try {
       const r = await fetch('/api/version', { cache: 'no-store' });
-      if (r.ok) { location.reload(); return; }
+      if (r.ok) {
+        const v = await r.json();
+        markStep('reload', ['fetch', 'restart']);
+        setStage('Updated! 🎉', `Now on version ${v.sha || ''} — reloading…`);
+        setTimeout(() => location.reload(), 1400);
+        return;
+      }
     } catch {}
-    if (Date.now() - start < 90000) setTimeout(poll, 2000);
-    else { updatePill.textContent = 'Restart manually'; updateBtn.textContent = 'Restart manually'; updateBtn.disabled = false; }
+    if (Date.now() - start < 90000) {
+      setStage('Restarting server…', 'Waiting for it to come back online');
+      setTimeout(poll, 1500);
+    } else {
+      setStage('This is taking longer than expected', 'The server may need a manual restart on the Dell.');
+    }
   };
-  setTimeout(poll, 3500);
+  setTimeout(poll, 3000);
 }
 
 updateBtn.addEventListener('click', runUpdate);

@@ -102,15 +102,20 @@ app.post('/api/enrich', async () => {
 
 // ---- Self-update (git pull + restart, driven by run.bat) ----
 
-function gitSha() {
+function gitInfo() {
   try {
-    return execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: ROOT }).toString().trim();
+    const sha = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: ROOT }).toString().trim();
+    let date = null;
+    try {
+      date = execFileSync('git', ['log', '-1', '--format=%cs'], { cwd: ROOT }).toString().trim();
+    } catch {}
+    return { sha, date, tracked: true };
   } catch {
-    return 'unknown';
+    return { sha: 'unknown', date: null, tracked: false };
   }
 }
 
-app.get('/api/version', async () => ({ sha: gitSha() }));
+app.get('/api/version', async () => gitInfo());
 
 // Ask GitHub whether newer code exists (fetches, then compares local vs remote).
 app.get('/api/check-update', async () => {

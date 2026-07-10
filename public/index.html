@@ -39,6 +39,20 @@
     </div>
   </div>
 
+  <!-- Update progress overlay -->
+  <div id="update-overlay" class="update-overlay hidden">
+    <div class="update-card">
+      <div class="spinner"></div>
+      <h2 id="update-stage">Updating…</h2>
+      <p id="update-detail" class="muted"></p>
+      <ol class="update-steps">
+        <li id="ustep-fetch">Fetch the latest code</li>
+        <li id="ustep-restart">Restart the server</li>
+        <li id="ustep-reload">Reload on the new version</li>
+      </ol>
+    </div>
+  </div>
+
   <!-- Folder picker: browse the server's drives/folders -->
   <div id="picker" class="modal hidden">
     <div class="sheet">
