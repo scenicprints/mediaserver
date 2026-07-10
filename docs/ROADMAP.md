@@ -42,7 +42,15 @@ Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed
 >
 > - **<feature>** — what it should do, why, any specifics / acceptance criteria.
 
-- _(awaiting the owner's list)_
+- **Skip Intro / Skip Credits** — during playback show a floating **Skip Intro** button
+  early on, and a **Skip Credits → Next Episode** button near the end (TV). Approaches, in
+  order of effort/accuracy:
+  1. **Heuristic default** (no data needed): "Skip Intro" appears ~5–90s in and jumps
+     ~+85s; "Next Episode" button appears in the last ~40s of an episode. Ship this first.
+  2. **Chapter markers** via `ffprobe` — many `.mkv` files tag "Intro"/"Credits" chapters;
+     read them for accurate skip points when present. (Needs ffprobe on the server.)
+  3. **Per-show manual intro/outro ranges** the owner sets once, applied to all episodes.
+  Recommendation: heuristic + ffprobe chapters, manual override later.
 
 ## 🧭 Major milestone: Apple TV app (decision pending)
 Owner wants a native Apple TV client but has no Mac. Options:
