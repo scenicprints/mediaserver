@@ -112,6 +112,25 @@ function gitSha() {
 
 app.get('/api/version', async () => ({ sha: gitSha() }));
 
+// Ask GitHub whether newer code exists (fetches, then compares local vs remote).
+app.get('/api/check-update', async () => {
+  try {
+    execFileSync('git', ['fetch', 'origin', 'main', '--quiet'], { cwd: ROOT, timeout: 15000 });
+    const current = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT }).toString().trim();
+    const latest = execFileSync('git', ['rev-parse', 'origin/main'], { cwd: ROOT }).toString().trim();
+    let behind = 0;
+    try {
+      behind = parseInt(
+        execFileSync('git', ['rev-list', '--count', 'HEAD..origin/main'], { cwd: ROOT }).toString().trim(),
+        10
+      ) || 0;
+    } catch {}
+    return { current: current.slice(0, 7), latest: latest.slice(0, 7), updateAvailable: current !== latest, behind };
+  } catch {
+    return { updateAvailable: false, error: 'offline or updates not enabled' };
+  }
+});
+
 // Exit with code 42 so the run.bat wrapper pulls the latest code and relaunches.
 app.post('/api/update', async (req, reply) => {
   reply.send({ ok: true, restarting: true });

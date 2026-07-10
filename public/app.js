@@ -156,6 +156,7 @@ const pickerUp = document.getElementById('picker-up');
 const pickerChoose = document.getElementById('picker-choose');
 const versionEl = document.getElementById('version');
 const updateBtn = document.getElementById('update-btn');
+const updatePill = document.getElementById('update-pill');
 
 const pickerState = { path: null, parent: null, type: 'movie' };
 
@@ -170,8 +171,25 @@ async function loadVersion() {
   }
 }
 
-updateBtn.addEventListener('click', async () => {
+// Ask the server if a newer version exists on GitHub; surface it if so.
+async function checkForUpdate() {
+  try {
+    const r = await (await fetch('/api/check-update', { cache: 'no-store' })).json();
+    if (r.updateAvailable) {
+      updatePill.classList.remove('hidden');
+      updateBtn.textContent = '⟳ Update available';
+    } else {
+      updatePill.classList.add('hidden');
+      updateBtn.textContent = '⟳ Up to date';
+    }
+  } catch {
+    // offline or updates not enabled — leave the UI quiet
+  }
+}
+
+async function runUpdate() {
   if (!confirm('Update to the latest version?\n\nThe server will restart and this page will reload automatically.')) return;
+  updatePill.textContent = 'Updating…';
   updateBtn.textContent = 'Updating…';
   updateBtn.disabled = true;
   try { await fetch('/api/update', { method: 'POST' }); } catch {}
@@ -183,10 +201,17 @@ updateBtn.addEventListener('click', async () => {
       if (r.ok) { location.reload(); return; }
     } catch {}
     if (Date.now() - start < 90000) setTimeout(poll, 2000);
-    else { updateBtn.textContent = 'Restart manually'; updateBtn.disabled = false; }
+    else { updatePill.textContent = 'Restart manually'; updateBtn.textContent = 'Restart manually'; updateBtn.disabled = false; }
   };
   setTimeout(poll, 3500);
-});
+}
+
+updateBtn.addEventListener('click', runUpdate);
+updatePill.addEventListener('click', runUpdate);
+
+// Check on load, then every 30 minutes.
+checkForUpdate();
+setInterval(checkForUpdate, 30 * 60 * 1000);
 
 document.querySelectorAll('[data-close]').forEach((b) =>
   b.addEventListener('click', () => document.getElementById(b.dataset.close).classList.add('hidden'))
@@ -201,6 +226,7 @@ document.querySelectorAll('[data-add]').forEach((b) =>
 async function openSettings() {
   settingsModal.classList.remove('hidden');
   loadVersion();
+  checkForUpdate();
   await renderLibraries();
 }
 
