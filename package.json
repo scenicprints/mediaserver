@@ -1,0 +1,15 @@
+{
+  "name": "mediaserver",
+  "version": "0.1.0",
+  "description": "A personal media server, built for me.",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "scan": "node src/scan-cli.js",
+    "enrich": "node src/enrich-cli.js"
+  },
+  "dependencies": {
+    "@fastify/static": "^8.0.0",
+    "fastify": "^5.0.0"
+  }
+}

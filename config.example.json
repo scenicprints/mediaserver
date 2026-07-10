@@ -1,0 +1,7 @@
+{
+  "port": 8096,
+  "host": "::",
+  "dbPath": "./data/library.db",
+  "mediaRoots": [],
+  "tmdbApiKey": ""
+}
