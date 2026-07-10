@@ -33,6 +33,37 @@ body {
 .brand { font-size: 18px; font-weight: 700; margin: 0; letter-spacing: 0.2px; }
 .spacer { flex: 1; }
 
+.tabs { display: flex; gap: 4px; background: var(--panel); padding: 4px; border-radius: 999px; border: 1px solid #2a2e3c; }
+.tab {
+  background: none; border: none; color: var(--muted); cursor: pointer;
+  padding: 7px 16px; border-radius: 999px; font-size: 14px; font-weight: 600;
+}
+.tab:hover { color: var(--text); }
+.tab.active { background: var(--accent); color: #fff; }
+
+/* Show detail: seasons + episodes */
+.season-tabs { display: flex; gap: 8px; flex-wrap: wrap; margin: 18px 0 10px; }
+.season-tab {
+  background: var(--panel-2); border: 1px solid #2a2e3c; color: var(--text);
+  border-radius: 999px; padding: 6px 14px; font-size: 13px; font-weight: 600; cursor: pointer;
+}
+.season-tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+.episode-list { display: flex; flex-direction: column; gap: 6px; }
+.episode {
+  display: flex; align-items: center; gap: 14px;
+  background: var(--panel-2); border: 1px solid #2a2e3c;
+  border-radius: 10px; padding: 11px 14px; cursor: pointer; position: relative;
+}
+.episode:hover { border-color: var(--accent); }
+.episode.playing { border-color: var(--accent); background: #1c2333; }
+.episode .num { color: var(--muted); font-variant-numeric: tabular-nums; font-weight: 700; min-width: 40px; }
+.episode .etitle { flex: 1; font-size: 14px; }
+.episode .badges { display: flex; gap: 6px; align-items: center; }
+.episode .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+.episode .watched { color: #2e9d63; font-size: 13px; }
+.episode .eprog { position: absolute; left: 0; bottom: 0; height: 3px; background: var(--accent); border-radius: 0 0 0 10px; }
+
 .search {
   background: var(--panel);
   border: 1px solid #2a2e3c;

@@ -6,7 +6,7 @@ import Fastify from 'fastify';
 import fastifyStatic from '@fastify/static';
 import { openDb } from './db.js';
 import { scanLibraries, seedLibraries } from './scan.js';
-import { enrichLibrary } from './tmdb.js';
+import { enrichLibrary, enrichShows } from './tmdb.js';
 import { ext, qualityRank } from './parse.js';
 import { listDrives, listDirs } from './fsbrowse.js';
 
@@ -94,10 +94,59 @@ app.post('/api/scan', async () => {
   return scanLibraries(db);
 });
 
-// Trigger TMDB enrichment on demand.
+// Trigger TMDB enrichment on demand (movies + shows).
 app.post('/api/enrich', async () => {
-  const updated = await enrichLibrary(db, config.tmdbApiKey);
-  return { updated };
+  const movies = await enrichLibrary(db, config.tmdbApiKey);
+  const shows = await enrichShows(db, config.tmdbApiKey);
+  return { movies, shows };
+});
+
+// ---- TV shows ----
+
+app.get('/api/shows', async () => {
+  return db.prepare(
+    `SELECT s.id, s.title, s.year, s.poster, s.rating,
+            COUNT(e.id) AS episodes,
+            SUM(CASE WHEN e.watched = 0 THEN 1 ELSE 0 END) AS unwatched
+     FROM shows s LEFT JOIN episodes e ON e.show_id = s.id
+     GROUP BY s.id
+     ORDER BY s.title COLLATE NOCASE`
+  ).all();
+});
+
+app.get('/api/shows/:id', async (req, reply) => {
+  const show = db.prepare('SELECT * FROM shows WHERE id = ?').get(req.params.id);
+  if (!show) return reply.code(404).send({ error: 'not found' });
+  const eps = db.prepare(
+    `SELECT id, season, episode, title, overview, still, quality, duration,
+            resume_position, watched, filename
+     FROM episodes WHERE show_id = ?
+     ORDER BY season, episode`
+  ).all(req.params.id);
+
+  // Group episodes into seasons.
+  const seasonsMap = new Map();
+  for (const e of eps) {
+    const s = e.season ?? 0;
+    if (!seasonsMap.has(s)) seasonsMap.set(s, []);
+    seasonsMap.get(s).push(e);
+  }
+  show.seasons = [...seasonsMap.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([season, episodes]) => ({ season, episodes }));
+  show.episodeCount = eps.length;
+  return show;
+});
+
+app.post('/api/episodes/:id/progress', async (req, reply) => {
+  const { position, duration, watched } = req.body || {};
+  const row = db.prepare('SELECT id FROM episodes WHERE id = ?').get(req.params.id);
+  if (!row) return reply.code(404).send({ error: 'not found' });
+  db.prepare(
+    `UPDATE episodes SET resume_position = ?, duration = COALESCE(?, duration),
+     watched = COALESCE(?, watched), last_played_at = ? WHERE id = ?`
+  ).run(position ?? 0, duration ?? null, watched ?? null, Date.now(), req.params.id);
+  return { ok: true };
 });
 
 // ---- Self-update (git pull + restart, driven by run.bat) ----
@@ -159,10 +208,12 @@ app.post('/api/libraries', async (req, reply) => {
   db.prepare('INSERT OR IGNORE INTO libraries (path, type, name) VALUES (?, ?, ?)').run(p, type, name);
   const lib = db.prepare('SELECT * FROM libraries WHERE path = ?').get(p);
 
-  // Scan straight away so new movies show up, then enrich in the background.
+  // Scan straight away so new titles show up, then enrich in the background.
   const scan = scanLibraries(db);
   if (config.tmdbApiKey) {
-    enrichLibrary(db, config.tmdbApiKey).catch((e) => console.error('Enrichment error:', e.message));
+    enrichLibrary(db, config.tmdbApiKey)
+      .then(() => enrichShows(db, config.tmdbApiKey))
+      .catch((e) => console.error('Enrichment error:', e.message));
   }
   return { library: lib, scan };
 });
@@ -171,8 +222,10 @@ app.delete('/api/libraries/:id', async (req, reply) => {
   const lib = db.prepare('SELECT * FROM libraries WHERE id = ?').get(req.params.id);
   if (!lib) return reply.code(404).send({ error: 'not found' });
   db.prepare('DELETE FROM movie_files WHERE library_id = ?').run(req.params.id);
-  // Drop movies that no longer have any files.
+  db.prepare('DELETE FROM episodes WHERE library_id = ?').run(req.params.id);
+  // Drop movies/shows that no longer have any files.
   db.prepare('DELETE FROM movies WHERE id NOT IN (SELECT DISTINCT movie_id FROM movie_files)').run();
+  db.prepare('DELETE FROM shows WHERE id NOT IN (SELECT DISTINCT show_id FROM episodes)').run();
   db.prepare('DELETE FROM libraries WHERE id = ?').run(req.params.id);
   return { ok: true };
 });
@@ -191,20 +244,16 @@ app.get('/api/fs', async (req, reply) => {
 
 // ---- Video streaming with HTTP Range support (seeking) ----
 
-// Stream a specific file (version) by its file id.
-app.get('/api/stream/:fileId', (req, reply) => {
-  const row = db.prepare('SELECT path FROM movie_files WHERE id = ?').get(req.params.fileId);
-  if (!row) return reply.code(404).send({ error: 'not found' });
-
+function streamFile(filePath, req, reply) {
   let stat;
   try {
-    stat = fs.statSync(row.path);
+    stat = fs.statSync(filePath);
   } catch {
     return reply.code(404).send({ error: 'file missing on disk' });
   }
 
   const total = stat.size;
-  const type = MIME[ext(row.path)] || 'application/octet-stream';
+  const type = MIME[ext(filePath)] || 'application/octet-stream';
   const range = req.headers.range;
 
   if (range) {
@@ -222,14 +271,28 @@ app.get('/api/stream/:fileId', (req, reply) => {
       .header('Accept-Ranges', 'bytes')
       .header('Content-Length', end - start + 1)
       .header('Content-Type', type);
-    return reply.send(fs.createReadStream(row.path, { start, end }));
+    return reply.send(fs.createReadStream(filePath, { start, end }));
   }
 
   reply
     .header('Content-Length', total)
     .header('Accept-Ranges', 'bytes')
     .header('Content-Type', type);
-  return reply.send(fs.createReadStream(row.path));
+  return reply.send(fs.createReadStream(filePath));
+}
+
+// Stream a specific movie file (version) by its file id.
+app.get('/api/stream/:fileId', (req, reply) => {
+  const row = db.prepare('SELECT path FROM movie_files WHERE id = ?').get(req.params.fileId);
+  if (!row) return reply.code(404).send({ error: 'not found' });
+  return streamFile(row.path, req, reply);
+});
+
+// Stream a TV episode by its id.
+app.get('/api/stream/episode/:id', (req, reply) => {
+  const row = db.prepare('SELECT path FROM episodes WHERE id = ?').get(req.params.id);
+  if (!row) return reply.code(404).send({ error: 'not found' });
+  return streamFile(row.path, req, reply);
 });
 
 // ---- Boot ----
@@ -245,9 +308,12 @@ async function start() {
   console.log(`Scan complete: ${scan.added} new file(s), ${scan.seen} video file(s) seen.`);
 
   if (config.tmdbApiKey) {
-    enrichLibrary(db, config.tmdbApiKey, { log: (m) => console.log(m) })
-      .then((n) => console.log(`TMDB enrichment: ${n} movie(s) updated.`))
-      .catch((e) => console.error('Enrichment error:', e.message));
+    (async () => {
+      const m = await enrichLibrary(db, config.tmdbApiKey, { log: (x) => console.log(x) });
+      console.log(`TMDB enrichment: ${m} movie(s) updated.`);
+      const s = await enrichShows(db, config.tmdbApiKey, { log: (x) => console.log(x) });
+      console.log(`TMDB enrichment: ${s} show(s) updated.`);
+    })().catch((e) => console.error('Enrichment error:', e.message));
   }
 
   await app.listen({ port: config.port, host: config.host });

@@ -33,6 +33,58 @@ export async function searchMovie(apiKey, title, year) {
   };
 }
 
+export async function searchTv(apiKey, title) {
+  if (!apiKey) return null;
+  const url = new URL(BASE + '/search/tv');
+  url.searchParams.set('api_key', apiKey);
+  url.searchParams.set('query', title);
+
+  let res;
+  try {
+    res = await fetch(url);
+  } catch {
+    return null;
+  }
+  if (!res.ok) return null;
+
+  const data = await res.json();
+  const hit = data.results && data.results[0];
+  if (!hit) return null;
+
+  const year = hit.first_air_date ? parseInt(hit.first_air_date.slice(0, 4), 10) : null;
+  return {
+    tmdb_id: hit.id,
+    overview: hit.overview || null,
+    poster: hit.poster_path ? POSTER + hit.poster_path : null,
+    backdrop: hit.backdrop_path ? BACKDROP + hit.backdrop_path : null,
+    rating: typeof hit.vote_average === 'number' ? hit.vote_average : null,
+    year
+  };
+}
+
+// Enrich every show that hasn't been matched yet. Returns count updated.
+export async function enrichShows(db, apiKey, { log = () => {} } = {}) {
+  if (!apiKey) return 0;
+  const rows = db.prepare('SELECT id, title FROM shows WHERE tmdb_id IS NULL').all();
+  const update = db.prepare(
+    `UPDATE shows SET tmdb_id = ?, overview = ?, poster = ?, backdrop = ?, rating = ?, year = ? WHERE id = ?`
+  );
+
+  let updated = 0;
+  for (const row of rows) {
+    const meta = await searchTv(apiKey, row.title);
+    if (meta) {
+      update.run(meta.tmdb_id, meta.overview, meta.poster, meta.backdrop, meta.rating, meta.year, row.id);
+      updated++;
+      log(`  matched show: ${row.title}`);
+    } else {
+      log(`  no match (show): ${row.title}`);
+    }
+    await new Promise((r) => setTimeout(r, 120));
+  }
+  return updated;
+}
+
 // Enrich every movie that hasn't been matched yet. Returns count updated.
 export async function enrichLibrary(db, apiKey, { log = () => {} } = {}) {
   if (!apiKey) {

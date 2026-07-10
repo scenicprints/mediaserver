@@ -73,5 +73,46 @@ export function openDb(dbPath) {
   `);
   db.exec('CREATE INDEX IF NOT EXISTS idx_files_movie ON movie_files(movie_id);');
 
+  // A logical TV show: one poster/metadata, keyed by normalized name.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS shows (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_key  TEXT UNIQUE NOT NULL,
+      title      TEXT NOT NULL,
+      year       INTEGER,
+      tmdb_id    INTEGER,
+      overview   TEXT,
+      poster     TEXT,
+      backdrop   TEXT,
+      rating     REAL,
+      library_id INTEGER,
+      added_at   INTEGER
+    );
+  `);
+
+  // A single episode file belonging to a show.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS episodes (
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      show_id        INTEGER NOT NULL,
+      library_id     INTEGER,
+      path           TEXT UNIQUE NOT NULL,
+      filename       TEXT NOT NULL,
+      season         INTEGER,
+      episode        INTEGER,
+      title          TEXT,
+      overview       TEXT,
+      still          TEXT,
+      quality        TEXT,
+      size           INTEGER,
+      duration       REAL,
+      resume_position REAL DEFAULT 0,
+      watched        INTEGER DEFAULT 0,
+      last_played_at INTEGER,
+      added_at       INTEGER
+    );
+  `);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_episodes_show ON episodes(show_id);');
+
   return db;
 }

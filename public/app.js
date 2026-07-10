@@ -4,14 +4,61 @@ const detail = document.getElementById('detail');
 const detailInner = document.getElementById('detail-inner');
 const closeBtn = document.getElementById('close');
 const rescanBtn = document.getElementById('rescan');
+const showGrid = document.getElementById('show-grid');
+const tabs = document.querySelectorAll('.tab');
 
 let movies = [];
+let shows = [];
+let currentTab = 'movies';
 
 async function load() {
   const res = await fetch('/api/movies');
   movies = await res.json();
   render(movies);
 }
+
+async function loadShows() {
+  const res = await fetch('/api/shows');
+  shows = await res.json();
+  renderShows(shows);
+}
+
+function renderShows(list) {
+  showGrid.innerHTML = '';
+  if (!list.length) {
+    showGrid.innerHTML = '<p style="color:#9aa0b4;padding:20px">No TV shows yet — open ⚙ Folders and add a TV Shows folder.</p>';
+    return;
+  }
+  for (const s of list) {
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.innerHTML = `
+      <div class="poster">
+        ${s.poster ? `<img src="${s.poster}" alt="" loading="lazy">` : `<span class="ph">${escapeHtml(s.title)}</span>`}
+        ${s.unwatched > 0 ? `<div class="badge">${s.unwatched} new</div>` : ''}
+      </div>
+      <div class="meta">
+        <div class="t">${escapeHtml(s.title)}</div>
+        <div class="y">${s.episodes} episode${s.episodes === 1 ? '' : 's'}</div>
+      </div>`;
+    card.addEventListener('click', () => openShow(s.id));
+    showGrid.appendChild(card);
+  }
+}
+
+function switchTab(tab) {
+  currentTab = tab;
+  tabs.forEach((t) => t.classList.toggle('active', t.dataset.tab === tab));
+  grid.classList.toggle('hidden', tab !== 'movies');
+  showGrid.classList.toggle('hidden', tab !== 'tv');
+  search.value = '';
+  search.placeholder = tab === 'tv' ? 'Search shows…' : 'Search movies…';
+  if (tab === 'tv' && !shows.length) loadShows();
+  else if (tab === 'tv') renderShows(shows);
+  else render(movies);
+}
+
+tabs.forEach((t) => t.addEventListener('click', () => switchTab(t.dataset.tab)));
 
 function render(list) {
   grid.innerHTML = '';
@@ -119,12 +166,87 @@ async function openDetail(id) {
   });
 }
 
+async function openShow(id) {
+  const show = await (await fetch('/api/shows/' + id)).json();
+  const seasons = show.seasons || [];
+
+  detailInner.innerHTML = `
+    <video id="player" controls playsinline poster="${show.backdrop || ''}"></video>
+    <h2>${escapeHtml(show.title)}</h2>
+    <div class="sub">${show.year ?? ''}${show.rating ? ' · ★ ' + show.rating.toFixed(1) : ''} · ${show.episodeCount} episode${show.episodeCount === 1 ? '' : 's'}</div>
+    <p class="overview">${escapeHtml(show.overview || '')}</p>
+    <div class="season-tabs" id="season-tabs"></div>
+    <div class="episode-list" id="episode-list"></div>
+  `;
+  detail.classList.remove('hidden');
+
+  const seasonTabs = document.getElementById('season-tabs');
+  const epList = document.getElementById('episode-list');
+  const player = document.getElementById('player');
+  const seasonLabel = (s) => (s === 0 ? 'Specials' : 'Season ' + s);
+
+  function playEpisode(ep, row) {
+    epList.querySelectorAll('.episode').forEach((r) => r.classList.remove('playing'));
+    if (row) row.classList.add('playing');
+    player.src = '/api/stream/episode/' + ep.id;
+    player.play();
+    player.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+    const resume = ep.resume_position && ep.resume_position > 5 ? ep.resume_position : 0;
+    if (resume) player.addEventListener('loadedmetadata', () => { player.currentTime = resume; }, { once: true });
+
+    let lastSave = 0;
+    const save = () => {
+      fetch(`/api/episodes/${ep.id}/progress`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          position: player.currentTime,
+          duration: player.duration || null,
+          watched: player.duration && player.currentTime / player.duration > 0.92 ? 1 : null
+        })
+      });
+    };
+    player.ontimeupdate = () => { if (Date.now() - lastSave > 5000) { lastSave = Date.now(); save(); } };
+    player.onpause = save;
+  }
+
+  function renderSeason(seasonObj) {
+    epList.innerHTML = '';
+    for (const ep of seasonObj.episodes) {
+      const row = document.createElement('div');
+      row.className = 'episode';
+      const pct = ep.duration && ep.resume_position ? Math.min(100, (ep.resume_position / ep.duration) * 100) : 0;
+      row.innerHTML = `
+        <span class="num">${ep.season}·${String(ep.episode).padStart(2, '0')}</span>
+        <span class="etitle">${escapeHtml(ep.title || 'Episode ' + ep.episode)}${ep.quality ? ' · ' + ep.quality : ''}</span>
+        <span class="badges">${ep.watched ? '<span class="watched">✓ Watched</span>' : (pct > 1 ? '<span class="dot"></span>' : '')}</span>
+        ${pct > 1 ? `<div class="eprog" style="width:${pct}%"></div>` : ''}`;
+      row.addEventListener('click', () => playEpisode(ep, row));
+      epList.appendChild(row);
+    }
+  }
+
+  seasons.forEach((s, i) => {
+    const btn = document.createElement('button');
+    btn.className = 'season-tab' + (i === 0 ? ' active' : '');
+    btn.textContent = seasonLabel(s.season);
+    btn.addEventListener('click', () => {
+      seasonTabs.querySelectorAll('.season-tab').forEach((b) => b.classList.remove('active'));
+      btn.classList.add('active');
+      renderSeason(s);
+    });
+    seasonTabs.appendChild(btn);
+  });
+  if (seasons.length) renderSeason(seasons[0]);
+}
+
 function closeDetail() {
   const player = document.getElementById('player');
   if (player) player.pause();
   detail.classList.add('hidden');
   detailInner.innerHTML = '';
-  load(); // refresh progress bars
+  if (currentTab === 'movies') load(); else loadShows();
 }
 
 closeBtn.addEventListener('click', closeDetail);
@@ -133,7 +255,11 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDetai
 
 search.addEventListener('input', () => {
   const q = search.value.trim().toLowerCase();
-  render(q ? movies.filter((m) => m.title.toLowerCase().includes(q)) : movies);
+  if (currentTab === 'movies') {
+    render(q ? movies.filter((m) => m.title.toLowerCase().includes(q)) : movies);
+  } else {
+    renderShows(q ? shows.filter((s) => s.title.toLowerCase().includes(q)) : shows);
+  }
 });
 
 rescanBtn.addEventListener('click', async () => {
@@ -142,6 +268,7 @@ rescanBtn.addEventListener('click', async () => {
   await fetch('/api/enrich', { method: 'POST' });
   rescanBtn.textContent = 'Rescan';
   load();
+  loadShows();
 });
 
 // ---- Settings: manage Movies / TV Shows folders ----

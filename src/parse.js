@@ -67,3 +67,60 @@ export function groupKey(title, year) {
   const t = title.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
   return `${t}|${year || ''}`;
 }
+
+// ---- TV parsing ----
+
+function stripExt(name) {
+  const dot = name.lastIndexOf('.');
+  return dot > 0 ? name.slice(0, dot) : name;
+}
+
+function tidy(s) {
+  return s.replace(/[._]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+// Season number hinted by a folder like "Season 2" or "S02".
+function seasonFromSegments(segs) {
+  for (const s of segs) {
+    const m = s.match(/season\s*(\d{1,2})/i) || s.match(/^s(\d{1,2})$/i);
+    if (m) return parseInt(m[1], 10);
+  }
+  return null;
+}
+
+// Extract season/episode from a filename (and optional folder segments).
+// Handles S01E02, 1x02, and "Exx" / bare "NN" inside a Season folder.
+export function parseEpisode(filename, segs = []) {
+  const base = stripExt(filename);
+  let m = base.match(/S(\d{1,2})[\s._-]*E(\d{1,3})/i);
+  if (m) return { season: +m[1], episode: +m[2] };
+
+  m = base.match(/(?:^|[^0-9])(\d{1,2})x(\d{1,3})(?:[^0-9]|$)/i);
+  if (m) return { season: +m[1], episode: +m[2] };
+
+  const seasonHint = seasonFromSegments(segs);
+  if (seasonHint != null) {
+    m = base.match(/(?:^|[^a-z0-9])E(\d{1,3})(?:[^0-9]|$)/i);
+    if (m) return { season: seasonHint, episode: +m[1] };
+    m = base.match(/^(\d{1,3})(?:\D|$)/); // "02 - Title"
+    if (m) return { season: seasonHint, episode: +m[1] };
+  }
+  return null;
+}
+
+// Show name derived from a filename when there's no show folder.
+export function showFromFilename(filename) {
+  const base = stripExt(filename);
+  const m = base.match(/^(.*?)[\s._-]*(?:S\d{1,2}[\s._-]*E\d{1,3}|\d{1,2}x\d{1,3})/i);
+  return tidy(m ? m[1] : base);
+}
+
+// Clean a show folder name for display (drops a trailing "(2015)").
+export function cleanShowName(name) {
+  return tidy(name.replace(/\(\d{4}\)\s*$/, ''));
+}
+
+// A show's grouping key: normalized name, no year.
+export function showKey(name) {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}

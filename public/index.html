@@ -9,7 +9,11 @@
 <body>
   <header class="topbar">
     <h1 class="brand">My Library</h1>
-    <input id="search" class="search" type="search" placeholder="Search movies…" />
+    <div class="tabs">
+      <button class="tab active" data-tab="movies">Movies</button>
+      <button class="tab" data-tab="tv">TV Shows</button>
+    </div>
+    <input id="search" class="search" type="search" placeholder="Search…" />
     <div class="spacer"></div>
     <button id="update-pill" class="pill-update hidden">⟳ Update available</button>
     <button id="rescan" class="btn">Rescan</button>
@@ -17,6 +21,7 @@
   </header>
 
   <main id="grid" class="grid"></main>
+  <main id="show-grid" class="grid hidden"></main>
 
   <!-- Settings: manage which folders are Movies vs TV Shows -->
   <div id="settings" class="modal hidden">
