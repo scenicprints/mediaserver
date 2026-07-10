@@ -1,0 +1,60 @@
+# Roadmap
+
+Living task list for the media server. Keep this current — it's the single source of truth
+for "what's next." See [../CLAUDE.md](../CLAUDE.md) for how the project works.
+
+Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed)
+
+---
+
+## ✅ Done
+- Node/Fastify/`node:sqlite` server; vanilla web UI; dark theme.
+- In-app **library manager**: browse the server's drives, add folders as **Movies** or
+  **TV Shows**, remove them — no config editing.
+- **Movies**: recursive scan, filename parsing (handles `(500) Days of Summer`, scene names),
+  TMDB metadata (poster/overview/rating), HTTP-range streaming (seeking).
+- **Movie versions**: multiple qualities of one film → one card + a quality picker (4K/1080p/…).
+- **TV shows**: season/episode parsing (`S01E01`, `1x02`, Season folders), TMDB show +
+  per-episode metadata (real titles, overviews, still thumbnails), season tabs + episode list.
+- **Episode versions**: same episode in multiple qualities → one row + a quality picker.
+- **Continue Watching** row (tab-aware: movies on Movies tab, episodes on TV tab).
+- **Watched/unwatched** tracking + manual toggles; auto-play next episode (binge).
+- **Subtitles**: local `.srt` sidecars served as WebVTT; **OpenSubtitles search + download**
+  (in-app account settings).
+- **Self-update**: push to GitHub → owner clicks "⟳ Update" in-app → server pulls & restarts,
+  with a progress overlay. Auto-checks for updates.
+- Deployed on the Dell; managed from the browser.
+
+---
+
+## 🔜 Next
+- **Handoff docs** (this file + `CLAUDE.md`) — ✅ in place; keep updated every session.
+- _Owner has a large backlog to enumerate — capture it here as it comes in._
+
+## 📋 Backlog (owner-requested — fill in)
+> The owner said there's "a massive amount of things to get done." List them here with
+> enough detail for a cold agent to act. Template:
+>
+> - **<feature>** — what it should do, why, any specifics / acceptance criteria.
+
+- _(awaiting the owner's list)_
+
+## 🧭 Major milestone: Apple TV app (decision pending)
+Owner wants a native Apple TV client but has no Mac. Options:
+- **Cloud-build → TestFlight** (Codemagic/GitHub Actions macOS runners → TestFlight → install
+  on the Apple TV). Needs **$99/yr** Apple Developer. True native app, no Mac at home; slow
+  build/iteration.
+- **Pivot to Fire TV / Nvidia Shield** — sideload a custom app or load a web app; no Apple fee,
+  fast iteration.
+Not started. Needs the owner's call on the path.
+
+## 💡 Ideas (not yet requested — for discussion)
+- Sort/filter (year, rating, recently added, unwatched) and a "Recently Added" row.
+- Global search across movies + TV at once.
+- Hardware transcoding via the 1050 Ti's NVENC for codecs a browser/client can't play,
+  and for lower-bandwidth streams.
+- Remote access outside the home (e.g. Tailscale) — private, no port-forwarding.
+- Auto-start on boot pointed at `run.bat` (so updates keep working after reboots).
+- Music and/or photo libraries.
+- Multiple users / simple profiles.
+- Better fuzzy matching + a manual "fix match" UI for titles TMDB gets wrong.
