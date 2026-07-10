@@ -29,6 +29,12 @@ Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed
   (Continue Watching, Recently Added, Top Rated, …); **hover-preview cards** with quick
   play/watched; **cinematic detail modal** (backdrop hero, meta chips, version picker,
   season/episode browser). `/api/movies` & `/api/shows` now expose backdrop/overview/added_at.
+- **Custom theater video player**: full-screen takeover on Play (not a box over the splash);
+  custom scrub/seek, skip ±10s, volume, playback speed, fullscreen, auto-hiding chrome,
+  keyboard shortcuts, click-to-pause. In-player settings menu switches **subtitle source**,
+  **version/quality**, and **subtitle delay/offset** (fixes audio↔subtitle lag) without
+  leaving the movie. **Play from Beginning** vs **Resume**. **Up Next** card + auto-advance
+  for episodes. (Best-effort audio-track list where the browser supports it.)
 - **Full cinematic detail page** (movies + shows): full-page takeover with a big backdrop splash
   (distinct from the poster), genres, runtime, a discreet **version dropdown** showing file
   differences (quality · size · codec/source), **Cast & Crew** and **Trailers** and **More
@@ -56,6 +62,20 @@ Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed
      read them for accurate skip points when present. (Needs ffprobe on the server.)
   3. **Per-show manual intro/outro ranges** the owner sets once, applied to all episodes.
   Recommendation: heuristic + ffprobe chapters, manual override later.
+
+- **Audio track selection** — pick among multiple embedded audio tracks. Browser `<video>`
+  can't reliably switch embedded audio tracks, so this needs **ffprobe** (detect tracks) +
+  **ffmpeg** to remux/transcode the chosen track server-side. Bigger infra (same ffmpeg work
+  as transcoding). Player exposes `audioTracks` as a best-effort stopgap where the browser
+  supports it.
+- **Season cards with artwork** — replace the little season-number pills in the show view with
+  **season poster cards** (TMDB season `poster_path`); click a card to open that season.
+- **"Coming Up Next"** — covered by the player's Up Next card (above).
+- **Sequel / franchise detection** — use TMDB `belongs_to_collection` (e.g. "Star Wars
+  Collection") stored at enrich time; show a **Collection** row/section so scattered sequels
+  group together in order.
+- **Browse-all grids** — a Plex-style "All Movies" / "All Shows" full wrapping grid (with
+  sort) so you can see the entire library at once, not just horizontal rows.
 
 ## 🧭 Major milestone: Apple TV app (decision pending)
 Owner wants a native Apple TV client but has no Mac. Options:
