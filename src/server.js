@@ -6,7 +6,7 @@ import Fastify from 'fastify';
 import fastifyStatic from '@fastify/static';
 import { openDb } from './db.js';
 import { scanLibraries, seedLibraries } from './scan.js';
-import { enrichLibrary, enrichShows } from './tmdb.js';
+import { enrichLibrary, enrichShows, enrichEpisodes } from './tmdb.js';
 import { ext, qualityRank } from './parse.js';
 import { listDrives, listDirs } from './fsbrowse.js';
 
@@ -61,10 +61,11 @@ app.get('/api/movies/:id', async (req, reply) => {
   const row = db.prepare('SELECT * FROM movies WHERE id = ?').get(req.params.id);
   if (!row) return reply.code(404).send({ error: 'not found' });
   const files = db.prepare(
-    'SELECT id, quality, filename, size FROM movie_files WHERE movie_id = ?'
+    'SELECT id, quality, filename, size, path FROM movie_files WHERE movie_id = ?'
   ).all(req.params.id);
   // Highest quality first, so it's the default version to play.
   files.sort((a, b) => qualityRank(b.quality) - qualityRank(a.quality));
+  for (const f of files) { f.subtitle = !!findSubtitle(f.path); delete f.path; }
   row.files = files;
   return row;
 });
@@ -98,7 +99,28 @@ app.post('/api/scan', async () => {
 app.post('/api/enrich', async () => {
   const movies = await enrichLibrary(db, config.tmdbApiKey);
   const shows = await enrichShows(db, config.tmdbApiKey);
-  return { movies, shows };
+  const episodes = await enrichEpisodes(db, config.tmdbApiKey);
+  return { movies, shows, episodes };
+});
+
+// ---- Continue Watching (in-progress movies + episodes) ----
+
+app.get('/api/continue', async () => {
+  const movies = db.prepare(
+    `SELECT 'movie' AS kind, id, title, poster, resume_position, duration, last_played_at,
+            NULL AS show_id, NULL AS season, NULL AS episode
+     FROM movies WHERE resume_position > 30 AND watched = 0 AND last_played_at IS NOT NULL`
+  ).all();
+  const episodes = db.prepare(
+    `SELECT 'episode' AS kind, e.id, COALESCE(e.title, 'Episode ' || e.episode) AS title,
+            s.poster AS poster, e.resume_position, e.duration, e.last_played_at,
+            s.id AS show_id, e.season, e.episode
+     FROM episodes e JOIN shows s ON s.id = e.show_id
+     WHERE e.resume_position > 30 AND e.watched = 0 AND e.last_played_at IS NOT NULL`
+  ).all();
+  return [...movies, ...episodes]
+    .sort((a, b) => (b.last_played_at || 0) - (a.last_played_at || 0))
+    .slice(0, 20);
 });
 
 // ---- TV shows ----
@@ -118,11 +140,19 @@ app.get('/api/shows/:id', async (req, reply) => {
   const show = db.prepare('SELECT * FROM shows WHERE id = ?').get(req.params.id);
   if (!show) return reply.code(404).send({ error: 'not found' });
   const eps = db.prepare(
-    `SELECT id, season, episode, title, overview, still, quality, duration,
-            resume_position, watched, filename
+    `SELECT id, season, episode, title, overview, still, duration, resume_position, watched
      FROM episodes WHERE show_id = ?
      ORDER BY season, episode`
   ).all(req.params.id);
+
+  // Attach the file versions (qualities) of each episode, best first.
+  const filesStmt = db.prepare('SELECT id, quality, filename, size, path FROM episode_files WHERE episode_id = ?');
+  for (const e of eps) {
+    const files = filesStmt.all(e.id);
+    files.sort((a, b) => qualityRank(b.quality) - qualityRank(a.quality));
+    for (const f of files) { f.subtitle = !!findSubtitle(f.path); delete f.path; }
+    e.files = files;
+  }
 
   // Group episodes into seasons.
   const seasonsMap = new Map();
@@ -213,6 +243,7 @@ app.post('/api/libraries', async (req, reply) => {
   if (config.tmdbApiKey) {
     enrichLibrary(db, config.tmdbApiKey)
       .then(() => enrichShows(db, config.tmdbApiKey))
+      .then(() => enrichEpisodes(db, config.tmdbApiKey))
       .catch((e) => console.error('Enrichment error:', e.message));
   }
   return { library: lib, scan };
@@ -222,9 +253,10 @@ app.delete('/api/libraries/:id', async (req, reply) => {
   const lib = db.prepare('SELECT * FROM libraries WHERE id = ?').get(req.params.id);
   if (!lib) return reply.code(404).send({ error: 'not found' });
   db.prepare('DELETE FROM movie_files WHERE library_id = ?').run(req.params.id);
-  db.prepare('DELETE FROM episodes WHERE library_id = ?').run(req.params.id);
-  // Drop movies/shows that no longer have any files.
+  db.prepare('DELETE FROM episode_files WHERE library_id = ?').run(req.params.id);
+  // Drop movies/episodes/shows that no longer have any files.
   db.prepare('DELETE FROM movies WHERE id NOT IN (SELECT DISTINCT movie_id FROM movie_files)').run();
+  db.prepare('DELETE FROM episodes WHERE id NOT IN (SELECT DISTINCT episode_id FROM episode_files)').run();
   db.prepare('DELETE FROM shows WHERE id NOT IN (SELECT DISTINCT show_id FROM episodes)').run();
   db.prepare('DELETE FROM libraries WHERE id = ?').run(req.params.id);
   return { ok: true };
@@ -288,11 +320,52 @@ app.get('/api/stream/:fileId', (req, reply) => {
   return streamFile(row.path, req, reply);
 });
 
-// Stream a TV episode by its id.
-app.get('/api/stream/episode/:id', (req, reply) => {
-  const row = db.prepare('SELECT path FROM episodes WHERE id = ?').get(req.params.id);
+// Stream a specific TV episode file (version) by its file id.
+app.get('/api/stream/episode/:fileId', (req, reply) => {
+  const row = db.prepare('SELECT path FROM episode_files WHERE id = ?').get(req.params.fileId);
   if (!row) return reply.code(404).send({ error: 'not found' });
   return streamFile(row.path, req, reply);
+});
+
+// ---- Subtitles: .srt sidecars served as WebVTT ----
+
+function findSubtitle(videoPath) {
+  const dir = path.dirname(videoPath);
+  const stem = path.basename(videoPath, path.extname(videoPath)).toLowerCase();
+  let files;
+  try { files = fs.readdirSync(dir); } catch { return null; }
+  const hit = files.find(
+    (f) => f.toLowerCase().endsWith('.srt') &&
+      path.basename(f, path.extname(f)).toLowerCase().startsWith(stem)
+  );
+  return hit ? path.join(dir, hit) : null;
+}
+
+function srtToVtt(srt) {
+  const body = srt
+    .replace(/^﻿/, '')
+    .replace(/\r+/g, '')
+    .replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2');
+  return 'WEBVTT\n\n' + body;
+}
+
+function serveSubtitle(videoPath, reply) {
+  const sub = videoPath && findSubtitle(videoPath);
+  if (!sub) return reply.code(404).send({ error: 'no subtitle' });
+  let srt;
+  try { srt = fs.readFileSync(sub, 'utf8'); } catch { return reply.code(404).send({ error: 'unreadable' }); }
+  reply.header('Content-Type', 'text/vtt; charset=utf-8');
+  return reply.send(srtToVtt(srt));
+}
+
+app.get('/api/subtitle/episode/:fileId', (req, reply) => {
+  const row = db.prepare('SELECT path FROM episode_files WHERE id = ?').get(req.params.fileId);
+  return serveSubtitle(row && row.path, reply);
+});
+
+app.get('/api/subtitle/:fileId', (req, reply) => {
+  const row = db.prepare('SELECT path FROM movie_files WHERE id = ?').get(req.params.fileId);
+  return serveSubtitle(row && row.path, reply);
 });
 
 // ---- Boot ----
@@ -313,6 +386,8 @@ async function start() {
       console.log(`TMDB enrichment: ${m} movie(s) updated.`);
       const s = await enrichShows(db, config.tmdbApiKey, { log: (x) => console.log(x) });
       console.log(`TMDB enrichment: ${s} show(s) updated.`);
+      const ep = await enrichEpisodes(db, config.tmdbApiKey, { log: (x) => console.log(x) });
+      console.log(`TMDB enrichment: ${ep} episode(s) updated.`);
     })().catch((e) => console.error('Enrichment error:', e.message));
   }
 

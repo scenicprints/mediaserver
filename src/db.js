@@ -90,29 +90,47 @@ export function openDb(dbPath) {
     );
   `);
 
-  // A single episode file belonging to a show.
+  // Migrate the old file-per-row episodes table (had a 'path' column) to the
+  // new logical episode + episode_files layout. Rebuilt from disk on rescan.
+  if (tableCols(db, 'episodes').includes('path')) {
+    db.exec('DROP TABLE IF EXISTS episodes;');
+    db.exec('DROP TABLE IF EXISTS episode_files;');
+  }
+
+  // A logical episode: one per show+season+episode, holding metadata + watch state.
   db.exec(`
     CREATE TABLE IF NOT EXISTS episodes (
       id             INTEGER PRIMARY KEY AUTOINCREMENT,
       show_id        INTEGER NOT NULL,
-      library_id     INTEGER,
-      path           TEXT UNIQUE NOT NULL,
-      filename       TEXT NOT NULL,
       season         INTEGER,
       episode        INTEGER,
       title          TEXT,
       overview       TEXT,
       still          TEXT,
-      quality        TEXT,
-      size           INTEGER,
       duration       REAL,
       resume_position REAL DEFAULT 0,
       watched        INTEGER DEFAULT 0,
       last_played_at INTEGER,
-      added_at       INTEGER
+      added_at       INTEGER,
+      UNIQUE(show_id, season, episode)
     );
   `);
   db.exec('CREATE INDEX IF NOT EXISTS idx_episodes_show ON episodes(show_id);');
+
+  // A physical episode file (a specific quality/version).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS episode_files (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      episode_id INTEGER NOT NULL,
+      library_id INTEGER,
+      path       TEXT UNIQUE NOT NULL,
+      filename   TEXT NOT NULL,
+      quality    TEXT,
+      size       INTEGER,
+      added_at   INTEGER
+    );
+  `);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_epfiles_episode ON episode_files(episode_id);');
 
   return db;
 }

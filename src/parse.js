@@ -16,6 +16,17 @@ export function ext(filename) {
   return dot < 0 ? '' : filename.slice(dot).toLowerCase();
 }
 
+// Strip common release-junk tokens (resolution, source, codec, audio, group)
+// that confuse metadata matching. Cuts everything from the first such token on.
+const JUNK = /\b(2160p|1080p|1080i|720p|480p|576p|4k|uhd|hdr|10bit|x264|x265|h ?264|h ?265|hevc|avc|xvid|divx|bluray|blu-ray|brrip|bdrip|brip|web-?dl|web-?rip|webrip|hdrip|hdtv|dvdrip|dvdscr|dvd|remux|proper|repack|internal|aac|ac3|eac3|dd5|ddp5|dts|truehd|atmos|flac|multi|dual|hindi|ita|dubbed|subbed)\b/i;
+
+export function scrubTitle(s) {
+  const cut = s.search(JUNK);
+  let out = cut > 0 ? s.slice(0, cut) : s;
+  out = out.replace(/[\[(][^\])]*[\])]\s*$/g, ''); // trailing [group] / (tag)
+  return out.replace(/[._]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
 export function parseMovie(filename) {
   const dot = filename.lastIndexOf('.');
   const base = dot > 0 ? filename.slice(0, dot) : filename;
@@ -42,7 +53,7 @@ export function parseMovie(filename) {
     }
   }
 
-  title = title.replace(/[._]+/g, ' ').replace(/\s+/g, ' ').trim();
+  title = scrubTitle(title.replace(/[._]+/g, ' ').replace(/\s+/g, ' ').trim());
   return { title, year };
 }
 
@@ -112,7 +123,7 @@ export function parseEpisode(filename, segs = []) {
 export function showFromFilename(filename) {
   const base = stripExt(filename);
   const m = base.match(/^(.*?)[\s._-]*(?:S\d{1,2}[\s._-]*E\d{1,3}|\d{1,2}x\d{1,3})/i);
-  return tidy(m ? m[1] : base);
+  return scrubTitle(m ? m[1] : base);
 }
 
 // Clean a show folder name for display (drops a trailing "(2015)").

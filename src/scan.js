@@ -34,12 +34,14 @@ export function scanLibraries(db) {
   );
 
   // TV statements
-  const epExists = db.prepare('SELECT id FROM episodes WHERE path = ?');
+  const epFileExists = db.prepare('SELECT id FROM episode_files WHERE path = ?');
   const findShow = db.prepare('SELECT id FROM shows WHERE group_key = ?');
   const insShow = db.prepare('INSERT INTO shows (group_key, title, library_id, added_at) VALUES (?, ?, ?, ?)');
-  const insEp = db.prepare(
-    `INSERT OR IGNORE INTO episodes (show_id, library_id, path, filename, season, episode, quality, size, added_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  const findEp = db.prepare('SELECT id FROM episodes WHERE show_id = ? AND season = ? AND episode = ?');
+  const insEp = db.prepare('INSERT INTO episodes (show_id, season, episode, added_at) VALUES (?, ?, ?, ?)');
+  const insEpFile = db.prepare(
+    `INSERT OR IGNORE INTO episode_files (episode_id, library_id, path, filename, quality, size, added_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
   );
 
   const SEASON_FOLDER = /^(season\s*\d+|s\d{1,2}|specials)$/i;
@@ -54,7 +56,16 @@ export function scanLibraries(db) {
         if (!isVideo(name)) return;
         seen++;
         if (fileExists.get(full)) return;
-        const { title, year } = parseMovie(name);
+        let { title, year } = parseMovie(name);
+        // If the filename lacked a year (often a generic file inside a nicely
+        // named folder like "Inception (2010)\movie.mkv"), use the folder name.
+        if (!year) {
+          const dir = path.dirname(full);
+          if (path.resolve(dir) !== root) {
+            const pm = parseMovie(path.basename(dir));
+            if (pm.year) { title = pm.title; year = pm.year; }
+          }
+        }
         const key = groupKey(title, year);
         const existing = findMovie.get(key);
         const movieId = existing ? existing.id : insMovie.run(key, title, year, Date.now()).lastInsertRowid;
@@ -66,7 +77,7 @@ export function scanLibraries(db) {
         const name = path.basename(full);
         if (!isVideo(name)) return;
         seen++;
-        if (epExists.get(full)) return;
+        if (epFileExists.get(full)) return;
 
         const rel = path.relative(root, full);
         const segs = rel.split(path.sep).slice(0, -1); // folder segments only
@@ -85,7 +96,11 @@ export function scanLibraries(db) {
 
         const existingShow = findShow.get(key);
         const showId = existingShow ? existingShow.id : insShow.run(key, showName, lib.id, Date.now()).lastInsertRowid;
-        insEp.run(showId, lib.id, full, name, ep.season, ep.episode, detectQuality(name), stat.size, Date.now());
+
+        // One logical episode per show+season+episode; the file is a version of it.
+        const existingEp = findEp.get(showId, ep.season, ep.episode);
+        const episodeId = existingEp ? existingEp.id : insEp.run(showId, ep.season, ep.episode, Date.now()).lastInsertRowid;
+        insEpFile.run(episodeId, lib.id, full, name, detectQuality(name), stat.size, Date.now());
         added++;
       });
     }

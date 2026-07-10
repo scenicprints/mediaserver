@@ -4,6 +4,7 @@
 const BASE = 'https://api.themoviedb.org/3';
 const POSTER = 'https://image.tmdb.org/t/p/w500';
 const BACKDROP = 'https://image.tmdb.org/t/p/w1280';
+const STILL = 'https://image.tmdb.org/t/p/w300';
 
 export async function searchMovie(apiKey, title, year) {
   if (!apiKey) return null;
@@ -81,6 +82,49 @@ export async function enrichShows(db, apiKey, { log = () => {} } = {}) {
       log(`  no match (show): ${row.title}`);
     }
     await new Promise((r) => setTimeout(r, 120));
+  }
+  return updated;
+}
+
+// Fill in real episode names, overviews, and still thumbnails from TMDB, one
+// season request per show/season. Only touches episodes still missing a title.
+export async function enrichEpisodes(db, apiKey, { log = () => {} } = {}) {
+  if (!apiKey) return 0;
+  const shows = db.prepare(
+    `SELECT DISTINCT s.id, s.tmdb_id FROM shows s
+     JOIN episodes e ON e.show_id = s.id
+     WHERE s.tmdb_id IS NOT NULL AND e.title IS NULL`
+  ).all();
+  const seasonsStmt = db.prepare('SELECT DISTINCT season FROM episodes WHERE show_id = ? AND title IS NULL');
+  const updateEp = db.prepare(
+    'UPDATE episodes SET title = ?, overview = ?, still = ? WHERE show_id = ? AND season = ? AND episode = ?'
+  );
+
+  let updated = 0;
+  for (const show of shows) {
+    for (const { season } of seasonsStmt.all(show.id)) {
+      let data;
+      try {
+        const url = new URL(`${BASE}/tv/${show.tmdb_id}/season/${season}`);
+        url.searchParams.set('api_key', apiKey);
+        const res = await fetch(url);
+        if (!res.ok) continue;
+        data = await res.json();
+      } catch {
+        continue;
+      }
+      for (const e of data.episodes || []) {
+        const info = updateEp.run(
+          e.name || null,
+          e.overview || null,
+          e.still_path ? STILL + e.still_path : null,
+          show.id, season, e.episode_number
+        );
+        if (info.changes) updated++;
+      }
+      await new Promise((r) => setTimeout(r, 120));
+    }
+    log(`  episodes enriched for show ${show.id}`);
   }
   return updated;
 }

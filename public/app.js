@@ -6,6 +6,8 @@ const closeBtn = document.getElementById('close');
 const rescanBtn = document.getElementById('rescan');
 const showGrid = document.getElementById('show-grid');
 const tabs = document.querySelectorAll('.tab');
+const continueEl = document.getElementById('continue');
+const continueRow = document.getElementById('continue-row');
 
 let movies = [];
 let shows = [];
@@ -121,6 +123,7 @@ async function openDetail(id) {
 
   const player = document.getElementById('player');
   if (resume) player.currentTime = resume;
+  attachSubtitle(player, current && current.subtitle ? '/api/subtitle/' + current.id : null);
 
   // Switch quality/version without losing your place.
   detailInner.querySelectorAll('.qbtn').forEach((btn) => {
@@ -135,6 +138,7 @@ async function openDetail(id) {
         player.currentTime = at;
         if (wasPlaying) player.play();
       }, { once: true });
+      attachSubtitle(player, f.subtitle ? '/api/subtitle/' + f.id : null);
       detailInner.querySelectorAll('.qbtn').forEach((b) => b.classList.toggle('active', b === btn));
       const fn = document.getElementById('fileName');
       if (fn) fn.textContent = f.filename;
@@ -166,12 +170,13 @@ async function openDetail(id) {
   });
 }
 
-async function openShow(id) {
+async function openShow(id, autoEpId) {
   const show = await (await fetch('/api/shows/' + id)).json();
   const seasons = show.seasons || [];
 
   detailInner.innerHTML = `
     <video id="player" controls playsinline poster="${show.backdrop || ''}"></video>
+    <div class="row versions hidden" id="ep-versions"></div>
     <h2>${escapeHtml(show.title)}</h2>
     <div class="sub">${show.year ?? ''}${show.rating ? ' · ★ ' + show.rating.toFixed(1) : ''} · ${show.episodeCount} episode${show.episodeCount === 1 ? '' : 's'}</div>
     <p class="overview">${escapeHtml(show.overview || '')}</p>
@@ -182,18 +187,47 @@ async function openShow(id) {
 
   const seasonTabs = document.getElementById('season-tabs');
   const epList = document.getElementById('episode-list');
+  const epVersions = document.getElementById('ep-versions');
   const player = document.getElementById('player');
   const seasonLabel = (s) => (s === 0 ? 'Specials' : 'Season ' + s);
 
   function playEpisode(ep, row) {
     epList.querySelectorAll('.episode').forEach((r) => r.classList.remove('playing'));
     if (row) row.classList.add('playing');
-    player.src = '/api/stream/episode/' + ep.id;
+    const files = ep.files || [];
+    let current = files[0];
+    if (!current) return;
+
+    player.src = '/api/stream/episode/' + current.id;
     player.play();
     player.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    attachSubtitle(player, current.subtitle ? '/api/subtitle/episode/' + current.id : null);
 
     const resume = ep.resume_position && ep.resume_position > 5 ? ep.resume_position : 0;
     if (resume) player.addEventListener('loadedmetadata', () => { player.currentTime = resume; }, { once: true });
+
+    // Quality picker when the episode has multiple versions.
+    if (files.length > 1) {
+      epVersions.classList.remove('hidden');
+      epVersions.innerHTML = '<span class="vlabel">Version</span>' +
+        files.map((f, i) => `<button class="qbtn${i === 0 ? ' active' : ''}" data-fid="${f.id}">${escapeHtml(f.quality || 'V' + (i + 1))}</button>`).join('');
+      epVersions.querySelectorAll('.qbtn').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const f = files.find((x) => String(x.id) === btn.dataset.fid);
+          if (!f || current.id === f.id) return;
+          current = f;
+          const at = player.currentTime;
+          const wasPlaying = !player.paused;
+          player.src = '/api/stream/episode/' + f.id;
+          player.addEventListener('loadedmetadata', () => { player.currentTime = at; if (wasPlaying) player.play(); }, { once: true });
+          attachSubtitle(player, f.subtitle ? '/api/subtitle/episode/' + f.id : null);
+          epVersions.querySelectorAll('.qbtn').forEach((b) => b.classList.toggle('active', b === btn));
+        });
+      });
+    } else {
+      epVersions.classList.add('hidden');
+      epVersions.innerHTML = '';
+    }
 
     let lastSave = 0;
     const save = () => {
@@ -217,9 +251,12 @@ async function openShow(id) {
       const row = document.createElement('div');
       row.className = 'episode';
       const pct = ep.duration && ep.resume_position ? Math.min(100, (ep.resume_position / ep.duration) * 100) : 0;
+      const quals = [...new Set((ep.files || []).map((f) => f.quality).filter(Boolean))];
+      const qtext = quals.length ? ' · ' + quals.join('/') : '';
       row.innerHTML = `
+        ${ep.still ? `<img class="ethumb" src="${ep.still}" alt="" loading="lazy">` : ''}
         <span class="num">${ep.season}·${String(ep.episode).padStart(2, '0')}</span>
-        <span class="etitle">${escapeHtml(ep.title || 'Episode ' + ep.episode)}${ep.quality ? ' · ' + ep.quality : ''}</span>
+        <span class="etitle">${escapeHtml(ep.title || 'Episode ' + ep.episode)}${qtext}</span>
         <span class="badges">${ep.watched ? '<span class="watched">✓ Watched</span>' : (pct > 1 ? '<span class="dot"></span>' : '')}</span>
         ${pct > 1 ? `<div class="eprog" style="width:${pct}%"></div>` : ''}`;
       row.addEventListener('click', () => playEpisode(ep, row));
@@ -239,6 +276,18 @@ async function openShow(id) {
     seasonTabs.appendChild(btn);
   });
   if (seasons.length) renderSeason(seasons[0]);
+
+  // Continue Watching deep-link: jump to and play a specific episode.
+  if (autoEpId) {
+    for (let i = 0; i < seasons.length; i++) {
+      const idx = seasons[i].episodes.findIndex((e) => e.id === autoEpId);
+      if (idx < 0) continue;
+      seasonTabs.querySelectorAll('.season-tab').forEach((b, bi) => b.classList.toggle('active', bi === i));
+      renderSeason(seasons[i]);
+      playEpisode(seasons[i].episodes[idx], epList.children[idx]);
+      break;
+    }
+  }
 }
 
 function closeDetail() {
@@ -247,6 +296,7 @@ function closeDetail() {
   detail.classList.add('hidden');
   detailInner.innerHTML = '';
   if (currentTab === 'movies') load(); else loadShows();
+  loadContinue();
 }
 
 closeBtn.addEventListener('click', closeDetail);
@@ -481,9 +531,48 @@ function qualityLabel(f, i) {
   return f.quality || 'Version ' + (i + 1);
 }
 
+// ---- Continue Watching ----
+async function loadContinue() {
+  let items = [];
+  try { items = await (await fetch('/api/continue')).json(); } catch { return; }
+  if (!items.length) { continueEl.classList.add('hidden'); return; }
+  continueEl.classList.remove('hidden');
+  continueRow.innerHTML = '';
+  for (const it of items) {
+    const pct = it.duration && it.resume_position ? Math.min(100, (it.resume_position / it.duration) * 100) : 0;
+    const sub = it.kind === 'episode' ? `S${it.season}·E${String(it.episode).padStart(2, '0')}` : 'Movie';
+    const card = document.createElement('div');
+    card.className = 'cw-card';
+    card.innerHTML = `
+      <div class="poster">
+        ${it.poster ? `<img src="${it.poster}" alt="" loading="lazy">` : `<span class="ph">${escapeHtml(it.title)}</span>`}
+        <div class="progress"><i style="width:${pct}%"></i></div>
+      </div>
+      <div class="meta"><div class="t">${escapeHtml(it.title)}</div><div class="y">${sub}</div></div>`;
+    card.addEventListener('click', () => {
+      if (it.kind === 'movie') openDetail(it.id);
+      else openShow(it.show_id, it.id);
+    });
+    continueRow.appendChild(card);
+  }
+}
+
+// ---- Subtitles: attach/replace a captions track on a <video> ----
+function attachSubtitle(player, url) {
+  player.querySelectorAll('track').forEach((t) => t.remove());
+  if (!url) return;
+  const track = document.createElement('track');
+  track.kind = 'subtitles';
+  track.label = 'Subtitles';
+  track.srclang = 'en';
+  track.src = url;
+  player.appendChild(track);
+}
+
 function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
 load();
+loadContinue();
