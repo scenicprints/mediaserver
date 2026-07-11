@@ -154,13 +154,19 @@ The owner wants a native Apple TV app but has **no Mac**. A Mac is only needed t
 (recurring). Open alternative: switch the TV box to **Fire TV / Nvidia Shield** to skip the
 fee and slow cloud builds. Decision not yet made.
 
-## Current status (2026-07-10, sha 2b6af0e)
-Built & verified: in-app library manager (folder picker, movie/TV), movie scanning + TMDB
-metadata, movie versions/quality picker, HTTP-range streaming, TV shows (season/episode
-parsing, TMDB show + episode metadata incl. titles/thumbnails), episode versions/quality
-picker, Continue Watching (tab-aware), watched/unwatched tracking, auto-play next episode,
-local `.srt` subtitles + OpenSubtitles search/download, self-update via GitHub with an
-in-app progress overlay, and in-app OpenSubtitles settings.
+## Current status (2026-07-11, sha b90a577)
+Mature, feature-rich. On top of the core (library manager, movie/TV scan + TMDB, versions/quality,
+HTTP-range streaming + **ffmpeg transcode** of any format, Continue Watching, subtitles): a
+**cinematic "MARQUEE" UI** with a **tvOS remote focus engine** (arrows = content, **Back = the top
+ribbon**, Enter/Down back into content); a **custom theater player** (server-side transcode,
+per-title version + caption-delay memory in the `prefs` table, **first-press autoplay**);
+**AI subtitles** (Whisper, GPU/cuBLAS, English + Spanish); a **Collections tab** (TMDB franchises +
+studio **meta-collections** — Marvel/Disney/Star Wars/DCEU…); **Live TV** (25 audience-aware
+channels, DirecTV-style EPG, airs **individual episodes at the live offset**, stripped-down live
+player); **Requests → Radarr/Sonarr** (search/add + live download queue + quality picker, verified
+live on the Dell); a **seasonal home row**; and **Skip Intro via audio fingerprinting** (fpcalc,
+per-season theme detection at import, also probes episode durations).
 
-**Next up / backlog: [docs/ROADMAP.md](docs/ROADMAP.md).** The owner has a large list of
-remaining work — keep that file current as the single source of truth for what's next.
+**Next up / backlog: [docs/ROADMAP.md](docs/ROADMAP.md).** Keep that file current as the single
+source of truth. Owner runs a **Claude Code instance on the Dell** for real-hardware testing
+(Radarr/Sonarr, GPU, big library) — coordinate via messages relayed through the owner.
