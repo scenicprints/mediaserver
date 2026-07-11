@@ -149,6 +149,50 @@ Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed
 **Decision still open:** the native Apple TV *app* delivery — cloud‑build → TestFlight ($99/yr)
 vs a Fire TV / Nvidia Shield box. (Separate from #1, which is the *web* UI feeling tvOS‑like.)
 
+## 🎯 Owner's requested pipeline (queued 2026‑07‑10 — build in this order)
+These are the owner's explicit next asks, captured verbatim-in-intent. Big batched work.
+
+1. **Auto‑generated / translated subtitles (Whisper).** When no subtitles exist for a title —
+   or the owner wants a language we don't have (e.g. an English movie, but they need **Spanish**
+   subs) — **generate them locally**. Pipeline: ffmpeg (already installed via `src/ffmpeg.js`)
+   extracts/decodes audio → a **Whisper** model transcribes to timed cues → optional
+   **translation** to the target language → serve as WebVTT through the existing subtitle plumbing.
+   - Likely **whisper.cpp** (a small static binary + a downloadable model, installed the same
+     one‑click way as ffmpeg into `tools/`; no Python). GPU (1050 Ti) can accelerate.
+   - Whisper can transcribe **and translate to English** natively; for **other target languages**
+     (Spanish, etc.) pair transcription with a translation step (research: whisper translate is
+     English‑only, so non‑English targets need a separate translator — argos‑translate offline,
+     or a translate API). Decide offline‑only vs API.
+   - UX: in the player's subtitle menu add **"Generate subtitles…"** with a language picker; show
+     progress (it's slow — background job, cache the result as a sidecar `.vtt` next to the file
+     or in `data/`). Reuse the server‑side prefs/caching patterns. Persist generated tracks so
+     it's a one‑time cost per file+language.
+
+2. **Collections tab (next to Library).** We already pull TMDB collections (movie detail shows a
+   "… Collection" section via `belongs_to_collection`). Promote this to a **top‑level nav tab**
+   beside Library: a **Movies / TV toggle**, then a grid of **collection cards** (franchise
+   poster + count of owned entries); opening one lists its entries in order, owned ones playable
+   (same treatment as the detail‑page collection row). Needs `collection_id` stored at enrich
+   time so we can group owned titles without a live TMDB call per render (see the existing
+   "Franchise home row" backlog note — same prerequisite). TV "collections" ≈ franchises where
+   TMDB has them; otherwise the toggle can group by show for now.
+
+3. **Live TV mode (channel surfing).** A mode that organizes the library into **channels named
+   like real TV stations** and makes it feel like **surfing broadcast TV**. Movies and TV shows
+   are **mixed** on a channel. Think: each "channel" has a running **schedule/now‑playing** so
+   tuning in drops you into something already "in progress," and ↑/↓ (or channel buttons) surf
+   between channels while ←/→ do something channel‑appropriate. Build a **virtual schedule**
+   (deterministic from a seed + wall clock so every device tuned to a channel sees the same thing),
+   group content into themed channels (by genre/decade/franchise → e.g. "Action Blvd", "90s
+   Nights", a Marvel channel), and a **guide/EPG** view. Remote‑first, leans on the tvOS focus
+   work. This is the biggest of the four — its own multi‑batch effort.
+
+4. **Requests window → Sonarr/Radarr.** A place to **request** movies/shows not in the library,
+   eventually wired to **Radarr (movies)** and **Sonarr (TV)** to auto‑fetch. **DO NOT BUILD YET
+   — the owner will greenlight this explicitly.** (When greenlit: a Requests view + a `requests`
+   table; integrate Radarr/Sonarr APIs with server‑side API keys in `config.json`, never
+   committed. Until then, leave this untouched.)
+
 ## 📋 Backlog (owner-requested — fill in)
 > The owner said there's "a massive amount of things to get done." List them here with
 > enough detail for a cold agent to act. Template:
