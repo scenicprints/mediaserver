@@ -98,6 +98,13 @@ Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed
     `.mkv`), Skip Intro/**Skip Credits** are **precise** and work for anything — they appear only
     inside the Intro/Credits chapters, which correctly handles a **cold open before the intro**.
     Skip Credits jumps to the next episode (or the end).
+- **Live TV airs real episodes (fixes "tune in → starts from the beginning").** Show channels used
+  to treat each show as one generic 30-min block and play the "next unwatched episode from 0," so
+  the guide and playback disagreed. Now channels air **individual episodes** with their real
+  durations: a new `GET /api/livetv/episodes` (flat playable episodes + show art/genres) feeds the
+  schedule, so `nowOn` picks the **exact episode + offset** and tuning drops you into that episode
+  at the **live point** (not the start). Preview/guide show the show title + `SxEy · Episode`.
+  Episodes without a stored duration fall back to ~30 min until they've been played once.
 - **Ribbon-is-its-own-zone nav + live-only Live TV player.**
   - **The top ribbon is now reached with Back, not arrows.** Arrow keys stay in the content and
     never climb into the MARQUEE bar; **Back** lifts focus up to the ribbon (Left/Right across

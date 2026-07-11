@@ -440,6 +440,23 @@ function requestCard(it) {
 // a channel sees the same thing "on air." Movies and shows are mixed.
 const LT_EPOCH = 1704067200; // 2024-01-01 UTC — a fixed origin for the schedule
 let ltState = null; // { channels, sel, timer, onKey }
+let ltEpisodes = []; // flat playable episodes (fetched once when Live TV opens)
+
+// Build the item pool: movies + individual episodes. Each episode carries a
+// show-like ref (show genres/art for grouping, episode title/still/duration for
+// display + scheduling) so channels air real episodes at their real lengths.
+function ltItemPool() {
+  const mv = movies.filter((x) => x.backdrop || x.poster).map((ref) => ({ kind: 'movie', ref }));
+  const ep = ltEpisodes.map((e) => ({
+    kind: 'episode',
+    ref: {
+      show_id: e.showId, epId: e.epId, season: e.season, episode: e.episode,
+      title: e.showTitle, epTitle: e.epTitle, still: e.still, poster: e.poster, backdrop: e.backdrop,
+      overview: e.overview, genres: e.genres, year: e.year, rating: e.rating, duration: e.duration
+    }
+  }));
+  return [...mv, ...ep];
+}
 
 function hashStr(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; }
 function seededShuffle(arr, seed) {
@@ -449,7 +466,9 @@ function seededShuffle(arr, seed) {
   for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
   return a;
 }
-const ltDuration = (it) => it.kind === 'show' ? 30 * 60 : ((it.ref.runtime && it.ref.runtime * 60) || it.ref.duration || 105 * 60);
+const ltDuration = (it) => it.kind === 'episode'
+  ? (it.ref.duration || 30 * 60)                                   // real episode length, else ~30 min
+  : ((it.ref.runtime && it.ref.runtime * 60) || it.ref.duration || 105 * 60);
 
 // Audience tier from genres. Certifications aren't in TMDB data here, so we
 // approximate: Horror/War (and Thriller/Crime that isn't also Family) = mature;
@@ -472,8 +491,7 @@ function ltTier(it) {
 const ltAudOk = (it, mature) => (mature ? ltTier(it) !== 'family' : ltTier(it) !== 'mature');
 
 function buildChannels() {
-  const withArt = (list, kind) => list.filter((x) => x.backdrop || x.poster).map((ref) => ({ kind, ref }));
-  const all = [...withArt(movies, 'movie'), ...withArt(shows, 'show')];
+  const all = ltItemPool();
   if (!all.length) return [];
 
   const has = (it, name) => genresOf(it.ref).includes(name);
@@ -487,7 +505,7 @@ function buildChannels() {
   // interleaved, not dumped at the end) so we keep a good mix within the first 25.
   const defs = [
     { name: 'PRIME', sub: 'Feature Films', pick: (it) => it.kind === 'movie', sort: byRating },
-    { name: 'BINGE TV', sub: 'Series Marathon', pick: (it) => it.kind === 'show' },
+    { name: 'BINGE TV', sub: 'Series Marathon', pick: (it) => it.kind === 'episode' },
     { name: 'ADRENALINE', sub: 'Action', pick: (it) => has(it, 'Action'), sort: byRating },
     { name: 'THE LAUGH TRACK', sub: 'Comedy', pick: (it) => has(it, 'Comedy') },
     { name: 'NIGHTMARE', sub: 'Horror', mature: true, pick: (it) => has(it, 'Horror') },
@@ -517,8 +535,8 @@ function buildChannels() {
     { name: 'FRONTIER', sub: 'Westerns', pick: (it) => has(it, 'Western') },
     { name: 'SATURDAY MORNING', sub: 'Cartoons', pick: (it) => has(it, 'Animation') && ltTier(it) === 'family' },
     { name: 'DATE NIGHT', sub: 'Rom-Coms', pick: (it) => has(it, 'Romance') && has(it, 'Comedy') },
-    { name: 'SITCOM CENTRAL', sub: 'TV Comedies', pick: (it) => it.kind === 'show' && has(it, 'Comedy') },
-    { name: 'THE SERIAL', sub: 'TV Dramas', pick: (it) => it.kind === 'show' && has(it, 'Drama'), sort: byRating }
+    { name: 'SITCOM CENTRAL', sub: 'TV Comedies', pick: (it) => it.kind === 'episode' && has(it, 'Comedy') },
+    { name: 'THE SERIAL', sub: 'TV Dramas', pick: (it) => it.kind === 'episode' && has(it, 'Drama'), sort: byRating }
   ];
 
   const MIN = 3; // don't launch a channel with too little to air
@@ -577,10 +595,16 @@ function programsInWindow(chan, winStart, winEnd) {
   return out;
 }
 
-function renderLiveTv() {
+async function renderLiveTv() {
   heroEl.classList.add('hidden');
   rowsEl.style.paddingTop = '0';
   document.body.classList.add('lt-active');
+  // Pull the flat episode list once so channels can air individual episodes.
+  if (!ltEpisodes.length) {
+    rowsEl.innerHTML = '<div class="lib-empty" style="padding:100px var(--edge)">Tuning in…</div>';
+    try { ltEpisodes = await (await fetch('/api/livetv/episodes')).json(); } catch {}
+    if (currentView !== 'livetv') return; // user navigated away while loading
+  }
   const channels = buildChannels();
   if (!channels.length) { rowsEl.innerHTML = '<div class="lib-empty" style="padding:100px var(--edge)">Add some movies or shows to start broadcasting.</div>'; return; }
   if (ltState) stopLiveTv();
@@ -634,20 +658,22 @@ function drawPreview() {
   const dur = ltDuration(on.item);
   const pct = Math.min(100, (on.offset / dur) * 100);
   const up = upcoming(chan, now, 1)[0];
-  s.style.backgroundImage = `url('${it.backdrop || it.poster || ''}')`;
+  const isEp = on.item.kind === 'episode';
+  const epLabel = isEp ? `S${it.season}·E${String(it.episode).padStart(2, '0')}${it.epTitle ? ' · ' + it.epTitle : ''}` : '';
+  s.style.backgroundImage = `url('${it.still || it.backdrop || it.poster || ''}')`;
   s.innerHTML = `
     <div class="lt-preview-fade"></div>
     <div class="lt-preview-body">
       <div class="lt-chan-badge"><span class="lt-num">${chan.number}</span><span class="lt-name">${escapeHtml(chan.name)}</span><span class="lt-onair"><span class="lt-live-dot"></span>LIVE</span></div>
       <h1 class="lt-title">${escapeHtml(it.title)}</h1>
       <div class="lt-meta">
-        ${on.item.kind === 'show' ? '<span class="chip">Series</span>' : (it.year ? `<span class="chip">${it.year}</span>` : '')}
+        ${isEp ? `<span class="chip">${escapeHtml(epLabel)}</span>` : (it.year ? `<span class="chip">${it.year}</span>` : '')}
         ${it.rating ? `<span class="chip rating">★ ${it.rating.toFixed(1)}</span>` : ''}
         <span class="chip">${escapeHtml(chan.sub)}</span>
       </div>
-      <p class="lt-over">${escapeHtml(it.overview || '')}</p>
+      <p class="lt-over">${escapeHtml((isEp ? it.epTitle : '') || it.overview || '')}</p>
       <div class="lt-prog"><div class="lt-prog-fill" style="width:${pct}%"></div></div>
-      <div class="lt-times"><span>▶ ${on.item.kind === 'show' ? 'Now airing' : `${Math.round(on.offset / 60)} min in`}</span>${up ? `<span class="muted">Up next ${clockTime(up.at)} · ${escapeHtml(up.item.ref.title)}</span>` : ''}</div>
+      <div class="lt-times"><span>▶ ${Math.round(on.offset / 60)} min in</span>${up ? `<span class="muted">Up next ${clockTime(up.at)} · ${escapeHtml(up.item.ref.title)}</span>` : ''}</div>
       <div class="lt-actions"><button class="btn btn-play" id="lt-tune">▶ Tune In</button></div>
     </div>`;
   const t = document.getElementById('lt-tune'); if (t) t.addEventListener('click', tuneIn);
@@ -708,9 +734,10 @@ function drawEpg() {
 async function tuneIn() {
   const chan = ltState.channels[ltState.sel];
   const on = nowOn(chan, Math.floor(Date.now() / 1000));
+  const offset = Math.floor(on.offset); // drop in at the live position, not the start
   // Live TV is ephemeral: pass no progressUrl, so nothing tuned here is written
   // to watch-state / Continue Watching.
-  if (on.item.kind === 'show') { tuneShow(on.item.ref.id); return; }
+  if (on.item.kind === 'episode') { tuneEpisode(on.item.ref, offset); return; }
   const m = await (await fetch('/api/movies/' + on.item.ref.id)).json();
   const files = m.files || [];
   if (!files.length) { openDetail(m.id, false); return; }
@@ -718,27 +745,25 @@ async function tuneIn() {
   openPlayer({
     title: m.title, files, startFileId: f.id, verKey: 'm' + m.id,
     streamBase: '/api/stream/', subtitleBase: '/api/subtitle/', searchKind: 'movie',
-    startAt: Math.floor(on.offset), progressUrl: null, upNext: null, onEnded: null, live: true // live feed
+    startAt: offset, progressUrl: null, upNext: null, onEnded: null, live: true // live feed
   });
 }
 
-// Tune into a show's live program: play its next-unwatched episode straight into
-// the theater with no progress saving (Live TV shouldn't touch Continue Watching).
-async function tuneShow(showId) {
-  const show = await (await fetch('/api/shows/' + showId).catch(() => null))?.json?.() || null;
-  if (!show) return;
-  const flat = [];
-  (show.seasons || []).forEach((s) => s.episodes.forEach((ep) => flat.push(ep)));
-  if (!flat.length) return;
-  const idx = flat.findIndex((ep) => !ep.watched);
-  const ep = flat[idx >= 0 ? idx : 0];
+// Tune into the exact episode that's "airing" now, at the live offset. Fetch the
+// show so we have the episode's files (with subtitle tracks) to play.
+async function tuneEpisode(epRef, offset) {
+  let show;
+  try { show = await (await fetch('/api/shows/' + epRef.show_id)).json(); } catch { return; }
+  let ep = null;
+  (show.seasons || []).forEach((s) => s.episodes.forEach((e) => { if (e.id === epRef.epId) ep = e; }));
+  if (!ep) return;
   const files = ep.files || [];
-  if (!files.length) { openShow(showId, null, false); return; }
+  if (!files.length) return;
   const f = preferredFile(files, 'e' + ep.id);
   openPlayer({
     title: show.title, subtitle: episodeSub(ep), files, startFileId: f.id, verKey: 'e' + ep.id,
     streamBase: '/api/stream/episode/', subtitleBase: '/api/subtitle/episode/', searchKind: 'episode',
-    startAt: 0, progressUrl: null, upNext: null, onEnded: null, live: true // live feed
+    startAt: offset, progressUrl: null, upNext: null, onEnded: null, live: true // live feed, at the live point
   });
 }
 

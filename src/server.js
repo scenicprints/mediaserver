@@ -237,6 +237,18 @@ app.get('/api/shows', async () => {
   ).all();
 });
 
+// Flat list of playable episodes (with the show's art/genres) so Live TV can
+// air individual episodes with real durations — a proper broadcast schedule.
+app.get('/api/livetv/episodes', async () => {
+  return db.prepare(
+    `SELECT e.id AS epId, e.show_id AS showId, e.season, e.episode, e.title AS epTitle, e.still, e.duration,
+            s.title AS showTitle, s.poster, s.backdrop, s.overview, s.genres, s.year, s.rating
+     FROM episodes e JOIN shows s ON s.id = e.show_id
+     WHERE EXISTS (SELECT 1 FROM episode_files f WHERE f.episode_id = e.id)
+     ORDER BY s.id, e.season, e.episode`
+  ).all();
+});
+
 app.get('/api/episodes/:id/extra', async (req, reply) => {
   const row = db.prepare(
     'SELECT e.season, e.episode, s.tmdb_id FROM episodes e JOIN shows s ON s.id = e.show_id WHERE e.id = ?'
