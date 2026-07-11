@@ -707,7 +707,7 @@ async function openDetail(id, autoplay = true) {
           </div>
           ${genres.length ? `<div class="dp-genres">${genres.map((g) => `<span class="dp-genre">${escapeHtml(g)}</span>`).join('')}</div>` : ''}
           <div class="dp-actions">
-            ${resume ? `<button class="btn btn-play" id="d-resume">▶ Resume</button><button class="btn" id="d-begin">↺ From beginning</button>` : `<button class="btn btn-play" id="d-play">▶ Play</button>`}
+            <span id="d-playbtns"></span>
             <button class="btn" id="favBtn">${m.favorite ? '★ Favorited' : '☆ Favorite'}</button>
             <button class="btn" id="watchedBtn">${m.watched ? '✓ Watched' : 'Mark watched'}</button>
             ${versionControl}
@@ -735,13 +735,24 @@ async function openDetail(id, autoplay = true) {
       startAt: at, progressUrl: `/api/movies/${m.id}/progress`, upNext: null, onEnded: null
     });
   }
-  if (resume) {
-    document.getElementById('d-resume').addEventListener('click', () => play(resume));
-    document.getElementById('d-begin').addEventListener('click', () => play(0));
-  } else {
-    document.getElementById('d-play').addEventListener('click', () => play(0));
+  // Re-render the play button(s) so "Resume / From beginning" appears only when
+  // there's actually a resume point. Marking watched clears it (and marking
+  // unwatched does NOT bring it back), so those toggles update this live.
+  let resumeAt = resume;
+  const playBtns = document.getElementById('d-playbtns');
+  function renderPlayBtns() {
+    playBtns.innerHTML = resumeAt
+      ? `<button class="btn btn-play" id="d-resume">▶ Resume</button><button class="btn" id="d-begin">↺ From beginning</button>`
+      : `<button class="btn btn-play" id="d-play">▶ Play</button>`;
+    if (resumeAt) {
+      document.getElementById('d-resume').addEventListener('click', () => play(resumeAt));
+      document.getElementById('d-begin').addEventListener('click', () => play(0));
+    } else {
+      document.getElementById('d-play').addEventListener('click', () => play(0));
+    }
   }
-  if (autoplay) play(resume || 0);
+  renderPlayBtns();
+  if (autoplay) play(resumeAt || 0);
 
   document.getElementById('favBtn').addEventListener('click', async (e) => {
     const { favorite } = await (await fetch(`/api/movies/${m.id}/favorite`, { method: 'POST' })).json();
@@ -751,6 +762,8 @@ async function openDetail(id, autoplay = true) {
     const next = m.watched ? 0 : 1;
     await fetch(`/api/movies/${m.id}/watched`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ watched: next }) });
     m.watched = next; e.target.textContent = next ? '✓ Watched' : 'Mark watched';
+    if (next) { resumeAt = 0; m.resume_position = 0; } // watched clears the resume point
+    renderPlayBtns();
   });
 
   // Cast & Crew, Trailers, More Like This
@@ -844,7 +857,7 @@ async function openEpisodeDetail(show, flat, i) {
             ${current && current.quality ? `<span class="chip q">${current.quality}</span>` : ''}
           </div>
           <div class="dp-actions">
-            ${resume ? `<button class="btn btn-play" id="ep-resume">▶ Resume</button><button class="btn" id="ep-begin">↺ From beginning</button>` : `<button class="btn btn-play" id="ep-play">▶ Play</button>`}
+            <span id="ep-playbtns"></span>
             <button class="btn" id="ep-watched">${ep.watched ? '✓ Watched' : 'Mark watched'}</button>
             ${versionControl}
           </div>
@@ -872,16 +885,26 @@ async function openEpisodeDetail(show, flat, i) {
   if (sel && current) sel.value = String(current.id); // reflect the remembered version
   if (sel) sel.addEventListener('change', () => { const f = files.find((x) => String(x.id) === sel.value); if (f) { current = f; rememberVersion('e' + ep.id, f); } });
   const playAt = (at) => playEpisodeAt(show, flat, i, { fileId: current.id, startAt: at });
-  if (resume) {
-    document.getElementById('ep-resume').addEventListener('click', () => playAt(resume));
-    document.getElementById('ep-begin').addEventListener('click', () => playAt(0));
-  } else {
-    document.getElementById('ep-play').addEventListener('click', () => playAt(0));
+  let resumeAt = resume;
+  const epPlayBtns = document.getElementById('ep-playbtns');
+  function renderEpPlayBtns() {
+    epPlayBtns.innerHTML = resumeAt
+      ? `<button class="btn btn-play" id="ep-resume">▶ Resume</button><button class="btn" id="ep-begin">↺ From beginning</button>`
+      : `<button class="btn btn-play" id="ep-play">▶ Play</button>`;
+    if (resumeAt) {
+      document.getElementById('ep-resume').addEventListener('click', () => playAt(resumeAt));
+      document.getElementById('ep-begin').addEventListener('click', () => playAt(0));
+    } else {
+      document.getElementById('ep-play').addEventListener('click', () => playAt(0));
+    }
   }
+  renderEpPlayBtns();
   document.getElementById('ep-watched').addEventListener('click', async (e) => {
     const next = ep.watched ? 0 : 1;
     await fetch(`/api/episodes/${ep.id}/watched`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ watched: next }) });
     ep.watched = next; e.target.textContent = next ? '✓ Watched' : 'Mark watched';
+    if (next) { resumeAt = 0; ep.resume_position = 0; }
+    renderEpPlayBtns();
   });
   document.getElementById('ep-back').addEventListener('click', () => openShow(show.id, null, false));
 }
@@ -1599,23 +1622,33 @@ async function loadWhisper() {
   clearTimeout(wsTimer); wsTimer = null;
   let s;
   try { s = await (await fetch('/api/whisper')).json(); } catch { wsStatus.textContent = ''; return; }
-  if (s.available) { wsStatus.textContent = '✓ Ready — generate subtitles from any video in the player.'; wsInstall.classList.add('hidden'); return; }
-  wsInstall.classList.remove('hidden');
   if (s.installing) {
-    wsInstall.disabled = true; wsInstall.textContent = 'Installing…';
+    wsInstall.classList.remove('hidden'); wsInstall.disabled = true; wsInstall.textContent = 'Installing…';
     const p = s.installing;
-    wsStatus.textContent = p.phase && p.phase.startsWith('downloading') ? `⬇ ${p.phase}… ${p.pct}%` : `⚙ ${p.phase || 'setting up'}…`;
+    wsStatus.textContent = p.phase && p.phase.startsWith('downloading') ? `⬇ ${p.phase}… ${p.pct}% (the GPU build is large — hang tight)` : `⚙ ${p.phase || 'setting up'}…`;
     wsTimer = setTimeout(loadWhisper, 1200);
-  } else {
-    wsInstall.disabled = false; wsInstall.textContent = '⬇ Install AI subtitle engine';
-    wsStatus.textContent = s.error
-      ? `Install failed: ${s.error}`
-      : 'Not installed. Generates subtitles locally when none exist (or translates to English) — needs the playback engine too. ~200 MB download.';
+    return;
   }
+  if (s.available) {
+    wsStatus.textContent = `✓ Ready — running on ${s.gpu ? 'the GPU ⚡ (fast)' : 'the CPU'}.`
+      + (!s.gpu && s.gpuAvailable ? ' An NVIDIA GPU was detected — switch to it for much faster subtitles.' : '');
+    if (!s.gpu && s.gpuAvailable) {
+      wsInstall.classList.remove('hidden'); wsInstall.disabled = false;
+      wsInstall.textContent = '⚡ Switch to GPU (much faster, ~680 MB)'; wsInstall.dataset.force = '1';
+    } else wsInstall.classList.add('hidden');
+    return;
+  }
+  wsInstall.classList.remove('hidden'); wsInstall.disabled = false; wsInstall.dataset.force = '';
+  wsInstall.textContent = s.gpuAvailable ? '⬇ Install AI subtitle engine (GPU)' : '⬇ Install AI subtitle engine';
+  wsStatus.textContent = s.error
+    ? `Install failed: ${s.error}`
+    : 'Not installed. Generates subtitles locally when none exist, and translates to English or Spanish. Needs the playback engine too.'
+      + (s.gpuAvailable ? ' Your NVIDIA GPU will be used (fast).' : '');
 }
 wsInstall.addEventListener('click', async () => {
+  const force = wsInstall.dataset.force === '1';
   wsInstall.disabled = true;
-  try { await fetch('/api/whisper/install', { method: 'POST' }); } catch {}
+  try { await fetch('/api/whisper/install', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ force }) }); } catch {}
   loadWhisper();
 });
 

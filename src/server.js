@@ -483,8 +483,9 @@ app.post('/api/ffmpeg/install', async () => {
 
 // ---- AI subtitle generation (whisper.cpp) ----
 app.get('/api/whisper', async () => whisperStatus());
-app.post('/api/whisper/install', async () => {
-  if (!whisperStatus().installing) installWhisper(ROOT, config);
+app.post('/api/whisper/install', async (req) => {
+  const force = !!(req.body && req.body.force); // force = re-install (e.g. switch to GPU)
+  if (!whisperStatus().installing) installWhisper(ROOT, config, { force });
   return whisperStatus();
 });
 

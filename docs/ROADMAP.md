@@ -76,6 +76,18 @@ Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed
   New screens (detail, modals) **pre-seat** focus on their primary Play button. Decoupled from
   `app.js` (pure DOM + MutationObservers), so it needed no changes to existing view code.
   In remote mode the top menu also grows slightly to read as a proper 10-ft menu bar.
+- **Whisper on the GPU + faster decoding; watched-button fix.**
+  - **AI subtitles now run on the GPU.** Install auto-picks the whisper **cuBLAS** build when an
+    NVIDIA driver is present (`nvcuda.dll`) — it bundles the CUDA runtime, so the Dell's 1050 Ti
+    works with just the driver. Falls back to the CPU build if the GPU binary won't load
+    (verified via a test-run). ⚙ Settings shows "running on the GPU ⚡ / CPU" and, when a GPU is
+    detected but the CPU build is installed, a **⚡ Switch to GPU** button (`force` reinstall,
+    wipes only the binary, keeps the model). Also switched decoding to **greedy** (`-bo 1 -bs 1`)
+    and multi-thread (`-t`), a big speed-up on CPU too. This addresses "whisper takes too long."
+  - **Watched-button fix.** Marking a movie/episode **watched** now immediately collapses
+    "Resume / From beginning" to a single **Play** (watched clears the resume point), and marking
+    it **unwatched** does not bring Resume back. The buttons re-render live instead of going stale;
+    the server already zeroed `resume_position` on watched, so it persists on reopen.
 - **Feedback pass: DirecTV-style guide, stricter Collections, Whisper as a background job + Spanish.**
   - **Live TV → proper EPG guide.** Replaced the sidebar list with a DirecTV-style grid: a
     now-playing **preview pane** on top, then a scrolling **guide** — channel column on the left,
@@ -195,10 +207,8 @@ vs a Fire TV / Nvidia Shield box. (Separate from #1, which is the *web* UI feeli
 **Items 1–3 SHIPPED** (see "Collections tab + Live TV + AI subtitles" under Done). Remaining
 follow-ups + the still-gated item 4:
 
-- **AI subtitles speed (Whisper on GPU).** Transcription is CPU-bound and slow for full movies.
-  Ship an easy switch to the whisper **cuBLAS** build for the Dell's 1050 Ti (auto-detect NVIDIA
-  via `nvcuda.dll` and pick the GPU build on install, with a CPU fallback if it won't load).
-  DONE this pass: background job + progress + Spanish/any-language translation.
+- **AI subtitles speed — DONE** (GPU cuBLAS auto-select + greedy decoding). Possible next:
+  a model picker (tiny/base/small) and a "generate ahead of time" batch for a whole show.
 - **Live TV polish**: per-show episode-length durations in the schedule (currently a 30-min block
   per series airing), horizontal time-scroll in the guide, channel logos, and letting a tuned
   **show** drop into the live episode+offset (movies already drop in at the live offset).

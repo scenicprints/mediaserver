@@ -4,20 +4,32 @@
 // or translated to English. Generated tracks are cached as sidecar .vtt files
 // next to the video so it's a one-time cost per file+mode.
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { execFile, spawn } from 'node:child_process';
 
-// Overridable in config.json (release asset names drift over whisper.cpp
-// versions). Default is the CPU x64 build — works on any Windows box. The Dell's
-// 1050 Ti could use the much faster cuBLAS build by setting `whisperBinUrl` to
-// whisper-cublas-12.4.0-bin-x64.zip (needs the CUDA runtime). Model URL is
-// stable on Hugging Face.
-const DEFAULT_BIN_URL = 'https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.1/whisper-bin-x64.zip';
+// Two prebuilt Windows binaries (overridable in config.json — release asset
+// names drift). The **GPU (cuBLAS)** build is many times faster and bundles the
+// CUDA runtime DLLs, so it runs with just an NVIDIA driver (no CUDA toolkit).
+// We pick it automatically when an NVIDIA driver is present (nvcuda.dll), and
+// fall back to the CPU build if it can't load. Model URL is stable on HF.
+const CPU_BIN_URL = 'https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.1/whisper-bin-x64.zip';
+const GPU_BIN_URL = 'https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.1/whisper-cublas-12.4.0-bin-x64.zip';
 const DEFAULT_MODEL_URL = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin';
 const WIN_TAR = 'C:\\Windows\\System32\\tar.exe';
 
 let binPath = null;
 let modelPath = null;
+let usingGpu = false;   // is the active binary the cuBLAS build?
+let gpuDetected = false; // is an NVIDIA driver present on this machine?
+
+// An NVIDIA driver present means the GPU build's nvcuda dependency is satisfied.
+function gpuAvailable(config = {}) {
+  if (config.whisperGpu === false) return false;
+  if (config.whisperGpu === true) return true;
+  try { return fs.existsSync('C:\\Windows\\System32\\nvcuda.dll'); } catch { return false; }
+}
+function whisperThreads() { return Math.max(4, Math.min(8, Math.floor(os.cpus().length / 2))); }
 
 function tryRun(cmd, args) {
   return new Promise((resolve) => {
@@ -64,13 +76,35 @@ export async function detectWhisper(root, config = {}) {
       if (modelPath) break;
     }
   } catch {}
+  gpuDetected = gpuAvailable(config);
+  // The active build is the GPU one if the CUDA runtime sits beside the binary.
+  usingGpu = !!(binPath && fs.existsSync(path.join(path.dirname(binPath), 'cublas64_12.dll')));
   // The .exe existing is enough — whisper CLIs exit non-zero on --help, so we
   // don't gate on running it; generate() surfaces any real runtime error.
   return status();
 }
 
 export function status() {
-  return { available: !!(binPath && modelPath), hasBinary: !!binPath, hasModel: !!modelPath, installing: install.phase ? { phase: install.phase, pct: install.pct } : null, error: install.error };
+  return {
+    available: !!(binPath && modelPath), hasBinary: !!binPath, hasModel: !!modelPath,
+    gpu: usingGpu, gpuAvailable: gpuDetected,
+    installing: install.phase ? { phase: install.phase, pct: install.pct } : null, error: install.error
+  };
+}
+
+// Prove a freshly-installed binary actually loads (the GPU build fails to start
+// if its DLLs can't load). Running --help prints usage and exits 1 when healthy;
+// a DLL-load failure produces no output and a special exit code.
+function testRun() {
+  return new Promise((resolve) => {
+    if (!binPath) return resolve(false);
+    const p = spawn(binPath, ['--help'], { windowsHide: true, cwd: path.dirname(binPath) });
+    let out = '';
+    p.stdout.on('data', (d) => (out += d));
+    p.stderr.on('data', (d) => (out += d));
+    p.on('error', () => resolve(false));
+    p.on('close', (code) => resolve(out.length > 20 || code === 1));
+  });
 }
 
 const install = { phase: null, pct: 0, error: null };
@@ -90,23 +124,43 @@ async function download(url, dest, phaseLabel) {
   await new Promise((r, j) => out.end((e) => (e ? j(e) : r())));
 }
 
-export async function installWhisper(root, config) {
+// Download + extract a binary build into tools/whisper (wiping any old binary
+// first, but never the model). Returns nothing; sets binPath via detect.
+async function fetchBinary(dir, url) {
+  // Remove a previous binary folder so switching CPU<->GPU is clean.
+  try { fs.rmSync(path.join(dir, 'Release'), { recursive: true, force: true }); } catch {}
+  const zip = path.join(dir, 'whisper.zip');
+  await download(url, zip, 'downloading binary');
+  install.phase = 'extracting';
+  await new Promise((resolve, reject) => execFile(fs.existsSync(WIN_TAR) ? WIN_TAR : 'tar', ['-xf', zip, '-C', dir], { windowsHide: true }, (e) => (e ? reject(e) : resolve())));
+  fs.rmSync(zip, { force: true });
+}
+
+// Install (or `force`-reinstall to switch CPU<->GPU). Picks the GPU build when
+// an NVIDIA driver is present, verifies it loads, and falls back to CPU if not.
+export async function installWhisper(root, config, { force = false } = {}) {
   if (install.phase) return;
   install.error = null;
   const dir = path.join(root, 'tools', 'whisper');
   const modelsDir = path.join(dir, 'models');
   try {
     fs.mkdirSync(modelsDir, { recursive: true });
-    // Binary (skip if the user already dropped one in / config points to one).
     await detectWhisper(root, config);
-    if (!binPath) {
-      const zip = path.join(dir, 'whisper.zip');
-      await download(config.whisperBinUrl || DEFAULT_BIN_URL, zip, 'downloading binary');
-      install.phase = 'extracting';
-      await new Promise((resolve, reject) => execFile(fs.existsSync(WIN_TAR) ? WIN_TAR : 'tar', ['-xf', zip, '-C', dir], { windowsHide: true }, (e) => (e ? reject(e) : resolve())));
-      fs.rmSync(zip, { force: true });
+
+    const wantGpu = gpuAvailable(config);
+    const needBinary = force || !binPath || (wantGpu && !usingGpu);
+    if (needBinary) {
+      const url = config.whisperBinUrl || (wantGpu ? GPU_BIN_URL : CPU_BIN_URL);
+      await fetchBinary(dir, url);
+      await detectWhisper(root, config);
+      // If we installed the GPU build but it won't load, fall back to CPU.
+      if (binPath && usingGpu && !(await testRun())) {
+        install.phase = 'downloading binary';
+        await fetchBinary(dir, config.whisperCpuUrl || CPU_BIN_URL);
+        await detectWhisper(root, config);
+      }
     }
-    // Model.
+
     if (!modelPath) {
       await download(config.whisperModelUrl || DEFAULT_MODEL_URL, path.join(modelsDir, 'ggml-base.bin'), 'downloading model');
     }
@@ -138,8 +192,11 @@ export async function generate(root, ffmpegPath, videoPath, { language = 'auto',
   });
 
   const outBase = wav.replace(/\.wav$/, '');
-  // -pp prints "progress = NN%" to stderr as it decodes.
-  const args = ['-m', modelPath, '-f', wav, '-ovtt', '-of', outBase, '-l', language, '-pp'];
+  // Speed: use several threads and greedy decoding (beam/best-of = 1) — far
+  // faster than the default beam search, with only a small accuracy cost.
+  // -pp prints "progress = NN%" as it decodes.
+  const args = ['-m', modelPath, '-f', wav, '-ovtt', '-of', outBase, '-l', language,
+    '-t', String(whisperThreads()), '-bo', '1', '-bs', '1', '-pp'];
   if (translate) args.push('--translate');
   await new Promise((resolve, reject) => {
     // Run from the binary's own folder so Windows finds its sibling DLLs
