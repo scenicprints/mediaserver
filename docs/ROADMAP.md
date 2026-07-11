@@ -61,6 +61,21 @@ Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed
   full grid**.
 - **Franchise / collection grouping** — movie detail shows a "… Collection" section (TMDB
   `belongs_to_collection` → `/collection/{id}`), entries in order, owned ones playable.
+- **tvOS focus engine (10-ft / remote navigation)** — the whole web UI now drives like an
+  Apple-TV interface. A new `public/focus.js` is a self-contained **spatial navigation engine**:
+  arrow keys / a TV remote move a single **focused** item that **scales + glows** (white +
+  accent ring, revealed hover-info) while the rest of the field **dims**; focus follows with
+  `scrollIntoView` (cards center in their row). **Enter** activates (dispatches a real click,
+  so every existing card/button keeps its behavior), **Backspace** is the Menu/Back button
+  (closes the top modal / detail). Horizontal moves stay **in-row and wrap** at the ends (Right
+  past the last card drops to the next row; Left before the first rises to the previous row);
+  vertical moves cross rows preserving column. It's **scope-aware** — an open modal traps focus
+  inside itself, then the detail view, then main browse — and **suspends** during the video
+  player / update overlay (they own the keyboard). **Mouse and remote coexist**: any mouse
+  movement drops out of remote mode so normal hover returns; the next arrow re-lights focus.
+  New screens (detail, modals) **pre-seat** focus on their primary Play button. Decoupled from
+  `app.js` (pure DOM + MutationObservers), so it needed no changes to existing view code.
+  In remote mode the top menu also grows slightly to read as a proper 10-ft menu bar.
 - **Full cinematic detail page** (movies + shows): full-page takeover with a big backdrop splash
   (distinct from the poster), genres, runtime, a discreet **version dropdown** showing file
   differences (quality · size · codec/source), **Cast & Crew** and **Trailers** and **More
@@ -70,12 +85,13 @@ Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed
 ---
 
 ## 🔜 Next (start here — priority order)
-1. **Apple‑TV / tvOS look & feel (the owner's top priority).** Make the whole UI feel like a
-   10‑foot Apple‑TV interface so a future native tvOS app transitions smoothly. Started this
-   pass: bigger cards + a hover focus‑ring glow. **Still to do:** a real **focus engine** —
-   arrow‑key/remote navigation with a single "focused" item that scales + glows while others
-   dim, `scrollIntoView` as focus moves, Enter to open, wrap‑around across rows; larger 10‑ft
-   typography/spacing; a tvOS‑style top menu. This deserves a dedicated batch.
+1. **tvOS look & feel — polish pass (the focus engine itself is DONE, see above).** The remote
+   focus engine (arrow/Enter/Back nav, scale+glow, dim, wrap, scoped to modals/detail) shipped.
+   Remaining refinements: verify it on the **real Apple TV / Fire TV remote** (their D-pads emit
+   arrow keys, but confirm Enter/Back mappings); optionally push **larger 10-ft typography** more
+   broadly (currently only the top menu grows in remote mode); let the remote **focus + type in
+   the search box** (deliberately excluded for now so arrows keep navigating); consider a
+   left/right **Skip Intro / Up Next** reachable by remote inside the player.
 2. **Embedded subtitles inside media files** (owner asked; `.mkv` often has embedded subs).
    Browsers can't read them, so it needs **ffprobe** to detect + **ffmpeg** to extract to
    WebVTT on demand. Same ffmpeg pipeline as #3.

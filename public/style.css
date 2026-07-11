@@ -498,6 +498,54 @@ button { font-family: inherit; }
   animation: shimmer 1.3s infinite; border-radius: var(--r-card); }
 @keyframes shimmer { to { background-position: -200% 0; } }
 
+/* ---------- tvOS focus engine (10-ft / remote nav) ---------- */
+/* Hide the mouse cursor while driving by remote; the field dims so the one
+   focused item reads as a spotlight from across the room. */
+body.tv-nav { cursor: none; }
+.tv-focus { outline: none; }
+
+/* Cards: the focused poster scales up with a bright ring + accent glow, and
+   its hover-info overlay reveals; siblings dim. Hover scaling is suppressed in
+   remote mode so the two highlight systems never fight. */
+body.tv-nav .card { transition: transform 0.18s cubic-bezier(0.2, 0.7, 0.2, 1), filter 0.18s ease; }
+body.tv-nav .card:not(.tv-focus) { filter: brightness(0.58) saturate(0.85); }
+body.tv-nav .card:hover { transform: none; }
+.card.tv-focus { transform: scale(1.16); z-index: 8; }
+.card.tv-focus .poster {
+  box-shadow: 0 0 0 3px #fff, 0 0 0 7px var(--accent), 0 22px 60px rgba(0, 0, 0, 0.7), 0 0 40px rgba(108, 92, 255, 0.75);
+}
+.card.tv-focus .card-info { opacity: 1; transform: translateY(0); }
+
+/* Artwork tiles that aren't posters (season/rec/trailer) pop + ring. */
+.season-card.tv-focus, .rec.tv-focus, .trailer-card.tv-focus { transform: scale(1.1); z-index: 8; }
+.season-card.tv-focus .sc-poster,
+.rec.tv-focus .poster,
+.trailer-card.tv-focus .trailer-thumb {
+  box-shadow: 0 0 0 3px #fff, 0 0 0 6px var(--accent), 0 0 32px rgba(108, 92, 255, 0.7);
+}
+.rec.tv-focus { opacity: 1 !important; }
+
+/* Buttons, nav, chips, list rows: a clean accent glow-ring. */
+.btn.tv-focus, .nav-link.tv-focus, .see-all.tv-focus, .tab.tv-focus,
+.az.tv-focus, .close.tv-focus, .detail-close.tv-focus, .icon-btn.tv-focus,
+.rm.tv-focus, .hero-dot.tv-focus, #update-pill.tv-focus {
+  box-shadow: 0 0 0 3px var(--accent), 0 0 0 6px rgba(108, 92, 255, 0.32), 0 0 22px rgba(108, 92, 255, 0.55);
+}
+.nav-link.tv-focus { color: var(--text); background: rgba(108, 92, 255, 0.16); }
+.btn.tv-focus { transform: translateY(-1px); }
+.hero-dot.tv-focus { transform: scale(1.5); }
+
+.episode.tv-focus, .frow.tv-focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent), 0 0 20px rgba(108, 92, 255, 0.5);
+}
+.episode.tv-focus { background: #1b2130; }
+
+/* 10-ft breathing room: while driving by remote the top menu grows a touch so
+   it reads as a proper tvOS menu bar. */
+body.tv-nav .nav { padding-top: 20px; padding-bottom: 20px; }
+body.tv-nav .nav-link { font-size: 17px; padding: 9px 15px; }
+
 /* ---------- Responsive ---------- */
 @media (max-width: 820px) {
   :root { --edge: 18px; }
