@@ -20,6 +20,10 @@ let heroItems = [];
 let heroIdx = 0;
 let heroTimer = null;
 
+// Skip Intro / Skip Credits are temporarily pulled (buggy on real content) —
+// set to true to restore when the intro-detection rebuild is ready.
+const SKIP_BUTTONS_ENABLED = false;
+
 const NEW_MS = 14 * 24 * 3600 * 1000;
 const isNew = (it) => it.added_at && Date.now() - it.added_at < NEW_MS;
 const byRecent = (a, b) => (b.added_at || 0) - (a.added_at || 0);
@@ -1574,6 +1578,9 @@ function openPlayer(ctx) {
   // for anything, incl. a cold open before the intro). Without chapters we fall
   // back to a heuristic — but only for TV episodes, since movies have no intro.
   function updateSkipButtons() {
+    // TEMPORARILY DISABLED — Skip Intro/Credits pulled pending a rebuild. Flip
+    // SKIP_BUTTONS_ENABLED (top of file) to true to restore.
+    if (!SKIP_BUTTONS_ENABLED) { skipIntro.classList.add('hidden'); skipCredits.classList.add('hidden'); return; }
     if (live) return; // no skipping on a live feed
     const t = cur(), d = dur();
     let showIntro = false, showCredits = false;

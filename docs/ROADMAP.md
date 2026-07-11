@@ -267,13 +267,18 @@ Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed
 ---
 
 ## 🔜 Next (start here — priority order)
-0. **Skip Intro via audio fingerprinting — DONE (see above).** Follow-ups: **tune the thresholds on
-   the real library** via the Dell's Claude (check a few shows; adjust `BIT_THRESH`/`MIN_INTRO_SEC`
-   in `src/introdetect.js` if intros are mis-bounded); consider a **manual re-run trigger** /
-   progress indicator in Settings; and the **same technique on end-credits** for a precise Skip
-   Credits. Note: the scanner leaves **stale file rows** when a file is deleted/replaced on disk
-   (surfaced during testing) — a small cleanup worth doing (prune episode_files/movie_files whose
-   path no longer exists on rescan).
+0. **Skip Intro — built but TEMPORARILY DISABLED; needs a rebuild.** The audio-fingerprint
+   detection (`src/introdetect.js`) works in the lab but was **wrong on real content** (button
+   didn't bound correctly / persisted until pressed), so both the **background job** (gated behind
+   `config.introDetection`, default off) and the **player buttons** (`SKIP_BUTTONS_ENABLED = false`
+   at the top of `public/app.js` — hides both Skip Intro *and* Skip Credits) are OFF. The code and
+   DB columns remain. Rebuild plan when we return: **tune thresholds on the real library** via the
+   Dell's Claude (adjust `BIT_THRESH`/`MIN_INTRO_SEC`/`MAX_GAP`; require a stronger match/consensus
+   across more than adjacent pairs), fix the **button auto-hide/bounds**, add a Settings toggle +
+   progress, and consider end-credits detection. Also: the whole feature must stay **fully async**
+   (it once froze playback — see fc263dd). Separately, the scanner leaves **stale file rows** when a
+   file is deleted/replaced on disk — worth pruning `episode_files`/`movie_files` with missing paths
+   on rescan.
 0b. **Whisper "auto-generate subtitles for files that have none" (opt-in toggle).** Owner asked
     whether to pre-generate like intros — decided NO for the whole library (too expensive, rarely
     needed), but a targeted background job for files with **zero** existing subtitle tracks is

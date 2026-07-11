@@ -865,14 +865,15 @@ async function start() {
     })().catch((e) => console.error('Enrichment error:', e.message));
   }
 
-  // Intro (theme-song) detection + episode-duration probing — its own background
-  // job (needs ffmpeg/fpcalc, not TMDB). Fully async so it never blocks playback;
-  // waits for the server to settle first, runs once per episode (intro_checked
-  // guards it), and picks up new episodes on rescan.
-  (async () => {
-    await new Promise((r) => setTimeout(r, 45000)); // let boot/scan settle before the heavy job
-    await runIntroDetection(db, ROOT, config, { log: (x) => console.log(x) });
-  })().catch((e) => console.error('Intro detection error:', e.message));
+  // Intro (theme-song) detection + episode-duration probing — TEMPORARILY OFF
+  // (pulled pending a rebuild). Set `"introDetection": true` in config.json to
+  // re-enable. Fully async when it runs, so it never blocks playback.
+  if (config.introDetection) {
+    (async () => {
+      await new Promise((r) => setTimeout(r, 45000)); // let boot/scan settle before the heavy job
+      await runIntroDetection(db, ROOT, config, { log: (x) => console.log(x) });
+    })().catch((e) => console.error('Intro detection error:', e.message));
+  }
 
   await app.listen({ port: config.port, host: config.host });
   console.log(`\n  Media server running at http://localhost:${config.port}\n`);
