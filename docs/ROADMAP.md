@@ -76,6 +76,16 @@ Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed
   New screens (detail, modals) **pre-seat** focus on their primary Play button. Decoupled from
   `app.js` (pure DOM + MutationObservers), so it needed no changes to existing view code.
   In remote mode the top menu also grows slightly to read as a proper 10-ft menu bar.
+- **Live TV: 25 channels + an audience-aware lineup.** Replaced the "top-N genres + everything"
+  channel builder (which put a kids show next to an adult one) with a curated, prioritized list
+  of ~32 channel definitions, keeping the first **25** that have ≥3 titles. Each channel is one
+  coherent filter (PRIME, ADRENALINE/Action, NIGHTMARE/Horror, FAMILY ROOM, decades, TOP SHELF…).
+  A genre-based **audience tier** (family / general / mature) gates every channel: family-safe
+  channels never include mature titles and mature channels never include family titles, so a
+  **kids title and an adult title can never share a channel**. Mature channels are interleaved
+  into the lineup (not dumped last) so every audience has a home. Verified with a synthetic
+  library: exactly 25 channels, all mature channels + the family channel present, zero
+  family/mature mixing.
 - **Whisper progress that actually moves; Skip Intro/Credits via chapters.**
   - **Whisper "stuck at 0%" fixed.** The wait was mostly **audio extraction** (ffmpeg pulling a
     full movie's audio out before Whisper starts) shown as "transcribing 0%." Now extraction is

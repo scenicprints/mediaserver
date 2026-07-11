@@ -252,12 +252,6 @@ async function openCollection(id) {
 // the "now playing" is computed from the wall clock, so every device tuned to
 // a channel sees the same thing "on air." Movies and shows are mixed.
 const LT_EPOCH = 1704067200; // 2024-01-01 UTC — a fixed origin for the schedule
-const STATION_NAMES = {
-  Action: 'ADRENALINE', Comedy: 'THE LAUGH TRACK', Drama: 'PRESTIGE', 'Science Fiction': 'NEBULA',
-  Horror: 'NIGHTMARE', Family: 'FAMILY ROOM', Animation: 'TOON CITY', Romance: 'HEARTLINE',
-  Thriller: 'PULSE', Fantasy: 'MYTHOS', Crime: 'PRECINCT', Adventure: 'TRAILBLAZER',
-  Mystery: 'ENIGMA', Documentary: 'THE REAL', War: 'FRONTLINE', Western: 'FRONTIER', Music: 'THE MIX'
-};
 let ltState = null; // { channels, sel, timer, onKey }
 
 function hashStr(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; }
@@ -270,33 +264,88 @@ function seededShuffle(arr, seed) {
 }
 const ltDuration = (it) => it.kind === 'show' ? 30 * 60 : ((it.ref.runtime && it.ref.runtime * 60) || it.ref.duration || 105 * 60);
 
+// Audience tier from genres. Certifications aren't in TMDB data here, so we
+// approximate: Horror/War (and Thriller/Crime that isn't also Family) = mature;
+// Family/Kids (and non-mature Animation) = family; everything else general.
+const LT_MATURE_HARD = ['Horror', 'War'];
+const LT_MATURE_SOFT = ['Thriller', 'Crime'];
+const LT_FAMILY_G = ['Family', 'Kids'];
+function ltTier(it) {
+  const g = genresOf(it.ref);
+  const some = (arr) => g.some((x) => arr.includes(x));
+  if (some(LT_MATURE_HARD)) return 'mature';
+  if (some(LT_MATURE_SOFT) && !some(LT_FAMILY_G)) return 'mature';
+  if (some(LT_FAMILY_G)) return 'family';
+  if (g.includes('Animation') && !some([...LT_MATURE_HARD, ...LT_MATURE_SOFT])) return 'family';
+  return 'general';
+}
+// A channel is either family-safe (family + general, never mature) or mature
+// (general + mature, never family). So a kids title and an adult title can
+// never share a channel — the "kids show then adult show" bug.
+const ltAudOk = (it, mature) => (mature ? ltTier(it) !== 'family' : ltTier(it) !== 'mature');
+
 function buildChannels() {
-  const chans = [];
-  const withBackdrop = (list, kind) => list.filter((x) => x.backdrop || x.poster).map((ref) => ({ kind, ref }));
-  const mv = withBackdrop(movies, 'movie');
-  const sh = withBackdrop(shows, 'show');
+  const withArt = (list, kind) => list.filter((x) => x.backdrop || x.poster).map((ref) => ({ kind, ref }));
+  const all = [...withArt(movies, 'movie'), ...withArt(shows, 'show')];
+  if (!all.length) return [];
 
-  // A prime movie channel + an all-TV channel.
-  if (mv.length) chans.push({ name: 'THE MAIN EVENT', sub: 'Feature Presentations', items: [...mv].sort((a, b) => (b.ref.rating || 0) - (a.ref.rating || 0)) });
-  if (sh.length) chans.push({ name: 'THE BINGE', sub: 'All Series', items: sh });
+  const has = (it, name) => genresOf(it.ref).includes(name);
+  const hasAny = (it, names) => genresOf(it.ref).some((x) => names.includes(x));
+  const decadeOf = (it) => (it.ref.year ? Math.floor(it.ref.year / 10) * 10 : null);
+  const byRating = (a, b) => (b.ref.rating || 0) - (a.ref.rating || 0);
+  const byYear = (a, b) => (b.ref.year || 0) - (a.ref.year || 0);
 
-  // Genre channels (mixing movies + shows), for the most common genres.
-  const all = [...mv, ...sh];
-  const counts = {};
-  all.forEach((it) => genresOf(it.ref).forEach((g) => (counts[g] = (counts[g] || 0) + 1)));
-  Object.keys(counts).sort((a, b) => counts[b] - counts[a]).filter((g) => counts[g] >= 2).slice(0, 8).forEach((g) => {
-    const items = all.filter((it) => genresOf(it.ref).includes(g));
-    chans.push({ name: STATION_NAMES[g] || g.toUpperCase(), sub: `${g} · 24/7`, items });
-  });
+  // Each channel is one clear, coherent filter. `mature` flips the audience gate.
+  // Ordered by broad appeal AND balanced across audiences (mature channels are
+  // interleaved, not dumped at the end) so we keep a good mix within the first 25.
+  const defs = [
+    { name: 'PRIME', sub: 'Feature Films', pick: (it) => it.kind === 'movie', sort: byRating },
+    { name: 'BINGE TV', sub: 'Series Marathon', pick: (it) => it.kind === 'show' },
+    { name: 'ADRENALINE', sub: 'Action', pick: (it) => has(it, 'Action'), sort: byRating },
+    { name: 'THE LAUGH TRACK', sub: 'Comedy', pick: (it) => has(it, 'Comedy') },
+    { name: 'NIGHTMARE', sub: 'Horror', mature: true, pick: (it) => has(it, 'Horror') },
+    { name: 'PRESTIGE', sub: 'Drama', pick: (it) => has(it, 'Drama'), sort: byRating },
+    { name: 'FAMILY ROOM', sub: 'Family & Kids', pick: (it) => ltTier(it) === 'family' },
+    { name: 'NEBULA', sub: 'Science Fiction', pick: (it) => has(it, 'Science Fiction') },
+    { name: 'PRECINCT', sub: 'Crime', mature: true, pick: (it) => has(it, 'Crime') },
+    { name: 'MYTHOS', sub: 'Fantasy', pick: (it) => has(it, 'Fantasy') },
+    { name: 'PULSE', sub: 'Thrillers', mature: true, pick: (it) => has(it, 'Thriller') },
+    { name: 'TRAILBLAZER', sub: 'Adventure', pick: (it) => has(it, 'Adventure') },
+    { name: 'HEARTLINE', sub: 'Romance', pick: (it) => has(it, 'Romance') },
+    { name: 'TOP SHELF', sub: 'Top Rated', pick: (it) => (it.ref.rating || 0) >= 7.5, sort: byRating },
+    { name: 'TOON CITY', sub: 'Animation', pick: (it) => has(it, 'Animation') },
+    { name: 'BLOCKBUSTER', sub: 'Big & Loud', pick: (it) => hasAny(it, ['Action', 'Adventure', 'Science Fiction']) && (it.ref.rating || 0) >= 6.5, sort: byRating },
+    { name: 'AFTER DARK', sub: 'Late Night', mature: true, pick: (it) => hasAny(it, ['Horror', 'Thriller', 'Crime']), sort: byRating },
+    { name: 'THE CRITICS', sub: 'Acclaimed', pick: (it) => (it.ref.rating || 0) >= 8, sort: byRating },
+    { name: 'FRESH', sub: 'New Releases', pick: (it) => (it.ref.year || 0) >= 2020, sort: byYear },
+    { name: 'REWIND 80s', sub: '1980s', pick: (it) => decadeOf(it) === 1980 },
+    { name: 'REWIND 90s', sub: '1990s', pick: (it) => decadeOf(it) === 1990 },
+    { name: 'FLASHBACK 00s', sub: '2000s', pick: (it) => decadeOf(it) === 2000 },
+    { name: 'THROWBACK 10s', sub: '2010s', pick: (it) => decadeOf(it) === 2010 },
+    { name: 'ENIGMA', sub: 'Mystery', pick: (it) => has(it, 'Mystery') },
+    { name: 'FRONTLINE', sub: 'War Stories', mature: true, pick: (it) => has(it, 'War') },
+    // Fillers below — used only if some channels above lack content.
+    { name: 'THE REAL', sub: 'Documentary', pick: (it) => has(it, 'Documentary') },
+    { name: 'ENCORE', sub: 'Music & Musicals', pick: (it) => has(it, 'Music') },
+    { name: 'FRONTIER', sub: 'Westerns', pick: (it) => has(it, 'Western') },
+    { name: 'SATURDAY MORNING', sub: 'Cartoons', pick: (it) => has(it, 'Animation') && ltTier(it) === 'family' },
+    { name: 'DATE NIGHT', sub: 'Rom-Coms', pick: (it) => has(it, 'Romance') && has(it, 'Comedy') },
+    { name: 'SITCOM CENTRAL', sub: 'TV Comedies', pick: (it) => it.kind === 'show' && has(it, 'Comedy') },
+    { name: 'THE SERIAL', sub: 'TV Dramas', pick: (it) => it.kind === 'show' && has(it, 'Drama'), sort: byRating }
+  ];
 
-  // A nostalgia channel from the most-represented decade.
-  const decCounts = {};
-  mv.forEach((it) => { if (it.ref.year) { const d = Math.floor(it.ref.year / 10) * 10; decCounts[d] = (decCounts[d] || 0) + 1; } });
-  const topDec = Object.keys(decCounts).sort((a, b) => decCounts[b] - decCounts[a])[0];
-  if (topDec) chans.push({ name: `REWIND ${String(topDec).slice(2)}s`, sub: `${topDec}s Classics`, items: mv.filter((it) => it.ref.year >= +topDec && it.ref.year < +topDec + 10) });
-
-  // Finalize: give each a number + a stable looping playlist + total runtime.
-  return chans.filter((c) => c.items.length).map((c, i) => {
+  const MIN = 3; // don't launch a channel with too little to air
+  const channels = [];
+  const seenName = new Set();
+  for (const d of defs) {
+    if (channels.length >= 25) break;
+    let items = all.filter((it) => d.pick(it) && ltAudOk(it, !!d.mature));
+    if (items.length < MIN || seenName.has(d.name)) continue;
+    if (d.sort) items = items.slice().sort(d.sort);
+    seenName.add(d.name);
+    channels.push({ name: d.name, sub: d.sub, items });
+  }
+  return channels.map((c, i) => {
     const playlist = seededShuffle(c.items, hashStr(c.name));
     const total = playlist.reduce((s, it) => s + ltDuration(it), 0);
     return { ...c, number: i + 2, playlist, total };
