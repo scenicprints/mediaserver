@@ -165,5 +165,69 @@ export function openDb(dbPath) {
     );
   `);
 
+  // ---- Multi-user: accounts, sessions, per-user settings & watch state ----
+  // The server is now internet-facing with logins. Each account gets its own
+  // watch state, playback prefs and OpenSubtitles login; the first account
+  // created (via the app's baked-in invite code) becomes the admin.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      username      TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      role          TEXT NOT NULL DEFAULT 'user',
+      created_at    INTEGER
+    );
+  `);
+
+  // Long-lived session tokens (a device stays logged in until it logs out).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS tokens (
+      token        TEXT PRIMARY KEY,
+      user_id      INTEGER NOT NULL,
+      created_at   INTEGER,
+      last_used_at INTEGER
+    );
+  `);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_tokens_user ON tokens(user_id);');
+
+  // Per-user settings that must stay server-side and private (e.g. each user's
+  // own OpenSubtitles login, so subtitle downloads use their own quota).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS user_settings (
+      user_id INTEGER NOT NULL,
+      key     TEXT NOT NULL,
+      value   TEXT,
+      PRIMARY KEY (user_id, key)
+    );
+  `);
+
+  // Per-user watch state (resume point / watched / favorite / last played),
+  // replacing the global columns on movies/episodes so two people don't collide.
+  // `duration` stays on the media rows — it's a property of the file, not the user.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS watch_state (
+      user_id         INTEGER NOT NULL,
+      kind            TEXT NOT NULL,            -- 'movie' | 'episode'
+      item_id         INTEGER NOT NULL,
+      resume_position REAL DEFAULT 0,
+      watched         INTEGER DEFAULT 0,
+      favorite        INTEGER DEFAULT 0,
+      last_played_at  INTEGER,
+      PRIMARY KEY (user_id, kind, item_id)
+    );
+  `);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_watch_user ON watch_state(user_id);');
+
+  // Per-user playback prefs (preferred version per title, caption delay per
+  // file+track, last quality) — the per-user replacement for the global `prefs`.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS user_prefs (
+      user_id INTEGER NOT NULL,
+      key     TEXT NOT NULL,
+      value   TEXT,
+      PRIMARY KEY (user_id, key)
+    );
+  `);
+
   return db;
 }

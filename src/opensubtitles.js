@@ -3,19 +3,25 @@
 const BASE = 'https://api.opensubtitles.com/api/v1';
 const UA = 'MyMediaServer v1.0';
 
-let tokenCache = { token: null, expires: 0 };
+// Per-account token cache (keyed by apiKey+username) — each user has their own
+// OpenSubtitles login, so their tokens must not collide.
+const tokenCache = new Map();
+const cacheKey = (cfg) => `${cfg.apiKey}|${cfg.username || ''}`;
 
 export function osEnabled(cfg) {
   return !!(cfg && cfg.apiKey);
 }
 
-// Drop the cached login token (call after credentials change).
-export function clearAuth() {
-  tokenCache = { token: null, expires: 0 };
+// Drop the cached login token (call after credentials change). Pass a cfg to
+// clear just that account, or nothing to clear all.
+export function clearAuth(cfg) {
+  if (cfg) tokenCache.delete(cacheKey(cfg));
+  else tokenCache.clear();
 }
 
 async function login(cfg) {
-  if (tokenCache.token && Date.now() < tokenCache.expires) return tokenCache.token;
+  const cached = tokenCache.get(cacheKey(cfg));
+  if (cached && Date.now() < cached.expires) return cached.token;
   if (!cfg.username || !cfg.password) return null;
   let res;
   try {
@@ -29,7 +35,7 @@ async function login(cfg) {
   }
   if (!res.ok) return null;
   const data = await res.json();
-  tokenCache = { token: data.token, expires: Date.now() + 23 * 3600 * 1000 };
+  tokenCache.set(cacheKey(cfg), { token: data.token, expires: Date.now() + 23 * 3600 * 1000 });
   return data.token;
 }
 

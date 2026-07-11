@@ -15,6 +15,7 @@ import { detectWhisper, status as whisperStatus, installWhisper, generate as gen
 import { translateVttFile } from './translate.js';
 import { radarrEnabled, sonarrEnabled, testConn, radarrSearch, radarrAdd, sonarrSearch, sonarrAdd, getProfiles, radarrQueue, sonarrQueue } from './arr.js';
 import { runIntroDetection, introForFile } from './introdetect.js';
+import { hashPassword, verifyPassword, newToken, tokenFromReq, cookieHeader } from './auth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -50,19 +51,230 @@ app.register(fastifyStatic, {
   prefix: '/'
 });
 
+// ---- Auth guard ----
+// The invite code is baked into the app you hand out, so anyone with the app
+// can self-register, but a stranger who finds the public URL cannot. Override
+// it in config.json (never commit it).
+const INVITE_CODE = String(config.inviteCode || 'CHANGE-ME');
+const HTTPS = !!config.https; // set once we're behind TLS, to mark cookies Secure
+
+// Endpoints reachable without a session (everything else under /api requires one).
+const AUTH_PUBLIC = new Set(['/api/auth/status', '/api/register', '/api/login']);
+
+function currentUser(req) {
+  const tok = tokenFromReq(req);
+  if (!tok) return null;
+  const row = db.prepare(
+    'SELECT u.id, u.username, u.role FROM tokens t JOIN users u ON u.id = t.user_id WHERE t.token = ?'
+  ).get(tok);
+  if (row) db.prepare('UPDATE tokens SET last_used_at = ? WHERE token = ?').run(Date.now(), tok);
+  return row || null;
+}
+
+function requireAdmin(req, reply) {
+  if (!req.user || req.user.role !== 'admin') {
+    reply.code(403).send({ error: 'admin only' });
+    return false;
+  }
+  return true;
+}
+
+// Gate every /api/* route (except the auth endpoints) behind a valid session.
+// Static files (the UI + login page) stay public so the app can load and log in.
+app.addHook('onRequest', async (req, reply) => {
+  const url = req.url.split('?')[0];
+  if (!url.startsWith('/api/')) return;
+  if (AUTH_PUBLIC.has(url)) return;
+  const user = currentUser(req);
+  if (!user) return reply.code(401).send({ error: 'unauthorized' });
+  req.user = user;
+});
+
+// Simple per-IP throttle on the credential endpoints (they're internet-facing).
+const authHits = new Map();
+function authThrottled(req) {
+  const ip = req.ip || 'x';
+  const now = Date.now();
+  const rec = authHits.get(ip) || { n: 0, t: now };
+  if (now - rec.t > 60000) { rec.n = 0; rec.t = now; }
+  rec.n++;
+  authHits.set(ip, rec);
+  return rec.n > 20; // >20 attempts/minute/IP
+}
+
+// When the first (admin) account is created, adopt the pre-accounts globals so
+// the owner keeps their existing watch state, prefs and OpenSubtitles login.
+function migrateGlobalsToAdmin(adminId) {
+  const ins = db.prepare(
+    `INSERT OR IGNORE INTO watch_state (user_id, kind, item_id, resume_position, watched, favorite, last_played_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  );
+  for (const m of db.prepare(
+    'SELECT id, resume_position, watched, favorite, last_played_at FROM movies WHERE resume_position > 0 OR watched = 1 OR favorite = 1 OR last_played_at IS NOT NULL'
+  ).all()) {
+    ins.run(adminId, 'movie', m.id, m.resume_position || 0, m.watched || 0, m.favorite || 0, m.last_played_at || null);
+  }
+  for (const e of db.prepare(
+    'SELECT id, resume_position, watched, last_played_at FROM episodes WHERE resume_position > 0 OR watched = 1 OR last_played_at IS NOT NULL'
+  ).all()) {
+    ins.run(adminId, 'episode', e.id, e.resume_position || 0, e.watched || 0, 0, e.last_played_at || null);
+  }
+  for (const p of db.prepare('SELECT key, value FROM prefs').all()) {
+    db.prepare('INSERT OR IGNORE INTO user_prefs (user_id, key, value) VALUES (?, ?, ?)').run(adminId, p.key, p.value);
+  }
+  const os = config.openSubtitles;
+  if (os) {
+    for (const [k, v] of Object.entries({ 'os:apiKey': os.apiKey, 'os:username': os.username, 'os:password': os.password })) {
+      if (v) db.prepare('INSERT OR IGNORE INTO user_settings (user_id, key, value) VALUES (?, ?, ?)').run(adminId, k, String(v));
+    }
+  }
+}
+
+// ---- Per-user watch state & settings helpers ----
+// resume/watched/favorite/last-played live per-user in watch_state; `duration`
+// stays on the media row (a file property, not per-user).
+function wsGet(userId, kind, itemId) {
+  return db.prepare(
+    'SELECT resume_position, watched, favorite, last_played_at FROM watch_state WHERE user_id = ? AND kind = ? AND item_id = ?'
+  ).get(userId, kind, itemId) || { resume_position: 0, watched: 0, favorite: 0, last_played_at: null };
+}
+function wsUpsert(userId, kind, itemId, fields) {
+  const next = { ...wsGet(userId, kind, itemId), ...fields };
+  db.prepare(
+    `INSERT INTO watch_state (user_id, kind, item_id, resume_position, watched, favorite, last_played_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(user_id, kind, item_id) DO UPDATE SET
+       resume_position = excluded.resume_position, watched = excluded.watched,
+       favorite = excluded.favorite, last_played_at = excluded.last_played_at`
+  ).run(userId, kind, itemId, next.resume_position || 0, next.watched || 0, next.favorite || 0, next.last_played_at ?? null);
+  return next;
+}
+// Overlay a user's watch state onto a list of movie/episode rows (matched by .id).
+function overlayWatch(userId, items, kind = 'movie') {
+  for (const it of items) Object.assign(it, wsGet(userId, kind, it.id));
+  return items;
+}
+// A user's own OpenSubtitles login (stored per-user in user_settings; the raw
+// creds never go to the client).
+function userOS(userId) {
+  const cfg = {};
+  for (const r of db.prepare("SELECT key, value FROM user_settings WHERE user_id = ? AND key LIKE 'os:%'").all(userId)) {
+    cfg[r.key.slice(3)] = r.value;
+  }
+  return cfg;
+}
+
 // ---- API ----
 
-app.get('/api/movies', async () => {
+// ---- Auth / accounts ----
+
+// Does an admin exist yet? The app uses this to show "create account" vs "log in".
+app.get('/api/auth/status', async () => {
+  const n = db.prepare('SELECT COUNT(*) AS n FROM users').get().n;
+  return { hasUsers: n > 0 };
+});
+
+// Self-register with the app's baked-in invite code. The first account created
+// becomes the admin (the owner); everyone after is a normal user.
+app.post('/api/register', async (req, reply) => {
+  if (authThrottled(req)) return reply.code(429).send({ error: 'too many attempts — wait a minute' });
+  const { username, password, code } = req.body || {};
+  if (String(code || '') !== INVITE_CODE) return reply.code(403).send({ error: 'invalid invite code' });
+  const uname = String(username || '').trim().toLowerCase();
+  if (uname.length < 2) return reply.code(400).send({ error: 'username too short' });
+  if (String(password || '').length < 4) return reply.code(400).send({ error: 'password too short' });
+  if (db.prepare('SELECT 1 FROM users WHERE username = ?').get(uname)) {
+    return reply.code(409).send({ error: 'that username is taken' });
+  }
+  const first = db.prepare('SELECT COUNT(*) AS n FROM users').get().n === 0;
+  const role = first ? 'admin' : 'user';
+  const id = db.prepare('INSERT INTO users (username, password_hash, role, created_at) VALUES (?, ?, ?, ?)')
+    .run(uname, hashPassword(password), role, Date.now()).lastInsertRowid;
+  if (first) migrateGlobalsToAdmin(id);
+  const token = newToken();
+  db.prepare('INSERT INTO tokens (token, user_id, created_at, last_used_at) VALUES (?, ?, ?, ?)')
+    .run(token, id, Date.now(), Date.now());
+  reply.header('Set-Cookie', cookieHeader(token, { secure: HTTPS }));
+  return { token, user: { username: uname, role } };
+});
+
+app.post('/api/login', async (req, reply) => {
+  if (authThrottled(req)) return reply.code(429).send({ error: 'too many attempts — wait a minute' });
+  const { username, password } = req.body || {};
+  const uname = String(username || '').trim().toLowerCase();
+  const u = db.prepare('SELECT id, username, password_hash, role FROM users WHERE username = ?').get(uname);
+  if (!u || !verifyPassword(password, u.password_hash)) {
+    return reply.code(401).send({ error: 'wrong username or password' });
+  }
+  const token = newToken();
+  db.prepare('INSERT INTO tokens (token, user_id, created_at, last_used_at) VALUES (?, ?, ?, ?)')
+    .run(token, u.id, Date.now(), Date.now());
+  reply.header('Set-Cookie', cookieHeader(token, { secure: HTTPS }));
+  return { token, user: { username: u.username, role: u.role } };
+});
+
+app.post('/api/logout', async (req, reply) => {
+  const tok = tokenFromReq(req);
+  if (tok) db.prepare('DELETE FROM tokens WHERE token = ?').run(tok);
+  reply.header('Set-Cookie', cookieHeader('', { clear: true }));
+  return { ok: true };
+});
+
+app.get('/api/me', async (req) => ({ user: req.user }));
+
+// Admin: manage accounts (you add your friend here — no server-level access for them).
+app.get('/api/users', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  return db.prepare('SELECT id, username, role, created_at FROM users ORDER BY created_at').all();
+});
+
+app.post('/api/users', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const { username, password, role } = req.body || {};
+  const uname = String(username || '').trim().toLowerCase();
+  if (uname.length < 2) return reply.code(400).send({ error: 'username too short' });
+  if (String(password || '').length < 4) return reply.code(400).send({ error: 'password too short' });
+  if (db.prepare('SELECT 1 FROM users WHERE username = ?').get(uname)) {
+    return reply.code(409).send({ error: 'that username is taken' });
+  }
+  const r = role === 'admin' ? 'admin' : 'user';
+  const id = db.prepare('INSERT INTO users (username, password_hash, role, created_at) VALUES (?, ?, ?, ?)')
+    .run(uname, hashPassword(password), r, Date.now()).lastInsertRowid;
+  return { id, username: uname, role: r };
+});
+
+app.delete('/api/users/:id', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const id = Number(req.params.id);
+  if (id === req.user.id) return reply.code(400).send({ error: "you can't delete your own account" });
+  const target = db.prepare('SELECT role FROM users WHERE id = ?').get(id);
+  if (!target) return reply.code(404).send({ error: 'not found' });
+  if (target.role === 'admin') {
+    const admins = db.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'admin'").get().n;
+    if (admins <= 1) return reply.code(400).send({ error: "can't delete the last admin" });
+  }
+  db.prepare('DELETE FROM tokens WHERE user_id = ?').run(id);
+  db.prepare('DELETE FROM watch_state WHERE user_id = ?').run(id);
+  db.prepare('DELETE FROM user_prefs WHERE user_id = ?').run(id);
+  db.prepare('DELETE FROM user_settings WHERE user_id = ?').run(id);
+  db.prepare('DELETE FROM users WHERE id = ?').run(id);
+  return { ok: true };
+});
+
+app.get('/api/movies', async (req) => {
   return db.prepare(
     `SELECT m.id, m.title, m.year, m.poster, m.backdrop, m.overview, m.rating, m.genres,
-            m.watched, m.favorite, m.resume_position, m.duration, m.runtime, m.added_at,
+            COALESCE(w.watched, 0) AS watched, COALESCE(w.favorite, 0) AS favorite,
+            COALESCE(w.resume_position, 0) AS resume_position, m.duration, m.runtime,
+            m.added_at, w.last_played_at,
             COUNT(f.id) AS versions,
             GROUP_CONCAT(DISTINCT f.quality) AS qualities
      FROM movies m
      LEFT JOIN movie_files f ON f.movie_id = m.id
+     LEFT JOIN watch_state w ON w.user_id = ? AND w.kind = 'movie' AND w.item_id = m.id
      GROUP BY m.id
      ORDER BY m.title COLLATE NOCASE`
-  ).all();
+  ).all(req.user.id);
 });
 
 // Broad "meta-collections" — studios/franchises that aren't a single TMDB
@@ -121,15 +333,15 @@ app.get('/api/collections/:id', async (req) => {
   if (id.startsWith('meta:')) {
     const def = META_COLLECTIONS.find((d) => d.id === id);
     if (!def) return { name: null, items: [] };
-    const items = metaMembers(def);
+    const items = overlayWatch(req.user.id, metaMembers(def));
     const art = items.find((i) => i.backdrop) || items[0] || {};
     return { name: def.name, poster: art.poster, backdrop: art.backdrop, items };
   }
   const meta = db.prepare('SELECT collection_name AS name, MAX(collection_poster) AS poster, MAX(backdrop) AS backdrop FROM movies WHERE collection_id = ?').get(id);
-  const items = db.prepare(
+  const items = overlayWatch(req.user.id, db.prepare(
     `SELECT id, title, year, poster, backdrop, overview, rating, watched, resume_position, duration, runtime
      FROM movies WHERE collection_id = ? ORDER BY year, title COLLATE NOCASE`
-  ).all(id);
+  ).all(id));
   return { name: meta && meta.name, poster: meta && meta.poster, backdrop: meta && meta.backdrop, items };
 });
 
@@ -156,48 +368,51 @@ app.get('/api/movies/:id', async (req, reply) => {
   // Highest quality first, so it's the default version to play.
   files.sort((a, b) => qualityRank(b.quality) - qualityRank(a.quality));
   for (const f of files) { f.subtitles = listSubtitles(f.path).map((s, i) => ({ label: s.label, idx: i })); delete f.path; }
+  // Overlay this user's watch state onto the logical movie.
+  Object.assign(row, wsGet(req.user.id, 'movie', row.id));
   row.files = files;
   return row;
 });
 
-// Save playback position (continue-watching) and watched state.
+// Save playback position (continue-watching) and watched state — per user.
 app.post('/api/movies/:id/progress', async (req, reply) => {
   const { position, duration, watched } = req.body || {};
-  const row = db.prepare('SELECT id FROM movies WHERE id = ?').get(req.params.id);
-  if (!row) return reply.code(404).send({ error: 'not found' });
-  db.prepare(
-    `UPDATE movies SET resume_position = ?, duration = COALESCE(?, duration),
-     watched = COALESCE(?, watched), last_played_at = ? WHERE id = ?`
-  ).run(position ?? 0, duration ?? null, watched ?? null, Date.now(), req.params.id);
+  const id = Number(req.params.id);
+  if (!db.prepare('SELECT id FROM movies WHERE id = ?').get(id)) return reply.code(404).send({ error: 'not found' });
+  if (duration != null) db.prepare('UPDATE movies SET duration = ? WHERE id = ?').run(duration, id);
+  const fields = { resume_position: position ?? 0, last_played_at: Date.now() };
+  if (watched != null) fields.watched = watched ? 1 : 0;
+  wsUpsert(req.user.id, 'movie', id, fields);
   return { ok: true };
 });
 
 app.post('/api/movies/:id/favorite', async (req, reply) => {
-  const row = db.prepare('SELECT favorite FROM movies WHERE id = ?').get(req.params.id);
-  if (!row) return reply.code(404).send({ error: 'not found' });
-  const next = row.favorite ? 0 : 1;
-  db.prepare('UPDATE movies SET favorite = ? WHERE id = ?').run(next, req.params.id);
+  const id = Number(req.params.id);
+  if (!db.prepare('SELECT id FROM movies WHERE id = ?').get(id)) return reply.code(404).send({ error: 'not found' });
+  const next = wsGet(req.user.id, 'movie', id).favorite ? 0 : 1;
+  wsUpsert(req.user.id, 'movie', id, { favorite: next });
   return { favorite: next };
 });
 
 app.post('/api/movies/:id/watched', async (req, reply) => {
   const { watched } = req.body || {};
-  const row = db.prepare('SELECT watched FROM movies WHERE id = ?').get(req.params.id);
-  if (!row) return reply.code(404).send({ error: 'not found' });
-  const next = watched != null ? (watched ? 1 : 0) : (row.watched ? 0 : 1);
-  db.prepare(
-    'UPDATE movies SET watched = ?, resume_position = CASE WHEN ? = 1 THEN 0 ELSE resume_position END WHERE id = ?'
-  ).run(next, next, req.params.id);
+  const id = Number(req.params.id);
+  if (!db.prepare('SELECT id FROM movies WHERE id = ?').get(id)) return reply.code(404).send({ error: 'not found' });
+  const cur = wsGet(req.user.id, 'movie', id);
+  const next = watched != null ? (watched ? 1 : 0) : (cur.watched ? 0 : 1);
+  wsUpsert(req.user.id, 'movie', id, { watched: next, resume_position: next ? 0 : cur.resume_position });
   return { watched: next };
 });
 
-// Trigger a rescan of all libraries on demand.
-app.post('/api/scan', async () => {
+// Trigger a rescan of all libraries on demand (admin only).
+app.post('/api/scan', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
   return scanLibraries(db);
 });
 
-// Trigger TMDB enrichment on demand (movies + shows).
-app.post('/api/enrich', async () => {
+// Trigger TMDB enrichment on demand (movies + shows) — admin only.
+app.post('/api/enrich', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
   const movies = await enrichLibrary(db, config.tmdbApiKey);
   const shows = await enrichShows(db, config.tmdbApiKey);
   const episodes = await enrichEpisodes(db, config.tmdbApiKey);
@@ -206,19 +421,21 @@ app.post('/api/enrich', async () => {
 
 // ---- Continue Watching (in-progress movies + episodes) ----
 
-app.get('/api/continue', async () => {
+app.get('/api/continue', async (req) => {
+  const uid = req.user.id;
   const movies = db.prepare(
-    `SELECT 'movie' AS kind, id, title, poster, resume_position, duration, last_played_at,
+    `SELECT 'movie' AS kind, m.id, m.title, m.poster, w.resume_position, m.duration, w.last_played_at,
             NULL AS show_id, NULL AS season, NULL AS episode
-     FROM movies WHERE resume_position > 30 AND watched = 0 AND last_played_at IS NOT NULL`
-  ).all();
+     FROM watch_state w JOIN movies m ON m.id = w.item_id
+     WHERE w.user_id = ? AND w.kind = 'movie' AND w.resume_position > 30 AND w.watched = 0 AND w.last_played_at IS NOT NULL`
+  ).all(uid);
   const episodes = db.prepare(
     `SELECT 'episode' AS kind, e.id, COALESCE(e.title, 'Episode ' || e.episode) AS title,
-            s.poster AS poster, e.resume_position, e.duration, e.last_played_at,
+            s.poster AS poster, w.resume_position, e.duration, w.last_played_at,
             s.id AS show_id, e.season, e.episode
-     FROM episodes e JOIN shows s ON s.id = e.show_id
-     WHERE e.resume_position > 30 AND e.watched = 0 AND e.last_played_at IS NOT NULL`
-  ).all();
+     FROM watch_state w JOIN episodes e ON e.id = w.item_id JOIN shows s ON s.id = e.show_id
+     WHERE w.user_id = ? AND w.kind = 'episode' AND w.resume_position > 30 AND w.watched = 0 AND w.last_played_at IS NOT NULL`
+  ).all(uid);
   return [...movies, ...episodes]
     .sort((a, b) => (b.last_played_at || 0) - (a.last_played_at || 0))
     .slice(0, 20);
@@ -226,16 +443,18 @@ app.get('/api/continue', async () => {
 
 // ---- TV shows ----
 
-app.get('/api/shows', async () => {
+app.get('/api/shows', async (req) => {
   return db.prepare(
     `SELECT s.id, s.title, s.year, s.poster, s.backdrop, s.overview, s.rating, s.genres, s.added_at,
             COUNT(e.id) AS episodes,
-            SUM(CASE WHEN e.watched = 0 THEN 1 ELSE 0 END) AS unwatched,
-            MAX(e.last_played_at) AS last_played_at
-     FROM shows s LEFT JOIN episodes e ON e.show_id = s.id
+            SUM(CASE WHEN COALESCE(w.watched, 0) = 0 THEN 1 ELSE 0 END) AS unwatched,
+            MAX(w.last_played_at) AS last_played_at
+     FROM shows s
+     LEFT JOIN episodes e ON e.show_id = s.id
+     LEFT JOIN watch_state w ON w.user_id = ? AND w.kind = 'episode' AND w.item_id = e.id
      GROUP BY s.id
      ORDER BY s.title COLLATE NOCASE`
-  ).all();
+  ).all(req.user.id);
 });
 
 // Flat list of playable episodes (with the show's art/genres) so Live TV can
@@ -268,10 +487,13 @@ app.get('/api/shows/:id', async (req, reply) => {
   const show = db.prepare('SELECT * FROM shows WHERE id = ?').get(req.params.id);
   if (!show) return reply.code(404).send({ error: 'not found' });
   const eps = db.prepare(
-    `SELECT id, season, episode, title, overview, still, duration, resume_position, watched
-     FROM episodes WHERE show_id = ?
-     ORDER BY season, episode`
-  ).all(req.params.id);
+    `SELECT e.id, e.season, e.episode, e.title, e.overview, e.still, e.duration,
+            COALESCE(w.resume_position, 0) AS resume_position, COALESCE(w.watched, 0) AS watched
+     FROM episodes e
+     LEFT JOIN watch_state w ON w.user_id = ? AND w.kind = 'episode' AND w.item_id = e.id
+     WHERE e.show_id = ?
+     ORDER BY e.season, e.episode`
+  ).all(req.user.id, req.params.id);
 
   // Attach the file versions (qualities) of each episode, best first.
   const filesStmt = db.prepare('SELECT id, quality, filename, size, path FROM episode_files WHERE episode_id = ?');
@@ -298,23 +520,22 @@ app.get('/api/shows/:id', async (req, reply) => {
 
 app.post('/api/episodes/:id/progress', async (req, reply) => {
   const { position, duration, watched } = req.body || {};
-  const row = db.prepare('SELECT id FROM episodes WHERE id = ?').get(req.params.id);
-  if (!row) return reply.code(404).send({ error: 'not found' });
-  db.prepare(
-    `UPDATE episodes SET resume_position = ?, duration = COALESCE(?, duration),
-     watched = COALESCE(?, watched), last_played_at = ? WHERE id = ?`
-  ).run(position ?? 0, duration ?? null, watched ?? null, Date.now(), req.params.id);
+  const id = Number(req.params.id);
+  if (!db.prepare('SELECT id FROM episodes WHERE id = ?').get(id)) return reply.code(404).send({ error: 'not found' });
+  if (duration != null) db.prepare('UPDATE episodes SET duration = ? WHERE id = ?').run(duration, id);
+  const fields = { resume_position: position ?? 0, last_played_at: Date.now() };
+  if (watched != null) fields.watched = watched ? 1 : 0;
+  wsUpsert(req.user.id, 'episode', id, fields);
   return { ok: true };
 });
 
 app.post('/api/episodes/:id/watched', async (req, reply) => {
   const { watched } = req.body || {};
-  const row = db.prepare('SELECT watched FROM episodes WHERE id = ?').get(req.params.id);
-  if (!row) return reply.code(404).send({ error: 'not found' });
-  const next = watched != null ? (watched ? 1 : 0) : (row.watched ? 0 : 1);
-  db.prepare(
-    'UPDATE episodes SET watched = ?, resume_position = CASE WHEN ? = 1 THEN 0 ELSE resume_position END WHERE id = ?'
-  ).run(next, next, req.params.id);
+  const id = Number(req.params.id);
+  if (!db.prepare('SELECT id FROM episodes WHERE id = ?').get(id)) return reply.code(404).send({ error: 'not found' });
+  const cur = wsGet(req.user.id, 'episode', id);
+  const next = watched != null ? (watched ? 1 : 0) : (cur.watched ? 0 : 1);
+  wsUpsert(req.user.id, 'episode', id, { watched: next, resume_position: next ? 0 : cur.resume_position });
   return { watched: next };
 });
 
@@ -325,11 +546,14 @@ app.post('/api/shows/:id/watched', async (req, reply) => {
   if (!show) return reply.code(404).send({ error: 'not found' });
   const next = (req.body && req.body.watched) ? 1 : 0;
   const season = req.body && req.body.season;
-  const sql = 'UPDATE episodes SET watched = ?, resume_position = CASE WHEN ? = 1 THEN 0 ELSE resume_position END WHERE show_id = ?'
-    + (season != null ? ' AND season = ?' : '');
-  const args = season != null ? [next, next, req.params.id, season] : [next, next, req.params.id];
-  const info = db.prepare(sql).run(...args);
-  return { watched: next, episodes: info.changes };
+  const eps = db.prepare(
+    'SELECT id FROM episodes WHERE show_id = ?' + (season != null ? ' AND season = ?' : '')
+  ).all(...(season != null ? [req.params.id, season] : [req.params.id]));
+  for (const e of eps) {
+    const cur = wsGet(req.user.id, 'episode', e.id);
+    wsUpsert(req.user.id, 'episode', e.id, { watched: next, resume_position: next ? 0 : cur.resume_position });
+  }
+  return { watched: next, episodes: eps.length };
 });
 
 // ---- Self-update (git pull + restart, driven by run.bat) ----
@@ -382,6 +606,7 @@ app.get('/api/libraries', async () => {
 });
 
 app.post('/api/libraries', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
   const body = req.body || {};
   const p = body.path;
   if (!p) return reply.code(400).send({ error: 'path required' });
@@ -405,6 +630,7 @@ app.post('/api/libraries', async (req, reply) => {
 });
 
 app.delete('/api/libraries/:id', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
   const lib = db.prepare('SELECT * FROM libraries WHERE id = ?').get(req.params.id);
   if (!lib) return reply.code(404).send({ error: 'not found' });
   db.prepare('DELETE FROM movie_files WHERE library_id = ?').run(req.params.id);
@@ -420,6 +646,7 @@ app.delete('/api/libraries/:id', async (req, reply) => {
 // ---- Server-side folder browser (for the in-app folder picker) ----
 
 app.get('/api/fs', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
   const p = req.query.path;
   try {
     if (!p) return { path: null, parent: null, drives: listDrives(), dirs: [] };
@@ -529,31 +756,35 @@ app.get('/api/transcode/:kind/:fileId', async (req, reply) => {
 // ---- Playback prefs (server-side so they follow the user across devices) ----
 // Version choices and caption delays used to live in localStorage, which is
 // per-browser — pick a version on the PC and the TV knows nothing about it.
-app.get('/api/prefs', async () => {
-  return Object.fromEntries(db.prepare('SELECT key, value FROM prefs').all().map((r) => [r.key, r.value]));
+app.get('/api/prefs', async (req) => {
+  return Object.fromEntries(
+    db.prepare('SELECT key, value FROM user_prefs WHERE user_id = ?').all(req.user.id).map((r) => [r.key, r.value])
+  );
 });
 app.post('/api/prefs', async (req, reply) => {
   const { key, value } = req.body || {};
   if (!key || typeof key !== 'string') return reply.code(400).send({ error: 'key required' });
   if (value === null || value === undefined || value === '') {
-    db.prepare('DELETE FROM prefs WHERE key = ?').run(key);
+    db.prepare('DELETE FROM user_prefs WHERE user_id = ? AND key = ?').run(req.user.id, key);
   } else {
-    db.prepare('INSERT INTO prefs (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
-      .run(key, String(value));
+    db.prepare('INSERT INTO user_prefs (user_id, key, value) VALUES (?, ?, ?) ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value')
+      .run(req.user.id, key, String(value));
   }
   return { ok: true };
 });
 
 // Engine status + one-click install (download a static build into tools/).
 app.get('/api/ffmpeg', async () => ffmpegStatus());
-app.post('/api/ffmpeg/install', async () => {
+app.post('/api/ffmpeg/install', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
   if (!ffmpegStatus().installing) installFfmpeg(ROOT, config); // fire and forget; poll GET /api/ffmpeg
   return ffmpegStatus();
 });
 
 // ---- AI subtitle generation (whisper.cpp) ----
 app.get('/api/whisper', async () => whisperStatus());
-app.post('/api/whisper/install', async (req) => {
+app.post('/api/whisper/install', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
   const force = !!(req.body && req.body.force); // force = re-install (e.g. switch to GPU)
   if (!whisperStatus().installing) installWhisper(ROOT, config, { force });
   return whisperStatus();
@@ -682,6 +913,7 @@ app.get('/api/requests/queue', async () => {
 
 // Save Radarr/Sonarr connection settings (url + apiKey) to config.json.
 app.post('/api/settings/arr', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
   const { radarr, sonarr } = req.body || {};
   const clean = (s) => (s && s.url ? { url: s.url.trim().replace(/\/+$/, ''), apiKey: (s.apiKey || '').trim() } : undefined);
   if (radarr !== undefined) config.radarr = clean(radarr);
@@ -765,7 +997,8 @@ app.get('/api/subtitle/:fileId', (req, reply) => {
 // ---- Subtitle search + download (OpenSubtitles) ----
 
 app.get('/api/subtitles/search', async (req, reply) => {
-  if (!osEnabled(config.openSubtitles)) return reply.code(400).send({ error: 'OpenSubtitles is not configured yet — add your API key.' });
+  const os = userOS(req.user.id);
+  if (!osEnabled(os)) return reply.code(400).send({ error: 'OpenSubtitles isn’t set up in your Settings yet — add your API key.' });
   const { kind, fileId } = req.query;
   let params;
   if (kind === 'episode') {
@@ -781,17 +1014,18 @@ app.get('/api/subtitles/search', async (req, reply) => {
     const mv = db.prepare('SELECT title, tmdb_id FROM movies WHERE id = ?').get(f.movie_id);
     params = mv.tmdb_id ? { tmdb_id: mv.tmdb_id } : { query: mv.title };
   }
-  return searchSubtitles(config.openSubtitles, params);
+  return searchSubtitles(os, params);
 });
 
 app.post('/api/subtitles/download', async (req, reply) => {
-  if (!osEnabled(config.openSubtitles)) return reply.code(400).send({ error: 'OpenSubtitles is not configured.' });
+  const os = userOS(req.user.id);
+  if (!osEnabled(os)) return reply.code(400).send({ error: 'OpenSubtitles isn’t set up in your Settings.' });
   const { kind, fileId, file_id } = req.body || {};
   const table = kind === 'episode' ? 'episode_files' : 'movie_files';
   const row = db.prepare(`SELECT path FROM ${table} WHERE id = ?`).get(fileId);
   if (!row) return reply.code(404).send({ error: 'not found' });
 
-  const srt = await downloadSubtitle(config.openSubtitles, file_id);
+  const srt = await downloadSubtitle(os, file_id);
   if (!srt) return reply.code(502).send({ error: 'Download failed — check your login, or you may have hit the daily limit.' });
 
   const dest = row.path.replace(/\.[^.]+$/, '') + '.en.srt';
@@ -805,31 +1039,37 @@ app.post('/api/subtitles/download', async (req, reply) => {
 
 // ---- Settings (in-app config, e.g. OpenSubtitles account) ----
 
-app.get('/api/settings', async () => ({
-  tmdb: { configured: !!config.tmdbApiKey },
-  openSubtitles: {
-    configured: osEnabled(config.openSubtitles),
-    username: (config.openSubtitles && config.openSubtitles.username) || ''
-  },
-  radarr: { configured: radarrEnabled(config.radarr), url: (config.radarr && config.radarr.url) || '' },
-  sonarr: { configured: sonarrEnabled(config.sonarr), url: (config.sonarr && config.sonarr.url) || '' }
-}));
+// Per-user settings; server-level config (TMDB/Radarr/Sonarr) only for admins.
+app.get('/api/settings', async (req) => {
+  const os = userOS(req.user.id);
+  const out = {
+    user: { username: req.user.username, role: req.user.role },
+    openSubtitles: { configured: osEnabled(os), username: os.username || '' }
+  };
+  if (req.user.role === 'admin') {
+    out.tmdb = { configured: !!config.tmdbApiKey };
+    out.radarr = { configured: radarrEnabled(config.radarr), url: (config.radarr && config.radarr.url) || '' };
+    out.sonarr = { configured: sonarrEnabled(config.sonarr), url: (config.sonarr && config.sonarr.url) || '' };
+  }
+  return out;
+});
 
+// Each user saves their own OpenSubtitles login (per-user, so quotas don't mix).
 app.post('/api/settings/opensubtitles', async (req, reply) => {
   const { apiKey, username, password } = req.body || {};
-  config.openSubtitles = {
-    apiKey: (apiKey || '').trim(),
-    username: (username || '').trim(),
-    password: password || ''
+  const vals = {
+    'os:apiKey': (apiKey || '').trim(),
+    'os:username': (username || '').trim(),
+    'os:password': password || ''
   };
-  try {
-    // Persist to config.json (stays local — it's git-ignored).
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), 'utf8');
-  } catch (e) {
-    return reply.code(500).send({ error: 'could not save: ' + e.message });
+  const upsert = db.prepare('INSERT INTO user_settings (user_id, key, value) VALUES (?, ?, ?) ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value');
+  const del = db.prepare('DELETE FROM user_settings WHERE user_id = ? AND key = ?');
+  for (const [k, v] of Object.entries(vals)) {
+    if (v) upsert.run(req.user.id, k, v); else del.run(req.user.id, k);
   }
-  clearAuth();
-  return { ok: true, configured: osEnabled(config.openSubtitles) };
+  const os = userOS(req.user.id);
+  clearAuth(os); // drop this account's cached login token
+  return { ok: true, configured: osEnabled(os) };
 });
 
 // ---- Boot ----

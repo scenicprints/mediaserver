@@ -42,16 +42,24 @@
   <div id="settings" class="modal hidden">
     <div class="sheet">
       <button class="close" data-close="settings" aria-label="Close">✕</button>
-      <h2>Library folders</h2>
-      <p class="muted">Add the folders your media lives in. Sub-folders are included automatically.</p>
-      <div class="add-row">
-        <button class="btn primary" data-add="movie">＋ Add Movies folder</button>
-        <button class="btn primary" data-add="tv">＋ Add TV Shows folder</button>
+
+      <div class="acct-row">
+        <div>Signed in as <strong id="acct-name">…</strong> <span class="acct-role" id="acct-role"></span></div>
+        <button class="btn" id="logout-btn">Log out</button>
       </div>
-      <div id="lib-list" class="lib-list"></div>
+
+      <div class="admin-only">
+        <h2>Library folders</h2>
+        <p class="muted">Add the folders your media lives in. Sub-folders are included automatically.</p>
+        <div class="add-row">
+          <button class="btn primary" data-add="movie">＋ Add Movies folder</button>
+          <button class="btn primary" data-add="tv">＋ Add TV Shows folder</button>
+        </div>
+        <div id="lib-list" class="lib-list"></div>
+      </div>
 
       <div class="sub-account">
-        <h3>Subtitle search (OpenSubtitles)</h3>
+        <h3>Your subtitle account (OpenSubtitles)</h3>
         <p class="muted" id="os-status">Add your free OpenSubtitles account to enable subtitle search.</p>
         <input id="os-key" class="sa-input" placeholder="API key" autocomplete="off" />
         <input id="os-user" class="sa-input" placeholder="Username" autocomplete="off" />
@@ -59,24 +67,35 @@
         <button class="btn primary" id="os-save">Save subtitle account</button>
       </div>
 
-      <div class="sub-account">
+      <div class="sub-account admin-only">
         <h3>Playback engine (FFmpeg)</h3>
         <p class="muted" id="ff-status">Checking…</p>
         <button class="btn primary hidden" id="ff-install">⬇ Install playback engine</button>
       </div>
 
-      <div class="sub-account">
+      <div class="sub-account admin-only">
         <h3>AI subtitles (Whisper)</h3>
         <p class="muted" id="ws-status">Checking…</p>
         <button class="btn primary hidden" id="ws-install">⬇ Install AI subtitle engine</button>
       </div>
 
-      <div class="sub-account">
+      <div class="sub-account admin-only">
         <h3>Requests (Radarr &amp; Sonarr)</h3>
         <p class="muted" id="arr-status">Connect Radarr (movies) and Sonarr (TV) so you can request titles from the Requests tab.</p>
         <div class="arr-row"><input id="radarr-url" class="sa-input" placeholder="Radarr URL — e.g. http://localhost:7878" /><input id="radarr-key" class="sa-input" placeholder="Radarr API key" autocomplete="off" /></div>
         <div class="arr-row"><input id="sonarr-url" class="sa-input" placeholder="Sonarr URL — e.g. http://localhost:8989" /><input id="sonarr-key" class="sa-input" placeholder="Sonarr API key" autocomplete="off" /></div>
         <button class="btn primary" id="arr-save">Save &amp; test connection</button>
+      </div>
+
+      <div class="sub-account admin-only">
+        <h3>Accounts</h3>
+        <p class="muted">Share the app + your invite code and people self-register, or add them here. Everyone gets their own watch history and settings.</p>
+        <div id="users-list" class="lib-list"></div>
+        <div class="arr-row">
+          <input id="nu-user" class="sa-input" placeholder="Username" autocomplete="off" />
+          <input id="nu-pass" class="sa-input" type="password" placeholder="Password" autocomplete="new-password" />
+        </div>
+        <button class="btn primary" id="nu-add">＋ Add user</button>
       </div>
 
       <div class="settings-footer">
@@ -123,6 +142,21 @@
         <li id="ustep-reload">Reload on the new version</li>
       </ol>
     </div>
+  </div>
+
+  <!-- Login / create account -->
+  <div id="auth" class="auth-overlay hidden">
+    <div class="auth-bg"></div>
+    <form id="auth-form" class="auth-card">
+      <h1 class="brand auth-brand">MARQUEE</h1>
+      <p class="auth-sub" id="auth-sub">Sign in to continue</p>
+      <input id="auth-user" class="auth-input" placeholder="Username" autocomplete="username" autocapitalize="none" spellcheck="false" />
+      <input id="auth-pass" class="auth-input" type="password" placeholder="Password" autocomplete="current-password" />
+      <input id="auth-code" class="auth-input hidden" placeholder="Invite code" autocomplete="off" autocapitalize="none" spellcheck="false" />
+      <div id="auth-error" class="auth-error"></div>
+      <button type="submit" id="auth-submit" class="btn primary auth-submit">Sign in</button>
+      <button type="button" id="auth-toggle" class="auth-toggle">New here? Create an account</button>
+    </form>
   </div>
 
   <script src="/app.js"></script>

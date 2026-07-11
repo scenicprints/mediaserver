@@ -7,6 +7,36 @@ Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed
 
 ---
 
+## 🚀 Shared access — a friend's TV over the internet (CURRENT FOCUS)
+Turning the single-user LAN server into a **multi-user, internet-reachable** service with a
+native-feeling app on a friend's **TCL 58S470G (Google TV / Android TV)**.
+
+**✅ Done — built + verified on the dev PC (NOT yet pushed):**
+- **Accounts / login** (`src/auth.js`): register (gated by an **invite code baked into the app**),
+  login, logout, `/me`, admin user management. **First account = admin**, everyone after = user.
+  scrypt hashing, login throttled, **HttpOnly session cookie (1-yr → "log in once")**. Every
+  `/api` route gated; static UI + login stay public. New tables in `src/db.js`:
+  users/tokens/user_settings/watch_state/user_prefs.
+- **Per-user everything**: watch-state (resume/watched/favorite/Continue Watching), playback
+  prefs, and **each user's own OpenSubtitles login** (own quota). Server-level settings
+  (libraries, Radarr/Sonarr, engines) are **admin-only**; the first-admin migration adopts the
+  pre-accounts globals so the owner loses nothing. Themed **login screen**, admin **Users** panel,
+  per-user Settings. Collections view overlays per-user watch too.
+- **Player TV mode** (`?tv=1`, persisted): hides the fullscreen button + the cursor.
+
+**🔜 Next:**
+1. **Remote access** — expose the Dell over HTTPS. Chosen: **home port-forward**, but the Dell
+   runs **Private Internet Access** (full-tunnel), which breaks inbound unless we **split-tunnel
+   `node.exe`** out of PIA. Add free **DDNS + auto-TLS (Caddy)**. First step: the **CGNAT recon**
+   on the Dell (prompt handed to the owner). Set a real `config.inviteCode` before the friend joins.
+2. **Android TV app** (his TCL): a **WebView shell** loading the server UI with `?tv=1` (reuses the
+   entire front-end + focus engine), **self-updating APK** built by GitHub Actions (the FuelWise
+   pattern). Needs the remote URL + the owner's GitHub/device.
+3. **Auto-start on Dell boot** — server + tunnel relaunch after Windows-update reboots (harden
+   `deploy/install-autostart.ps1`, Task Scheduler at startup).
+
+---
+
 ## ✅ Done
 - Node/Fastify/`node:sqlite` server; vanilla web UI; dark theme.
 - In-app **library manager**: browse the server's drives, add folders as **Movies** or

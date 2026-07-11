@@ -1,6 +1,80 @@
 // ============================================================
 //  MYFLIX — front-end
 // ============================================================
+
+// ---------- Auth (login gate) ----------
+// The session lives in an HttpOnly cookie the browser/WebView sends automatically
+// on every same-origin request (fetch, <video>, <img>), so nothing below needs a
+// token attached. If a call ever comes back 401 (session revoked/expired), drop
+// to the login screen.
+let currentUser = null;
+let authMode = 'login'; // 'login' | 'register'
+
+const _fetch = window.fetch.bind(window);
+window.fetch = async (...args) => {
+  const res = await _fetch(...args);
+  const url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';
+  if (res.status === 401 && url.includes('/api/') && !/\/api\/(login|register|auth\/status)/.test(url)) {
+    showAuth();
+  }
+  return res;
+};
+
+function showAuth() { const el = document.getElementById('auth'); if (el) el.classList.remove('hidden'); }
+function hideAuth() { const el = document.getElementById('auth'); if (el) el.classList.add('hidden'); }
+
+// ---------- TV / app mode ----------
+// The Android TV WebView loads the UI with ?tv=1 (persisted after first load).
+// In TV mode we drop browser-isms: the fullscreen button (a TV is always
+// fullscreen) and the mouse cursor.
+const TV_MODE = new URLSearchParams(location.search).has('tv') || localStorage.getItem('tvMode') === '1';
+if (TV_MODE) {
+  localStorage.setItem('tvMode', '1');
+  document.body.classList.add('tv-mode');
+}
+
+function setupAuth() {
+  const form = document.getElementById('auth-form');
+  const sub = document.getElementById('auth-sub');
+  const code = document.getElementById('auth-code');
+  const submit = document.getElementById('auth-submit');
+  const toggle = document.getElementById('auth-toggle');
+  const err = document.getElementById('auth-error');
+  const userEl = document.getElementById('auth-user');
+  const passEl = document.getElementById('auth-pass');
+
+  const applyMode = () => {
+    const reg = authMode === 'register';
+    sub.textContent = reg ? 'Create your account' : 'Sign in to continue';
+    submit.textContent = reg ? 'Create account' : 'Sign in';
+    submit.disabled = false;
+    toggle.textContent = reg ? 'Have an account? Sign in' : 'New here? Create an account';
+    code.classList.toggle('hidden', !reg);
+    passEl.setAttribute('autocomplete', reg ? 'new-password' : 'current-password');
+    err.textContent = '';
+  };
+  toggle.addEventListener('click', () => { authMode = authMode === 'login' ? 'register' : 'login'; applyMode(); });
+  applyMode();
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    err.textContent = '';
+    const username = userEl.value.trim();
+    const password = passEl.value;
+    if (!username || !password) { err.textContent = 'Enter a username and password.'; return; }
+    submit.disabled = true; submit.textContent = '…';
+    const path = authMode === 'register' ? '/api/register' : '/api/login';
+    const body = authMode === 'register' ? { username, password, code: code.value.trim() } : { username, password };
+    let r, d;
+    try {
+      r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      d = await r.json();
+    } catch { err.textContent = 'Could not reach the server.'; applyMode(); return; }
+    if (!r.ok) { err.textContent = (d && d.error) || 'Something went wrong.'; applyMode(); return; }
+    location.reload(); // reload fully authenticated
+  });
+}
+
 const nav = document.getElementById('nav');
 const heroEl = document.getElementById('hero');
 const heroBg = document.getElementById('hero-bg');
@@ -2164,10 +2238,64 @@ async function loadVersion() {
 async function loadSettings() {
   try {
     const s = await (await fetch('/api/settings')).json();
+    if (s.user) {
+      const nameEl = document.getElementById('acct-name'); if (nameEl) nameEl.textContent = s.user.username;
+      const roleEl = document.getElementById('acct-role'); if (roleEl) roleEl.textContent = s.user.role === 'admin' ? 'admin' : '';
+    }
     if (s.openSubtitles.configured) { osStatus.textContent = '✓ Subtitle search is on' + (s.openSubtitles.username ? ' (' + s.openSubtitles.username + ')' : '') + '.'; osUser.value = s.openSubtitles.username || ''; }
     else osStatus.textContent = 'Add your free OpenSubtitles account to enable subtitle search.';
   } catch { osStatus.textContent = ''; }
+  if (currentUser && currentUser.role === 'admin') loadUsers();
 }
+
+// ---- Account: logout + (admin) user management ----
+const logoutBtn = document.getElementById('logout-btn');
+if (logoutBtn) logoutBtn.addEventListener('click', async () => {
+  try { await fetch('/api/logout', { method: 'POST' }); } catch {}
+  location.reload();
+});
+
+async function loadUsers() {
+  const list = document.getElementById('users-list');
+  if (!list) return;
+  let users = [];
+  try { users = await (await fetch('/api/users')).json(); } catch { return; }
+  if (!Array.isArray(users)) return;
+  list.innerHTML = '';
+  for (const u of users) {
+    const isMe = currentUser && u.id === currentUser.id;
+    const row = document.createElement('div');
+    row.className = 'acct-item';
+    const label = document.createElement('span');
+    label.textContent = u.username + (u.role === 'admin' ? ' · admin' : '') + (isMe ? ' (you)' : '');
+    row.appendChild(label);
+    if (!isMe && u.role !== 'admin') {
+      const del = document.createElement('button');
+      del.className = 'btn'; del.textContent = 'Remove';
+      del.addEventListener('click', async () => {
+        if (!confirm('Remove ' + u.username + '? Their watch history and settings are deleted.')) return;
+        await fetch('/api/users/' + u.id, { method: 'DELETE' });
+        loadUsers();
+      });
+      row.appendChild(del);
+    }
+    list.appendChild(row);
+  }
+}
+
+const nuAdd = document.getElementById('nu-add');
+if (nuAdd) nuAdd.addEventListener('click', async () => {
+  const u = document.getElementById('nu-user');
+  const p = document.getElementById('nu-pass');
+  const username = u.value.trim();
+  const password = p.value;
+  if (!username || !password) return;
+  nuAdd.disabled = true;
+  const r = await fetch('/api/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password }) });
+  nuAdd.disabled = false;
+  if (r.ok) { u.value = ''; p.value = ''; loadUsers(); }
+  else { const d = await r.json().catch(() => ({})); alert(d.error || 'Could not add user.'); }
+});
 osSave.addEventListener('click', async () => {
   osSave.textContent = 'Saving…'; osSave.disabled = true;
   let d = {};
@@ -2214,6 +2342,12 @@ function escapeHtml(s) {
 
 // ---------- Boot ----------
 (async function init() {
+  setupAuth();
+  const me = await fetch('/api/me').then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  if (!me || !me.user) { showAuth(); return; }
+  currentUser = me.user;
+  document.body.classList.toggle('is-admin', currentUser.role === 'admin');
+  hideAuth();
   await loadAll();
   renderView();
   checkForUpdate();
