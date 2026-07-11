@@ -98,6 +98,23 @@ Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed
     `.mkv`), Skip Intro/**Skip Credits** are **precise** and work for anything — they appear only
     inside the Intro/Credits chapters, which correctly handles a **cold open before the intro**.
     Skip Credits jumps to the next episode (or the end).
+- **Feedback batch: watch-state + player + nav polish.**
+  - **Live TV no longer touches Continue Watching.** Tuning a channel plays with no `progressUrl`,
+    so ephemeral live viewing never writes watch-state (movies tune at the live offset; shows play
+    their next episode). `save()` no-ops without a `progressUrl`.
+  - **Bulk mark watched/unwatched** for TV: per-episode (existing), a **whole-season** toggle in a
+    new toolbar above the episode list, and a **whole-show** button in the show header. New
+    `POST /api/shows/:id/watched {watched, season?}` updates all matching episodes (clears resume).
+  - **First-press autoplay fix.** Awaiting `/api/play` dropped the click's transient activation, so
+    Chrome blocked sound-autoplay until a second press. Now `attemptPlay()` falls back to muted
+    play (always allowed) then unmutes — it starts on the first press.
+  - **Arrow-key up now scrolls.** `scroll-padding-top` (96px) lets `scrollIntoView` clear the fixed
+    nav, so focusing an item above actually scrolls up (previously only down scrolled).
+  - **Requests is remote-navigable.** Result cards are in the focus engine (`.req-card`, focus ring,
+    Enter requests).
+  - **3GP** added to the scanner + MIME. (All the listed formats — MKV/AVI/WMV/MPG/3GP video and
+    AC3/E-AC3/DTS/TrueHD/MP2/WMA/Opus/FLAC audio — already play via the ffmpeg transcode path; only
+    MP4/M4V/MOV/WebM direct-play in a browser.)
 - **Whisper on the GPU + faster decoding; watched-button fix.**
   - **AI subtitles now run on the GPU.** Install auto-picks the whisper **cuBLAS** build when an
     NVIDIA driver is present (`nvcuda.dll`) — it bundles the CUDA runtime, so the Dell's 1050 Ti
@@ -326,6 +343,14 @@ Owner wants a native Apple TV client but has no Mac. Options:
 - **Pivot to Fire TV / Nvidia Shield** — sideload a custom app or load a web app; no Apple fee,
   fast iteration.
 Not started. Needs the owner's call on the path.
+
+**Formats the client must support (owner's list):** video MKV, MP4, AVI, M4V, WMV, MPG, 3GP;
+audio AAC, E-AC3 (DD+), AC3 (DD), MP3, DTS, Opus, TrueHD, MP2, WMAv2, WMApro, FLAC. On the **web**
+player these already work via the ffmpeg transcode path (only MP4/M4V/MOV/WebM direct-play).
+A native **Apple TV** app (AVPlayer) direct-plays more (HEVC, AC3/E-AC3 passthrough) but not all
+(DTS/TrueHD/WMA/AVI/WMV) — so the native client will need the **same server-side transcode
+fallback**, with a client-specific direct-play capability list to avoid transcoding what AVPlayer
+can already handle. Keep `src/ffmpeg.js`'s `playInfo()` decision per-client when that lands.
 
 ## 💡 Ideas (not yet requested — for discussion)
 - Sort/filter (year, rating, recently added, unwatched) and a "Recently Added" row.

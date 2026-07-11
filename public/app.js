@@ -382,6 +382,9 @@ function requestCard(it) {
       <button class="btn ${owned ? '' : 'primary'} req-btn" ${owned ? 'disabled' : ''}>${owned ? '✓ Already in library' : '＋ Request'}</button>
     </div>`;
   const btn = card.querySelector('.req-btn');
+  // Enter/remote on the focused card triggers the request (the button itself
+  // still works for mouse users).
+  card.addEventListener('click', (e) => { if (!e.target.closest('.req-btn') && !owned && !btn.disabled) btn.click(); });
   if (!owned) btn.addEventListener('click', async () => {
     btn.disabled = true; btn.textContent = 'Requesting…';
     try {
@@ -671,8 +674,9 @@ function drawEpg() {
 async function tuneIn() {
   const chan = ltState.channels[ltState.sel];
   const on = nowOn(chan, Math.floor(Date.now() / 1000));
-  if (on.item.kind === 'show') { openShow(on.item.ref.id, null, true); return; }
-  // Movie: drop in at the live offset (like catching it mid-broadcast).
+  // Live TV is ephemeral: pass no progressUrl, so nothing tuned here is written
+  // to watch-state / Continue Watching.
+  if (on.item.kind === 'show') { tuneShow(on.item.ref.id); return; }
   const m = await (await fetch('/api/movies/' + on.item.ref.id)).json();
   const files = m.files || [];
   if (!files.length) { openDetail(m.id, false); return; }
@@ -680,7 +684,27 @@ async function tuneIn() {
   openPlayer({
     title: m.title, files, startFileId: f.id, verKey: 'm' + m.id,
     streamBase: '/api/stream/', subtitleBase: '/api/subtitle/', searchKind: 'movie',
-    startAt: Math.floor(on.offset), progressUrl: `/api/movies/${m.id}/progress`, upNext: null, onEnded: null
+    startAt: Math.floor(on.offset), progressUrl: null, upNext: null, onEnded: null // live → no Continue Watching
+  });
+}
+
+// Tune into a show's live program: play its next-unwatched episode straight into
+// the theater with no progress saving (Live TV shouldn't touch Continue Watching).
+async function tuneShow(showId) {
+  const show = await (await fetch('/api/shows/' + showId).catch(() => null))?.json?.() || null;
+  if (!show) return;
+  const flat = [];
+  (show.seasons || []).forEach((s) => s.episodes.forEach((ep) => flat.push(ep)));
+  if (!flat.length) return;
+  const idx = flat.findIndex((ep) => !ep.watched);
+  const ep = flat[idx >= 0 ? idx : 0];
+  const files = ep.files || [];
+  if (!files.length) { openShow(showId, null, false); return; }
+  const f = preferredFile(files, 'e' + ep.id);
+  openPlayer({
+    title: show.title, subtitle: episodeSub(ep), files, startFileId: f.id, verKey: 'e' + ep.id,
+    streamBase: '/api/stream/episode/', subtitleBase: '/api/subtitle/episode/', searchKind: 'episode',
+    startAt: 0, progressUrl: null, upNext: null, onEnded: null // live → no Continue Watching
   });
 }
 
@@ -1139,7 +1163,7 @@ async function openShow(id, autoEpId, autoplay = true) {
             ${show.rating ? `<span class="chip rating">★ ${show.rating.toFixed(1)}</span>` : ''}
             <span class="chip">${show.episodeCount} episode${show.episodeCount === 1 ? '' : 's'}</span>
           </div>
-          <div class="dp-actions"><button class="btn btn-play" id="s-play">▶ Play</button></div>
+          <div class="dp-actions"><button class="btn btn-play" id="s-play">▶ Play</button><button class="btn" id="s-watched"></button></div>
         </div>
       </div>
     </div>
@@ -1147,6 +1171,7 @@ async function openShow(id, autoEpId, autoplay = true) {
       <p class="overview">${escapeHtml(show.overview || '')}</p>
       <h3 class="seasons-h">Seasons</h3>
       <div class="season-cards" id="season-cards"></div>
+      <div class="episode-tools" id="episode-tools"></div>
       <div class="episode-list" id="episode-list"></div>
     </div>`;
   openDetailModal();
@@ -1154,17 +1179,52 @@ async function openShow(id, autoEpId, autoplay = true) {
 
   const seasonCards = document.getElementById('season-cards');
   const epList = document.getElementById('episode-list');
+  const epTools = document.getElementById('episode-tools');
   const seasonLabel = (s) => (s === 0 ? 'Specials' : 'Season ' + s);
 
   const flat = [];
   seasons.forEach((s, si) => s.episodes.forEach((ep) => flat.push({ ep, si })));
+  let activeSeason = seasons[0];
 
   document.getElementById('s-play').addEventListener('click', () => {
     const idx = flat.findIndex((f) => !f.ep.watched);
     playEpisodeAt(show, flat, idx >= 0 ? idx : 0);
   });
 
+  // Mark the whole show watched/unwatched (bulk).
+  const sWatched = document.getElementById('s-watched');
+  function refreshShowWatchedBtn() {
+    const all = flat.length && flat.every((f) => f.ep.watched);
+    sWatched.textContent = all ? '✓ Show watched' : 'Mark show watched';
+    sWatched.dataset.all = all ? '1' : '0';
+  }
+  refreshShowWatchedBtn();
+  sWatched.addEventListener('click', async () => {
+    const next = sWatched.dataset.all === '1' ? 0 : 1;
+    sWatched.disabled = true;
+    await fetch(`/api/shows/${show.id}/watched`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ watched: next }) });
+    flat.forEach((f) => { f.ep.watched = next; if (next) f.ep.resume_position = 0; });
+    sWatched.disabled = false;
+    refreshShowWatchedBtn(); renderSeason(activeSeason);
+  });
+
+  // Per-season "mark season watched" toolbar, redrawn with each season.
+  function refreshSeasonTools(seasonObj) {
+    const all = seasonObj.episodes.length && seasonObj.episodes.every((e) => e.watched);
+    epTools.innerHTML = `<span class="et-label">${escapeHtml(seasonLabel(seasonObj.season))} · ${seasonObj.episodes.length} episodes</span>
+      <button class="btn sm" id="season-watched">${all ? '✓ Season watched' : 'Mark season watched'}</button>`;
+    document.getElementById('season-watched').addEventListener('click', async (e) => {
+      const next = all ? 0 : 1;
+      e.target.disabled = true;
+      await fetch(`/api/shows/${show.id}/watched`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ watched: next, season: seasonObj.season }) });
+      seasonObj.episodes.forEach((ep) => { ep.watched = next; if (next) ep.resume_position = 0; });
+      renderSeason(seasonObj); refreshShowWatchedBtn();
+    });
+  }
+
   function renderSeason(seasonObj) {
+    activeSeason = seasonObj;
+    refreshSeasonTools(seasonObj);
     epList.innerHTML = '';
     for (const ep of seasonObj.episodes) {
       const row = document.createElement('div');
@@ -1376,6 +1436,18 @@ function openPlayer(ctx) {
   // and made captions appear late / linger).
   const subTimer = setInterval(renderSub, 200);
 
+  // Autoplay on the first press even though we had to await /api/play (which
+  // drops the click's transient activation). If sound-autoplay is blocked, start
+  // muted — always allowed — then immediately unmute; changing `muted` doesn't
+  // re-trigger the policy, so it keeps playing with sound.
+  function attemptPlay() {
+    const p = video.play();
+    if (p && p.catch) p.catch(() => {
+      video.muted = true;
+      video.play().then(() => { video.muted = false; }).catch(() => {});
+    });
+  }
+
   async function loadFile(f, at) {
     current = f;
     errEl.classList.add('hidden');
@@ -1395,10 +1467,10 @@ function openPlayer(ctx) {
     if (play.mode === 'transcode') {
       base = at || 0;
       video.src = play.url + '?start=' + (at || 0);
-      video.addEventListener('loadedmetadata', () => video.play(), { once: true });
+      video.addEventListener('loadedmetadata', () => attemptPlay(), { once: true });
     } else {
       video.src = play.url;
-      video.addEventListener('loadedmetadata', () => { if (at) video.currentTime = at; video.play(); }, { once: true });
+      video.addEventListener('loadedmetadata', () => { if (at) video.currentTime = at; attemptPlay(); }, { once: true });
     }
     const subs = current.subtitles || [];
     if (subs.length) { currentSubIdx = 0; subVisible = true; loadDelay(); setSubtitle(subUrl(0)); }
@@ -1460,7 +1532,10 @@ function openPlayer(ctx) {
   // volume
   const mute = vp.querySelector('.vp-mute'), volbar = vp.querySelector('.vp-volbar');
   volbar.addEventListener('input', () => { video.volume = +volbar.value; video.muted = false; });
-  mute.addEventListener('click', () => { video.muted = !video.muted; mute.innerHTML = video.muted ? ICONS.volMute : ICONS.volHigh; });
+  mute.addEventListener('click', () => { video.muted = !video.muted; });
+  // Keep the icon in sync even when muted is toggled programmatically (the
+  // autoplay fallback briefly mutes then unmutes).
+  video.addEventListener('volumechange', () => { mute.innerHTML = video.muted ? ICONS.volMute : ICONS.volHigh; });
 
   // fullscreen
   vp.querySelector('.vp-fs').addEventListener('click', () => { if (document.fullscreenElement) document.exitFullscreen(); else vp.requestFullscreen?.(); });
@@ -1617,6 +1692,7 @@ function openPlayer(ctx) {
   // progress saving
   let lastSave = 0;
   function save() {
+    if (!ctx.progressUrl) return; // Live TV / ephemeral playback: don't record progress
     fetch(ctx.progressUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ position: cur(), duration: dur() || null, watched: dur() && cur() / dur() > 0.92 ? 1 : null }) });
   }

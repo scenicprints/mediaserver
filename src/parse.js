@@ -2,7 +2,7 @@
 // into { title: "(500) Days of Summer", year: 2009 }.
 
 const VIDEO_EXTS = new Set([
-  '.mp4', '.mkv', '.avi', '.mov', '.m4v', '.webm', '.wmv', '.flv', '.ts', '.m2ts', '.mpg', '.mpeg'
+  '.mp4', '.mkv', '.avi', '.mov', '.m4v', '.webm', '.wmv', '.flv', '.ts', '.m2ts', '.mpg', '.mpeg', '.3gp', '.3g2'
 ]);
 
 export function isVideo(filename) {

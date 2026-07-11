@@ -33,7 +33,8 @@ const MIME = {
   '.mp4': 'video/mp4', '.m4v': 'video/mp4', '.webm': 'video/webm',
   '.mkv': 'video/x-matroska', '.mov': 'video/quicktime', '.avi': 'video/x-msvideo',
   '.ts': 'video/mp2t', '.m2ts': 'video/mp2t', '.wmv': 'video/x-ms-wmv',
-  '.mpg': 'video/mpeg', '.mpeg': 'video/mpeg', '.flv': 'video/x-flv'
+  '.mpg': 'video/mpeg', '.mpeg': 'video/mpeg', '.flv': 'video/x-flv',
+  '.3gp': 'video/3gpp', '.3g2': 'video/3gpp2'
 };
 
 const app = Fastify({ logger: false });
@@ -263,6 +264,20 @@ app.post('/api/episodes/:id/watched', async (req, reply) => {
     'UPDATE episodes SET watched = ?, resume_position = CASE WHEN ? = 1 THEN 0 ELSE resume_position END WHERE id = ?'
   ).run(next, next, req.params.id);
   return { watched: next };
+});
+
+// Bulk mark a whole show (or one season) watched/unwatched. Body: { watched:0|1,
+// season? } — omit season for the whole show. Watched also clears resume points.
+app.post('/api/shows/:id/watched', async (req, reply) => {
+  const show = db.prepare('SELECT id FROM shows WHERE id = ?').get(req.params.id);
+  if (!show) return reply.code(404).send({ error: 'not found' });
+  const next = (req.body && req.body.watched) ? 1 : 0;
+  const season = req.body && req.body.season;
+  const sql = 'UPDATE episodes SET watched = ?, resume_position = CASE WHEN ? = 1 THEN 0 ELSE resume_position END WHERE show_id = ?'
+    + (season != null ? ' AND season = ?' : '');
+  const args = season != null ? [next, next, req.params.id, season] : [next, next, req.params.id];
+  const info = db.prepare(sql).run(...args);
+  return { watched: next, episodes: info.changes };
 });
 
 // ---- Self-update (git pull + restart, driven by run.bat) ----
