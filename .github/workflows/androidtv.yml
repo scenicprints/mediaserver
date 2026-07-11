@@ -1,7 +1,9 @@
 name: Android TV app
 
-# Builds a sideloadable debug APK of the Marquee TV WebView shell and publishes
-# it to a rolling "marquee-tv-latest" release so it can be downloaded onto the TV.
+# Builds a SIGNED release APK of the Marquee TV WebView shell and publishes it
+# (plus version.json for the in-app self-updater) to a rolling
+# "marquee-tv-latest" release. A fixed keystore is generated + committed on the
+# first run so every build shares one signing key (required for self-update).
 on:
   push:
     paths:
@@ -15,9 +17,6 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: androidtv
     steps:
       - uses: actions/checkout@v4
 
@@ -31,22 +30,40 @@ jobs:
       - name: Install SDK packages
         run: sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools"
 
+      - name: Ensure signing keystore (generate + commit once)
+        working-directory: androidtv
+        run: |
+          if [ ! -f keystore/marquee.jks ]; then
+            mkdir -p keystore
+            keytool -genkeypair -v -keystore keystore/marquee.jks -alias marquee \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass marquee -keypass marquee \
+              -dname "CN=Marquee,O=scenicprints,C=US"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add keystore/marquee.jks
+            git commit -m "Add fixed Android signing keystore for self-update [skip ci]"
+            git push origin HEAD:main
+          fi
+
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
 
-      - name: Build debug APK
-        run: gradle assembleDebug --no-daemon --stacktrace
+      - name: Build signed release APK
+        working-directory: androidtv
+        run: gradle assembleRelease -PappVersionCode=${{ github.run_number }} --no-daemon --stacktrace
 
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: marquee-tv-debug
-          path: androidtv/app/build/outputs/apk/debug/app-debug.apk
+      - name: Write version.json
+        working-directory: androidtv
+        run: |
+          echo "{\"versionCode\": ${{ github.run_number }}, \"url\": \"https://github.com/scenicprints/mediaserver/releases/download/marquee-tv-latest/app-release.apk\"}" > version.json
 
       - name: Publish rolling release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: marquee-tv-latest
           name: Marquee TV (latest)
-          files: androidtv/app/build/outputs/apk/debug/app-debug.apk
+          files: |
+            androidtv/app/build/outputs/apk/release/app-release.apk
+            androidtv/version.json

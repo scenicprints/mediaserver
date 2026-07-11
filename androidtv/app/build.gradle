@@ -11,13 +11,32 @@ android {
         applicationId 'com.scenicprints.marquee'
         minSdk 23
         targetSdk 34
-        versionCode 1
-        versionName '1.0'
+        // Bumped per build in CI (-PappVersionCode=<run number>); the in-app
+        // self-updater compares this against the published version.json.
+        versionCode (project.hasProperty('appVersionCode') ? project.appVersionCode.toInteger() : 1)
+        versionName (project.hasProperty('appVersionName') ? project.appVersionName.toString() : '1.0')
+    }
+
+    // Fixed keystore (committed by CI on first run) so every build is signed with
+    // the SAME key — required for the app to update itself over the old install.
+    signingConfigs {
+        release {
+            def ks = file('keystore/marquee.jks')
+            if (ks.exists()) {
+                storeFile ks
+                storePassword 'marquee'
+                keyAlias 'marquee'
+                keyPassword 'marquee'
+            }
+        }
     }
 
     buildTypes {
         release {
             minifyEnabled false
+            if (file('keystore/marquee.jks').exists()) {
+                signingConfig signingConfigs.release
+            }
         }
     }
 
