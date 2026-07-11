@@ -2321,10 +2321,16 @@ osSave.addEventListener('click', async () => {
 });
 
 async function checkForUpdate() {
+  // Only admins can update the shared server, so only they see update UI.
+  const isAdmin = currentUser && currentUser.role === 'admin';
+  updateBtn.style.display = isAdmin ? '' : 'none';
+  if (!isAdmin) { updatePill.classList.add('hidden'); return; }
   try {
     const r = await (await fetch('/api/check-update', { cache: 'no-store' })).json();
     updatePill.classList.toggle('hidden', !r.updateAvailable);
     updateBtn.textContent = r.updateAvailable ? '⟳ Update available' : '⟳ Up to date';
+    if (r.updateAvailable && getPref('skipUpdate') !== r.latest) showUpdateSplash(r);
+    else if (!r.updateAvailable) updateSplash.classList.add('hidden');
   } catch {}
 }
 const updateOverlay = document.getElementById('update-overlay');
@@ -2333,8 +2339,8 @@ const updateDetail = document.getElementById('update-detail');
 const uSteps = { fetch: document.getElementById('ustep-fetch'), restart: document.getElementById('ustep-restart'), reload: document.getElementById('ustep-reload') };
 function setStage(t, d) { updateStage.textContent = t; updateDetail.textContent = d || ''; }
 function markStep(active, done) { Object.values(uSteps).forEach((el) => el.classList.remove('active')); done.forEach((k) => uSteps[k].classList.add('done')); if (active) uSteps[active].classList.add('active'); }
-async function runUpdate() {
-  if (!confirm('Update to the latest version?\n\nThe server will restart and this page will reload automatically.')) return;
+async function runUpdate(skipConfirm) {
+  if (!skipConfirm && !confirm('Update to the latest version?\n\nThe server will restart and this page will reload automatically.')) return;
   Object.values(uSteps).forEach((el) => el.classList.remove('active', 'done'));
   updateOverlay.classList.remove('hidden');
   setStage('Starting update…', 'Asking the server to fetch the latest code'); markStep('fetch', []);
@@ -2348,8 +2354,26 @@ async function runUpdate() {
   };
   setTimeout(poll, 3000);
 }
-updateBtn.addEventListener('click', runUpdate);
-updatePill.addEventListener('click', runUpdate);
+updateBtn.addEventListener('click', () => runUpdate());
+updatePill.addEventListener('click', () => runUpdate());
+
+// ---- Update splash (admin): forced-to-notice, with a skip + "what's new" ----
+const updateSplash = document.getElementById('update-splash');
+const usNotes = document.getElementById('us-notes');
+const usSub = document.getElementById('us-sub');
+document.getElementById('us-update').addEventListener('click', () => { updateSplash.classList.add('hidden'); runUpdate(true); });
+document.getElementById('us-skip').addEventListener('click', () => {
+  if (updateSplash.dataset.latest) setPref('skipUpdate', updateSplash.dataset.latest);
+  updateSplash.classList.add('hidden');
+});
+function showUpdateSplash(r) {
+  updateSplash.dataset.latest = r.latest;
+  usSub.textContent = `You're on ${r.current} — ${r.latest} is ready`
+    + (r.behind ? ` (${r.behind} update${r.behind > 1 ? 's' : ''} behind).` : '.');
+  const notes = (r.notes && r.notes.length) ? r.notes : ['Improvements and fixes.'];
+  usNotes.innerHTML = notes.map((n) => `<li>${escapeHtml(n)}</li>`).join('');
+  updateSplash.classList.remove('hidden');
+}
 
 function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));

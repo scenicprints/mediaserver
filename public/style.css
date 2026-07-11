@@ -787,3 +787,19 @@ body.is-admin .admin-only { display: block; }
 /* ---------- TV / app mode (Android TV WebView): drop browser-isms ---------- */
 body.tv-mode { cursor: none; }
 body.tv-mode .vp-fs { display: none; }
+
+/* ---------- Update available splash ---------- */
+.us-sheet { max-width: 460px; text-align: center; }
+.us-badge {
+  width: 58px; height: 58px; margin: 0 auto 10px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 26px; color: #fff; background: var(--grad);
+  box-shadow: 0 8px 26px rgba(108, 92, 255, 0.5);
+}
+.us-notes-wrap { text-align: left; margin: 16px 0 20px; background: var(--panel-2);
+  border: 1px solid var(--line); border-radius: var(--r); padding: 14px 16px; }
+.us-notes-wrap h3 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); }
+.us-notes { margin: 0; padding-left: 18px; max-height: 240px; overflow-y: auto; }
+.us-notes li { margin: 5px 0; font-size: 14px; line-height: 1.45; }
+.us-actions { display: flex; gap: 10px; justify-content: center; }
+.us-actions .btn { min-width: 130px; }

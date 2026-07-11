@@ -587,14 +587,23 @@ app.get('/api/check-update', async () => {
     const current = await git(['rev-parse', 'HEAD']);
     const latest = await git(['rev-parse', 'origin/main']);
     const behind = parseInt(await git(['rev-list', '--count', 'HEAD..origin/main']).catch(() => '0'), 10) || 0;
-    return { current: current.slice(0, 7), latest: latest.slice(0, 7), updateAvailable: current !== latest, behind };
+    // "What's new": the subject line of each incoming commit, so the update
+    // splash can tell the user what the update actually does.
+    let notes = [];
+    if (current !== latest) {
+      const log = await git(['log', '--format=%s', 'HEAD..origin/main']).catch(() => '');
+      notes = log.split('\n').map((s) => s.trim()).filter(Boolean).slice(0, 20);
+    }
+    return { current: current.slice(0, 7), latest: latest.slice(0, 7), updateAvailable: current !== latest, behind, notes };
   } catch {
     return { updateAvailable: false, error: 'offline or updates not enabled' };
   }
 });
 
 // Exit with code 42 so the run.bat wrapper pulls the latest code and relaunches.
+// Admin only — a normal user must never be able to restart the shared server.
 app.post('/api/update', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
   reply.send({ ok: true, restarting: true });
   setTimeout(() => process.exit(42), 400);
 });
