@@ -281,7 +281,7 @@ export async function backfillMovieDetails(db, apiKey, { log = () => {} } = {}) 
   const upd = db.prepare(
     `UPDATE movies SET collection_id = ?, collection_name = ?, collection_poster = ?,
        runtime = COALESCE(runtime, ?), genres = CASE WHEN genres IS NULL OR genres = '' THEN ? ELSE genres END,
-       col_checked = 1 WHERE id = ?`
+       companies = ?, col_checked = 1 WHERE id = ?`
   );
   let n = 0;
   for (const m of rows) {
@@ -300,12 +300,31 @@ export async function backfillMovieDetails(db, apiKey, { log = () => {} } = {}) 
       col && col.poster_path ? POSTER + col.poster_path : null,
       d.runtime || null,
       d.genres ? JSON.stringify(d.genres.map((g) => g.name)) : null,
+      JSON.stringify((d.production_companies || []).map((c) => c.id)),
       m.id
     );
     n++;
     await new Promise((r) => setTimeout(r, 70));
   }
   if (n) log(`Collection/details backfilled for ${n} movie(s).`);
+  return n;
+}
+
+// Backfill production companies for the existing catalog (movies enriched before
+// we stored them). One detail fetch each; runs once in the background.
+export async function backfillCompanies(db, apiKey, { log = () => {} } = {}) {
+  if (!apiKey) return 0;
+  const rows = db.prepare('SELECT id, tmdb_id FROM movies WHERE tmdb_id IS NOT NULL AND companies IS NULL').all();
+  const upd = db.prepare('UPDATE movies SET companies = ? WHERE id = ?');
+  let n = 0;
+  for (const m of rows) {
+    let d = null;
+    try { const url = new URL(`${BASE}/movie/${m.tmdb_id}`); url.searchParams.set('api_key', apiKey); const r = await fetch(url); if (r.ok) d = await r.json(); } catch {}
+    upd.run(JSON.stringify(d && d.production_companies ? d.production_companies.map((c) => c.id) : []), m.id);
+    n++;
+    await new Promise((r) => setTimeout(r, 60));
+  }
+  if (n) log(`Studios backfilled for ${n} movie(s).`);
   return n;
 }
 

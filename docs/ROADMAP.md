@@ -98,6 +98,23 @@ Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed
     `.mkv`), Skip Intro/**Skip Credits** are **precise** and work for anything — they appear only
     inside the Intro/Credits chapters, which correctly handles a **cold open before the intro**.
     Skip Credits jumps to the next episode (or the end).
+- **TV-remote batch: text-field nav, meta-collections, seasonal row.** (This is a 10-ft TV app
+  first; browser second.)
+  - **Text fields are remote-navigable** (no more being "locked in the search box" — remotes have
+    no Tab). Search boxes + dropdowns joined the focus engine: a remote lands on a field, **Enter**
+    starts typing (TV keyboard), **Up/Down exits** the field back to spatial nav (Left/Right still
+    move the cursor). Requests no longer auto-focuses the field, and pre-seats remote focus on it.
+    `window.tvSeat`/`tvNavActive` exposed from `focus.js`.
+  - **Broad meta-collections**: the Collections tab now shows studio/franchise groupings —
+    **Marvel Cinematic Universe, Star Wars, Pixar, Disney Animated Classics, Disney Live-Action,
+    DreamWorks, DC Extended Universe** — not just tight TMDB collections. Driven by a new
+    `companies` column (production-company ids, backfilled from TMDB; DCEU is a curated tmdbId
+    list). Each needs 3+ owned. `/api/collections` returns meta first, then TMDB collections;
+    `/api/collections/meta:<id>` for detail.
+  - **Collections minimum raised to 3** (was 2) — 1–2 films isn't a collection.
+  - **Seasonal home row**: a themed row (🎃 Halloween, 🎄 Holiday, ☀️ Summer Blockbusters,
+    💘 Date Night, 🌸 Spring, 🍂 Fall, ❄️ New Year…) chosen by the current month, added as the last
+    **permanent** row on Home/Movies/TV.
 - **Feedback batch: watch-state + player + nav polish.**
   - **Live TV no longer touches Continue Watching.** Tuning a channel plays with no `progressUrl`,
     so ephemeral live viewing never writes watch-state (movies tune at the live offset; shows play

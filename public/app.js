@@ -82,6 +82,30 @@ function recommended(list) {
 }
 function shuffle(a) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
 
+// There's always a season on — pick a theme by the current month and filter by
+// genre (and a little title-matching for holidays, since we have no keywords).
+function seasonalTheme() {
+  const m = new Date().getMonth() + 1;
+  const anyG = (it, gs) => genresOf(it).some((g) => gs.includes(g));
+  const hasG = (it, g) => genresOf(it).includes(g);
+  if (m === 12) return { title: '🎄 Holiday Movies', match: (it) => /christmas|holiday|santa|\belf\b|grinch|scrooge|no[eë]l|xmas|home alone|klaus|nightmare before/i.test(it.title) || (hasG(it, 'Family') && /snow|winter|miracle|wonderful life/i.test(it.title)) };
+  if (m === 11) return { title: '🍂 Cozy Fall Favorites', match: (it) => anyG(it, ['Family', 'Comedy', 'Drama']) && (it.rating || 0) >= 6.5 };
+  if (m === 10) return { title: '🎃 Halloween Frights', match: (it) => anyG(it, ['Horror', 'Thriller']) };
+  if (m === 9) return { title: '🍁 Fall Dramas', match: (it) => hasG(it, 'Drama') && (it.rating || 0) >= 6.5 };
+  if (m >= 6 && m <= 8) return { title: '☀️ Summer Blockbusters', match: (it) => anyG(it, ['Action', 'Adventure', 'Science Fiction']) && (it.rating || 0) >= 6.5 };
+  if (m === 2) return { title: '💘 Date Night', match: (it) => hasG(it, 'Romance') };
+  if (m >= 3 && m <= 5) return { title: '🌸 Spring Adventures', match: (it) => anyG(it, ['Adventure', 'Family', 'Fantasy']) };
+  return { title: '❄️ New Year, Great Films', match: (it) => (it.rating || 0) >= 7.8 }; // January
+}
+// A seasonal row from a pool of {x, kind}. Null if too little fits the theme.
+function seasonalRow(pool) {
+  const t = seasonalTheme();
+  const items = pool.filter((p) => t.match(p.x)).sort((a, b) => (b.x.rating || 0) - (a.x.rating || 0));
+  if (items.length < 3) return null;
+  const cards = (n) => items.slice(0, n).map((p) => buildMediaCard(p.x, p.kind));
+  return { title: t.title, cards: cards(30), seeAll: () => ({ title: t.title, cards: cards(items.length) }) };
+}
+
 function renderView() {
   if (currentView !== 'livetv') stopLiveTv();
   if (currentView !== 'requests') stopRequestsPolling();
@@ -136,6 +160,12 @@ function renderView() {
     allGenres(movies).forEach((g) => push(rest, g, movies.filter((m) => genresOf(m).includes(g)).sort(byRating), 'movie'));
     decadesOf(movies).forEach((d) => push(rest, `${d}s`, movies.filter((m) => m.year >= d && m.year < d + 10).sort(byYear), 'movie'));
   }
+  // Seasonal row — always last among the permanent (fixed) rows.
+  const seasonalPool = currentView === 'tv' ? shows.map((x) => ({ x, kind: 'show' }))
+    : currentView === 'movies' ? movies.map((x) => ({ x, kind: 'movie' }))
+    : [...movies.map((x) => ({ x, kind: 'movie' })), ...shows.map((x) => ({ x, kind: 'show' }))];
+  const sr = seasonalRow(seasonalPool);
+  if (sr) top.push(sr);
   drawRows([...top, ...shuffle(rest)]);
 }
 
@@ -227,7 +257,7 @@ async function renderCollections() {
 
 async function openCollection(id) {
   let data;
-  try { data = await (await fetch('/api/collections/' + id)).json(); } catch { return; }
+  try { data = await (await fetch('/api/collections/' + encodeURIComponent(id))).json(); } catch { return; }
   const items = data.items || [];
   detailInner.innerHTML = `
     <div class="dp-splash" style="background-image:url('${data.backdrop || data.poster || (items[0] && items[0].backdrop) || ''}')">
@@ -298,7 +328,10 @@ async function renderRequests() {
   try { reqProfiles = await (await fetch('/api/requests/profiles')).json(); } catch {}
   renderQualityPicker(radarrOk, sonarrOk);
 
-  input.focus();
+  // On a TV, don't auto-focus (it traps the remote in the field). Focus the box
+  // only for mouse/desktop; a remote lands on it via the focus engine and Enter.
+  if (!(window.tvNavActive && window.tvNavActive())) input.focus();
+  if (window.tvSeat) window.tvSeat(input);
   input.addEventListener('input', () => {
     clearTimeout(reqSearchTimer);
     const q = input.value.trim();

@@ -144,6 +144,9 @@ export function openDb(dbPath) {
   if (!movieCols.has('collection_name')) db.exec('ALTER TABLE movies ADD COLUMN collection_name TEXT');
   if (!movieCols.has('collection_poster')) db.exec('ALTER TABLE movies ADD COLUMN collection_poster TEXT');
   if (!movieCols.has('col_checked')) db.exec('ALTER TABLE movies ADD COLUMN col_checked INTEGER DEFAULT 0');
+  // Production company ids (JSON array) → powers broad studio/franchise
+  // "meta-collections" (Marvel, Disney, Star Wars, Pixar…).
+  if (!movieCols.has('companies')) db.exec('ALTER TABLE movies ADD COLUMN companies TEXT');
 
   // Small key-value store for playback preferences that must survive across
   // browsers/devices (preferred version per title, caption delay per file+track,

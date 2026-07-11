@@ -6,7 +6,7 @@ import Fastify from 'fastify';
 import fastifyStatic from '@fastify/static';
 import { openDb } from './db.js';
 import { scanLibraries, seedLibraries } from './scan.js';
-import { enrichLibrary, enrichShows, enrichEpisodes, movieExtra, showExtra, backfillGenres, episodeExtra, backfillMovieDetails } from './tmdb.js';
+import { enrichLibrary, enrichShows, enrichEpisodes, movieExtra, showExtra, backfillGenres, episodeExtra, backfillMovieDetails, backfillCompanies } from './tmdb.js';
 import { ext, qualityRank } from './parse.js';
 import { listDrives, listDirs } from './fsbrowse.js';
 import { osEnabled, searchSubtitles, downloadSubtitle, clearAuth } from './opensubtitles.js';
@@ -64,32 +64,71 @@ app.get('/api/movies', async () => {
   ).all();
 });
 
-// Collections tab: owned movies grouped by TMDB franchise/collection. Each
-// entry has the collection art (falls back to a member poster) and how many of
-// its films are in the library.
-app.get('/api/collections', async () => {
+// Broad "meta-collections" — studios/franchises that aren't a single TMDB
+// collection. Defined by production company id, or a curated tmdbId list where
+// no clean company exists (DC). `not`/`notGenre` carve subsets apart.
+const META_COLLECTIONS = [
+  { id: 'meta:mcu', name: 'Marvel Cinematic Universe', company: 420 },
+  { id: 'meta:starwars', name: 'Star Wars', company: 1 }, // Lucasfilm
+  { id: 'meta:pixar', name: 'Pixar', company: 3 },
+  { id: 'meta:disney-animation', name: 'Disney Animated Classics', company: 6125 }, // Walt Disney Animation Studios
+  { id: 'meta:disney-live', name: 'Disney Live-Action', company: 2, not: [6125, 3], notGenre: ['Animation'] }, // Walt Disney Pictures, minus animated
+  { id: 'meta:dreamworks', name: 'DreamWorks Animation', company: 521 },
+  { id: 'meta:dceu', name: 'DC Extended Universe', tmdbIds: [49521, 209112, 297761, 297762, 141052, 297802, 287947, 495764, 464052, 436969, 791373, 436270, 594767, 298618, 565770, 572802] }
+];
+
+function metaMembers(def) {
   const rows = db.prepare(
-    `SELECT collection_id AS id, collection_name AS name,
-            COUNT(*) AS count,
-            MAX(collection_poster) AS poster,
-            MAX(backdrop) AS backdrop,
-            MIN(poster) AS memberPoster
-     FROM movies
-     WHERE collection_id IS NOT NULL
-     GROUP BY collection_id, collection_name
-     HAVING count >= 2
-     ORDER BY name COLLATE NOCASE`
+    `SELECT id, title, year, poster, backdrop, overview, rating, watched, resume_position, duration, runtime, genres, companies, tmdb_id
+     FROM movies WHERE tmdb_id IS NOT NULL`
   ).all();
-  return rows.map((r) => ({ id: r.id, name: r.name, count: r.count, poster: r.poster || r.memberPoster, backdrop: r.backdrop }));
+  const parse = (s) => { try { return JSON.parse(s || '[]'); } catch { return []; } };
+  return rows.filter((m) => {
+    if (def.tmdbIds) return def.tmdbIds.includes(m.tmdb_id);
+    const cos = parse(m.companies);
+    if (!cos.includes(def.company)) return false;
+    if (def.not && def.not.some((c) => cos.includes(c))) return false;
+    if (def.notGenre && def.notGenre.some((g) => parse(m.genres).includes(g))) return false;
+    return true;
+  }).sort((a, b) => (a.year || 0) - (b.year || 0));
+}
+
+// Collections tab: broad meta-collections (Marvel, Disney, Star Wars…) first,
+// then TMDB franchise collections. Each needs 3+ owned titles.
+app.get('/api/collections', async () => {
+  const meta = META_COLLECTIONS.map((def) => {
+    const items = metaMembers(def);
+    if (items.length < 3) return null;
+    const art = items.find((i) => i.backdrop) || items[0];
+    return { id: def.id, name: def.name, count: items.length, poster: art.poster, backdrop: art.backdrop, meta: true };
+  }).filter(Boolean).sort((a, b) => b.count - a.count);
+
+  const tmdb = db.prepare(
+    `SELECT collection_id AS id, collection_name AS name, COUNT(*) AS count,
+            MAX(collection_poster) AS poster, MAX(backdrop) AS backdrop, MIN(poster) AS memberPoster
+     FROM movies WHERE collection_id IS NOT NULL
+     GROUP BY collection_id, collection_name HAVING count >= 3 ORDER BY name COLLATE NOCASE`
+  ).all().map((r) => ({ id: r.id, name: r.name, count: r.count, poster: r.poster || r.memberPoster, backdrop: r.backdrop }));
+
+  return [...meta, ...tmdb];
 });
 
-// One collection's owned entries, in release order (playable).
+// One collection's owned entries, in release order (playable). Handles both
+// meta:<id> and numeric TMDB collection ids.
 app.get('/api/collections/:id', async (req) => {
-  const meta = db.prepare('SELECT collection_name AS name, MAX(collection_poster) AS poster, MAX(backdrop) AS backdrop FROM movies WHERE collection_id = ?').get(req.params.id);
+  const id = req.params.id;
+  if (id.startsWith('meta:')) {
+    const def = META_COLLECTIONS.find((d) => d.id === id);
+    if (!def) return { name: null, items: [] };
+    const items = metaMembers(def);
+    const art = items.find((i) => i.backdrop) || items[0] || {};
+    return { name: def.name, poster: art.poster, backdrop: art.backdrop, items };
+  }
+  const meta = db.prepare('SELECT collection_name AS name, MAX(collection_poster) AS poster, MAX(backdrop) AS backdrop FROM movies WHERE collection_id = ?').get(id);
   const items = db.prepare(
     `SELECT id, title, year, poster, backdrop, overview, rating, watched, resume_position, duration, runtime
      FROM movies WHERE collection_id = ? ORDER BY year, title COLLATE NOCASE`
-  ).all(req.params.id);
+  ).all(id);
   return { name: meta && meta.name, poster: meta && meta.poster, backdrop: meta && meta.backdrop, items };
 });
 
@@ -808,6 +847,7 @@ async function start() {
       console.log(`TMDB enrichment: ${ep} episode(s) updated.`);
       await backfillGenres(db, config.tmdbApiKey, { log: (x) => console.log(x) });
       await backfillMovieDetails(db, config.tmdbApiKey, { log: (x) => console.log(x) });
+      await backfillCompanies(db, config.tmdbApiKey, { log: (x) => console.log(x) });
     })().catch((e) => console.error('Enrichment error:', e.message));
   }
 

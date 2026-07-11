@@ -14,7 +14,8 @@
   const SELECTOR = [
     '.card', '.coll-card', '.req-card', '.nav-link', '.hero-dot', '.see-all', '.season-card',
     '.episode', '.rec', '.trailer-card', '.tab', '.az', '.frow',
-    '.btn', '.close', '.detail-close', '.icon-btn', '.rm', '#update-pill'
+    '.btn', '.close', '.detail-close', '.icon-btn', '.rm', '#update-pill',
+    '.nav-search', '.req-input', '.dp-select', '.req-qsel select'
   ].join(',');
 
   let current = null;   // the focused element
@@ -144,7 +145,12 @@
   }
 
   function activate() {
-    if (current && document.contains(current)) current.click();
+    if (!current || !document.contains(current)) return;
+    // Enter on a text field / dropdown starts editing (brings up the TV's
+    // on-screen keyboard); everything else is a click.
+    const t = current.tagName;
+    if (t === 'INPUT' || t === 'TEXTAREA' || t === 'SELECT') current.focus();
+    else current.click();
   }
 
   // Backspace = the remote's Menu/Back button: dismiss the top layer.
@@ -161,9 +167,16 @@
     // Let the video player, Live TV surfing, and typing own the keyboard.
     if (document.querySelector('.vp')) return;
     if (document.body.classList.contains('lt-active') && document.getElementById('detail').classList.contains('hidden')) return;
-    const a = document.activeElement;
-    if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.isContentEditable)) return;
     if (e.altKey || e.ctrlKey || e.metaKey) return;
+    // While typing in a field, Up/Down (and Escape) exit it back to spatial nav
+    // — remotes have no Tab. Left/Right and characters stay in the field.
+    const a = document.activeElement;
+    const typing = a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.isContentEditable);
+    if (typing) {
+      if (e.key === 'Escape') { e.preventDefault(); a.blur(); return; }
+      if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return; // let typing/cursor work
+      a.blur(); // fall through to move()
+    }
 
     if (DIRS[e.key]) { e.preventDefault(); move(DIRS[e.key]); }
     else if (e.key === 'Enter') { if (current) { e.preventDefault(); activate(); } }
@@ -206,4 +219,9 @@
       if ([...m.removedNodes].some((n) => n.classList && n.classList.contains('vp'))) { current = null; break; }
     }
   }).observe(document.body, { childList: true });
+
+  // Let a view place the remote focus on a specific element (e.g. Requests puts
+  // it on the search box). Only lights up if the user is driving by remote.
+  window.tvSeat = (el) => { if (el && navMode) setCurrent(el); else if (el) current = el; };
+  window.tvNavActive = () => navMode;
 })();
