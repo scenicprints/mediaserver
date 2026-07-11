@@ -41,6 +41,13 @@ Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed
   library (with a count).
 - **Season cards with artwork** — the show view uses TMDB season poster cards (via
   `/api/shows/:id/extra`) instead of number pills.
+- **Library + endless categories + subtitle sources + version memory**: a real **Library**
+  nav section (Movies/TV toggle + **A–Z letter rail**) replacing the top-right grid button;
+  home/Movies/TV have a **fixed top‑4** (Continue Watching, Recently Added, Recently Released,
+  Recommended) then **shuffled** genre/decade/rating/quality categories (near‑endless);
+  the player **remembers the last version** you picked (localStorage `pq`); external `.srt`
+  detection broadened (loose name match either direction, `Subs/`/`Subtitles/` subfolders,
+  language labels, **multiple tracks** listed in the player, auto‑shows an existing track).
 - **Categories galore + fixes**: genre + decade + rating/quality/watched categories (genres
   auto-**backfilled** from TMDB into movies/shows); a **▦ browse-all** nav button; **rich
   episode detail** (still, air date, rating, runtime, cast & crew via `/api/episodes/:id/extra`).
@@ -62,9 +69,27 @@ Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed
 
 ---
 
-## 🔜 Next
-- Handoff docs + the MYFLIX UI overhaul are done. **Owner has a large backlog still to
-  enumerate — capture each item in the Backlog below as it comes in.**
+## 🔜 Next (start here — priority order)
+1. **Apple‑TV / tvOS look & feel (the owner's top priority).** Make the whole UI feel like a
+   10‑foot Apple‑TV interface so a future native tvOS app transitions smoothly. Started this
+   pass: bigger cards + a hover focus‑ring glow. **Still to do:** a real **focus engine** —
+   arrow‑key/remote navigation with a single "focused" item that scales + glows while others
+   dim, `scrollIntoView` as focus moves, Enter to open, wrap‑around across rows; larger 10‑ft
+   typography/spacing; a tvOS‑style top menu. This deserves a dedicated batch.
+2. **Embedded subtitles inside media files** (owner asked; `.mkv` often has embedded subs).
+   Browsers can't read them, so it needs **ffprobe** to detect + **ffmpeg** to extract to
+   WebVTT on demand. Same ffmpeg pipeline as #3.
+3. **Audio‑track selection** — needs **ffmpeg** to remux/transcode the chosen embedded audio
+   track (browsers can't switch embedded audio). Player already lists tracks best‑effort.
+4. **Skip Intro accuracy** — upgrade the heuristic with ffprobe chapter markers / per‑show
+   manual ranges.
+5. **Verify the latest commit on the real Dell library (~1592 movies):** genre backfill at
+   scale (background, one lookup/title), Library A–Z performance, multi‑track subtitles, and
+   version memory. Placeholder sample files can't actually play, so real‑media playback checks
+   (seek, subtitle sync/offset, Up Next) happen on the Dell.
+
+**Decision still open:** the native Apple TV *app* delivery — cloud‑build → TestFlight ($99/yr)
+vs a Fire TV / Nvidia Shield box. (Separate from #1, which is the *web* UI feeling tvOS‑like.)
 
 ## 📋 Backlog (owner-requested — fill in)
 > The owner said there's "a massive amount of things to get done." List them here with

@@ -38,11 +38,6 @@ async function loadAll() {
 document.querySelectorAll('.nav-link').forEach((b) =>
   b.addEventListener('click', () => setView(b.dataset.view))
 );
-document.getElementById('lib-btn').addEventListener('click', () => {
-  const byTitle = (a, b) => a.title.localeCompare(b.title);
-  if (currentView === 'tv') showGridView('All TV Shows', mediaCards([...shows].sort(byTitle), 'show'));
-  else showGridView('All Movies', mediaCards([...movies].sort(byTitle), 'movie'));
-});
 
 function setView(view) {
   currentView = view;
@@ -58,54 +53,104 @@ function genresOf(m) { try { return JSON.parse(m.genres || '[]'); } catch { retu
 function allGenres(list) { const s = new Set(); list.forEach((m) => genresOf(m).forEach((g) => s.add(g))); return [...s].sort(); }
 function decadesOf(list) { return [...new Set(list.map((m) => (m.year ? Math.floor(m.year / 10) * 10 : null)).filter(Boolean))].sort((a, b) => b - a); }
 
+function recommended(list) {
+  const r = list.filter((m) => !m.watched && (m.rating || 0) >= 7).sort((a, b) => (b.rating || 0) - (a.rating || 0));
+  return r.length ? r : [...list].sort((a, b) => (b.rating || 0) - (a.rating || 0));
+}
+function shuffle(a) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
+
 function renderView() {
+  if (currentView === 'library') { renderLibrary(); return; }
   rowsEl.style.paddingTop = '';
-  const rows = [];
+  const top = [], rest = [];
   const byYear = (a, b) => (b.year || 0) - (a.year || 0);
-  const byTitle = (a, b) => a.title.localeCompare(b.title);
-  const cat = (title, list, kind) => { if (list.length) rows.push({ title, kind, cards: mediaCards(list.slice(0, 24), kind), seeAll: () => ({ title, cards: mediaCards(list, kind) }) }); };
+  const push = (arr, title, list, kind) => { if (list.length) arr.push({ title, kind, cards: mediaCards(list.slice(0, 24), kind), seeAll: () => ({ title, cards: mediaCards(list, kind) }) }); };
 
   if (currentView === 'movies') {
     setHero(movies.filter((m) => m.backdrop));
     const cw = continueItems.filter((c) => c.kind === 'movie');
-    if (cw.length) rows.push({ title: 'Continue Watching', cards: continueCards(cw) });
-    cat('Recently Added', [...movies].sort(byRecent), 'movie');
-    cat('Recently Released', [...movies].sort(byYear), 'movie');
-    cat('Top Rated', [...movies].sort(byRating), 'movie');
-    cat('Critically Acclaimed', movies.filter((m) => m.rating >= 8).sort(byRating), 'movie');
-    cat('Unwatched', movies.filter((m) => !m.watched), 'movie');
-    cat('Watched Again', movies.filter((m) => m.watched), 'movie');
-    cat('Favorites', movies.filter((m) => m.favorite), 'movie');
-    cat('4K', movies.filter((m) => (m.qualities || '').includes('4K')), 'movie');
-    allGenres(movies).forEach((g) => cat(g, movies.filter((m) => genresOf(m).includes(g)).sort(byRating), 'movie'));
-    decadesOf(movies).forEach((d) => cat(`${d}s`, movies.filter((m) => m.year >= d && m.year < d + 10).sort(byYear), 'movie'));
-    rows.push({ title: 'All Movies', cards: mediaCards([...movies].sort(byTitle), 'movie'), grid: true });
+    if (cw.length) top.push({ title: 'Continue Watching', cards: continueCards(cw) });
+    push(top, 'Recently Added', [...movies].sort(byRecent), 'movie');
+    push(top, 'Recently Released', [...movies].sort(byYear), 'movie');
+    push(top, 'Recommended', recommended(movies), 'movie');
+    push(rest, 'Top Rated', [...movies].sort(byRating), 'movie');
+    push(rest, 'Critically Acclaimed', movies.filter((m) => m.rating >= 8).sort(byRating), 'movie');
+    push(rest, 'Unwatched', movies.filter((m) => !m.watched), 'movie');
+    push(rest, 'Watch Again', movies.filter((m) => m.watched), 'movie');
+    push(rest, 'Favorites', movies.filter((m) => m.favorite), 'movie');
+    push(rest, '4K', movies.filter((m) => (m.qualities || '').includes('4K')), 'movie');
+    allGenres(movies).forEach((g) => push(rest, g, movies.filter((m) => genresOf(m).includes(g)).sort(byRating), 'movie'));
+    decadesOf(movies).forEach((d) => push(rest, `${d}s`, movies.filter((m) => m.year >= d && m.year < d + 10).sort(byYear), 'movie'));
   } else if (currentView === 'tv') {
     setHero(shows.filter((s) => s.backdrop));
     const cw = continueItems.filter((c) => c.kind === 'episode');
-    if (cw.length) rows.push({ title: 'Continue Watching', cards: continueCards(cw) });
-    cat('Recently Added', [...shows].sort(byRecent), 'show');
-    cat('New Episodes', shows.filter((s) => s.unwatched > 0), 'show');
-    cat('Recently Released', [...shows].sort(byYear), 'show');
-    cat('Top Rated', [...shows].sort(byRating), 'show');
-    cat('Critically Acclaimed', shows.filter((s) => s.rating >= 8).sort(byRating), 'show');
-    allGenres(shows).forEach((g) => cat(g, shows.filter((s) => genresOf(s).includes(g)).sort(byRating), 'show'));
-    decadesOf(shows).forEach((d) => cat(`${d}s`, shows.filter((s) => s.year >= d && s.year < d + 10).sort(byYear), 'show'));
-    rows.push({ title: 'All Shows', cards: mediaCards([...shows].sort(byTitle), 'show'), grid: true });
+    if (cw.length) top.push({ title: 'Continue Watching', cards: continueCards(cw) });
+    push(top, 'Recently Added', [...shows].sort(byRecent), 'show');
+    push(top, 'Recently Released', [...shows].sort(byYear), 'show');
+    push(top, 'Recommended', recommended(shows), 'show');
+    push(rest, 'New Episodes', shows.filter((s) => s.unwatched > 0), 'show');
+    push(rest, 'Top Rated', [...shows].sort(byRating), 'show');
+    push(rest, 'Critically Acclaimed', shows.filter((s) => s.rating >= 8).sort(byRating), 'show');
+    allGenres(shows).forEach((g) => push(rest, g, shows.filter((s) => genresOf(s).includes(g)).sort(byRating), 'show'));
+    decadesOf(shows).forEach((d) => push(rest, `${d}s`, shows.filter((s) => s.year >= d && s.year < d + 10).sort(byYear), 'show'));
   } else {
     const mixed = [...movies.filter((m) => m.backdrop), ...shows.filter((s) => s.backdrop)].sort(byRating);
     setHero(mixed);
-    if (continueItems.length) rows.push({ title: 'Continue Watching', cards: continueCards(continueItems) });
-    rows.push({ title: 'Recently Added', cards: mixedRecent(24) });
-    cat('Movies', [...movies].sort(byRating), 'movie');
-    cat('TV Shows', [...shows].sort(byRating), 'show');
-    cat('Recently Released', [...movies].sort(byYear), 'movie');
-    cat('Critically Acclaimed', movies.filter((m) => m.rating >= 8).sort(byRating), 'movie');
-    cat('Unwatched Movies', movies.filter((m) => !m.watched), 'movie');
-    cat('Favorites', movies.filter((m) => m.favorite), 'movie');
-    allGenres(movies).slice(0, 8).forEach((g) => cat(g, movies.filter((m) => genresOf(m).includes(g)).sort(byRating), 'movie'));
+    if (continueItems.length) top.push({ title: 'Continue Watching', cards: continueCards(continueItems) });
+    top.push({ title: 'Recently Added', cards: mixedRecent(24) });
+    push(top, 'Recently Released', [...movies].sort(byYear), 'movie');
+    push(top, 'Recommended', recommended(movies), 'movie');
+    push(rest, 'Movies', [...movies].sort(byRating), 'movie');
+    push(rest, 'TV Shows', [...shows].sort(byRating), 'show');
+    push(rest, 'Critically Acclaimed', movies.filter((m) => m.rating >= 8).sort(byRating), 'movie');
+    push(rest, 'Unwatched Movies', movies.filter((m) => !m.watched), 'movie');
+    push(rest, 'Favorites', movies.filter((m) => m.favorite), 'movie');
+    allGenres(movies).forEach((g) => push(rest, g, movies.filter((m) => genresOf(m).includes(g)).sort(byRating), 'movie'));
+    decadesOf(movies).forEach((d) => push(rest, `${d}s`, movies.filter((m) => m.year >= d && m.year < d + 10).sort(byYear), 'movie'));
   }
-  drawRows(rows);
+  drawRows([...top, ...shuffle(rest)]);
+}
+
+let libraryKind = 'movie';
+function renderLibrary() {
+  heroEl.classList.add('hidden');
+  rowsEl.style.paddingTop = '78px';
+  rowsEl.innerHTML = '';
+  const list = (libraryKind === 'tv' ? shows : movies).slice().sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: 'base' }));
+  const groups = {};
+  for (const it of list) {
+    let L = (it.title.replace(/^(the|a|an) /i, '')[0] || '#').toUpperCase();
+    if (!/[A-Z]/.test(L)) L = '#';
+    (groups[L] = groups[L] || []).push(it);
+  }
+  const letters = '#ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').filter((L) => groups[L]);
+
+  const wrap = document.createElement('div');
+  wrap.className = 'library';
+  wrap.innerHTML = `
+    <div class="lib-head">
+      <div class="tabs">
+        <button class="tab${libraryKind === 'movie' ? ' active' : ''}" data-k="movie">Movies</button>
+        <button class="tab${libraryKind === 'tv' ? ' active' : ''}" data-k="tv">TV Shows</button>
+      </div>
+      <span class="row-count">${list.length}</span>
+    </div>
+    <div class="lib-scroll" id="lib-scroll"></div>
+    <div class="az-rail">${letters.map((L) => `<button class="az" data-l="${L}">${L}</button>`).join('')}</div>`;
+  rowsEl.appendChild(wrap);
+
+  const scroll = wrap.querySelector('#lib-scroll');
+  for (const L of letters) {
+    const sec = document.createElement('div');
+    sec.className = 'lib-letter';
+    sec.id = 'L-' + L;
+    sec.innerHTML = `<h3 class="lib-letter-h">${L}</h3><div class="lib-grid"></div>`;
+    const grid = sec.querySelector('.lib-grid');
+    groups[L].forEach((it) => grid.appendChild(buildMediaCard(it, libraryKind)));
+    scroll.appendChild(sec);
+  }
+  wrap.querySelectorAll('.tab').forEach((b) => b.addEventListener('click', () => { libraryKind = b.dataset.k; renderLibrary(); }));
+  wrap.querySelectorAll('.az').forEach((b) => b.addEventListener('click', () => document.getElementById('L-' + b.dataset.l)?.scrollIntoView({ behavior: 'smooth', block: 'start' })));
 }
 
 function showGridView(title, cards) {
@@ -285,6 +330,11 @@ function versionLabel(f, i) {
   const tags = fileTags(f.filename); if (tags.length) parts.push(tags.join(' · '));
   return parts.join('   ·   ');
 }
+// Default to the quality the user last chose, if that version exists.
+function preferredFile(files) {
+  const pq = localStorage.getItem('pq');
+  return (pq && files.find((f) => f.quality === pq)) || files[0] || null;
+}
 function playTrailer(key) {
   const ov = document.createElement('div');
   ov.className = 'update-overlay'; ov.style.zIndex = 90;
@@ -301,7 +351,7 @@ async function openDetail(id, autoplay = true) {
     fetch('/api/movies/' + id + '/extra').then((r) => r.json()).catch(() => ({}))
   ]);
   const files = m.files || [];
-  let current = files[0];
+  let current = preferredFile(files);
   const resume = m.resume_position && m.resume_position > 5 ? m.resume_position : 0;
   const runtime = extra.runtime ? `${Math.floor(extra.runtime / 60)}h ${extra.runtime % 60}m` : '';
   const genres = extra.genres || [];
@@ -342,7 +392,7 @@ async function openDetail(id, autoplay = true) {
   detail.scrollTop = 0;
 
   const sel = document.getElementById('ver-select');
-  if (sel) sel.addEventListener('change', () => { const f = files.find((x) => String(x.id) === sel.value); if (f) current = f; });
+  if (sel) sel.addEventListener('change', () => { const f = files.find((x) => String(x.id) === sel.value); if (f) { current = f; localStorage.setItem('pq', f.quality || ''); } });
 
   function play(at) {
     openPlayer({
@@ -425,7 +475,7 @@ function playEpisodeAt(show, flat, i, opts = {}) {
   openPlayer({
     title: show.title,
     subtitle: episodeSub(ep),
-    files, startFileId: opts.fileId || files[0].id,
+    files, startFileId: opts.fileId || preferredFile(files).id,
     streamBase: '/api/stream/episode/', subtitleBase: '/api/subtitle/episode/', searchKind: 'episode',
     startAt: opts.startAt != null ? opts.startAt : (ep.resume_position > 5 ? ep.resume_position : 0),
     progressUrl: `/api/episodes/${ep.id}/progress`,
@@ -437,7 +487,7 @@ function playEpisodeAt(show, flat, i, opts = {}) {
 async function openEpisodeDetail(show, flat, i) {
   const ep = flat[i].ep;
   const files = ep.files || [];
-  let current = files[0];
+  let current = preferredFile(files);
   const resume = ep.resume_position && ep.resume_position > 5 ? ep.resume_position : 0;
   const extra = await fetch(`/api/episodes/${ep.id}/extra`).then((r) => r.json()).catch(() => ({}));
   const still = extra.still || ep.still || show.backdrop || show.poster || '';
@@ -485,7 +535,7 @@ async function openEpisodeDetail(show, flat, i) {
   }
 
   const sel = document.getElementById('ep-ver');
-  if (sel) sel.addEventListener('change', () => { const f = files.find((x) => String(x.id) === sel.value); if (f) current = f; });
+  if (sel) sel.addEventListener('change', () => { const f = files.find((x) => String(x.id) === sel.value); if (f) { current = f; localStorage.setItem('pq', f.quality || ''); } });
   const playAt = (at) => playEpisodeAt(show, flat, i, { fileId: current.id, startAt: at });
   if (resume) {
     document.getElementById('ep-resume').addEventListener('click', () => playAt(resume));
@@ -641,7 +691,9 @@ function openPlayer(ctx) {
   let subOffset = 0;
   let cues = [];
   let subVisible = true;
+  let currentSubIdx = -1;
   let upnextShown = false;
+  const subUrl = (idx) => `${ctx.subtitleBase}${current.id}?idx=${idx}`;
 
   const vp = document.createElement('div');
   vp.className = 'vp';
@@ -721,7 +773,9 @@ function openPlayer(ctx) {
     current = f;
     video.src = ctx.streamBase + f.id;
     video.addEventListener('loadedmetadata', () => { if (at) video.currentTime = at; video.play(); }, { once: true });
-    setSubtitle(f.subtitle ? ctx.subtitleBase + f.id : null);
+    const subs = current.subtitles || [];
+    if (subs.length) { currentSubIdx = 0; subVisible = true; setSubtitle(subUrl(0)); }
+    else { currentSubIdx = -1; setSubtitle(null); }
   }
   loadFile(current, ctx.startAt || 0);
 
@@ -756,25 +810,46 @@ function openPlayer(ctx) {
   vp.querySelector('.vp-fs').addEventListener('click', () => { if (document.fullscreenElement) document.exitFullscreen(); else vp.requestFullscreen?.(); });
 
   // subtitles quick toggle
-  vp.querySelector('.vp-cc').addEventListener('click', () => { subVisible = !subVisible; renderSub(); });
+  vp.querySelector('.vp-cc').addEventListener('click', () => {
+    const subs = current.subtitles || [];
+    if (currentSubIdx < 0 && subs.length) { currentSubIdx = 0; subVisible = true; setSubtitle(subUrl(0)); }
+    else { subVisible = !subVisible; renderSub(); }
+  });
 
   // settings menu
   const gear = vp.querySelector('.vp-gear');
   function buildMenu() {
     const audio = video.audioTracks && video.audioTracks.length > 1 ? [...video.audioTracks] : [];
+    const subs = current.subtitles || [];
     menu.innerHTML = `
       ${ctx.files.length > 1 ? `<h4>Version</h4>${ctx.files.map((f, i) => `<button class="vp-opt ver" data-fid="${f.id}">${escapeHtml(versionLabel(f, i))}<span class="tick">${current.id === f.id ? '✓' : ''}</span></button>`).join('')}` : ''}
       ${audio.length ? `<h4>Audio</h4>${audio.map((a, i) => `<button class="vp-opt aud" data-i="${i}">${escapeHtml(a.label || a.language || 'Track ' + (i + 1))}<span class="tick">${a.enabled ? '✓' : ''}</span></button>`).join('')}` : ''}
       <h4>Subtitles</h4>
-      <button class="vp-opt subo" data-m="off">Off<span class="tick">${!subOn() ? '✓' : ''}</span></button>
-      ${cues.length || current.subtitle ? `<button class="vp-opt subo" data-m="on">English<span class="tick">${subOn() ? '✓' : ''}</span></button>` : ''}
+      <button class="vp-opt subt" data-i="-1">Off<span class="tick">${!(subVisible && currentSubIdx >= 0) ? '✓' : ''}</span></button>
+      ${subs.map((s, i) => `<button class="vp-opt subt" data-i="${i}">${escapeHtml(s.label || 'Track ' + (i + 1))}<span class="tick">${subVisible && currentSubIdx === i ? '✓' : ''}</span></button>`).join('')}
       <button class="vp-opt" id="sub-search">Search online…</button>
       <div class="vp-offset"><span style="color:var(--muted);font-size:12px">Delay</span><button data-o="-0.25">−</button><span class="val">${subOffset.toFixed(2)}s</span><button data-o="0.25">+</button></div>`;
-    menu.querySelectorAll('.ver').forEach((b) => b.addEventListener('click', () => { const f = ctx.files.find((x) => String(x.id) === b.dataset.fid); if (f && f.id !== current.id) loadFile(f, video.currentTime); buildMenu(); }));
+    menu.querySelectorAll('.ver').forEach((b) => b.addEventListener('click', () => {
+      const f = ctx.files.find((x) => String(x.id) === b.dataset.fid);
+      if (f && f.id !== current.id) { localStorage.setItem('pq', f.quality || ''); loadFile(f, video.currentTime); }
+      buildMenu();
+    }));
     menu.querySelectorAll('.aud').forEach((b) => b.addEventListener('click', () => { [...video.audioTracks].forEach((a, i) => (a.enabled = i === +b.dataset.i)); buildMenu(); }));
-    menu.querySelectorAll('.subo').forEach((b) => b.addEventListener('click', () => { subVisible = b.dataset.m === 'on'; renderSub(); buildMenu(); }));
+    menu.querySelectorAll('.subt').forEach((b) => b.addEventListener('click', () => {
+      const i = +b.dataset.i;
+      if (i < 0) { subVisible = false; renderSub(); }
+      else { currentSubIdx = i; subVisible = true; setSubtitle(subUrl(i)); }
+      buildMenu();
+    }));
     const ss = menu.querySelector('#sub-search');
-    if (ss) ss.addEventListener('click', () => { menu.classList.add('hidden'); openSubSearch(ctx.searchKind, current.id, video, (url) => { current.subtitle = true; subVisible = true; setSubtitle(url); }); });
+    if (ss) ss.addEventListener('click', () => {
+      menu.classList.add('hidden');
+      openSubSearch(ctx.searchKind, current.id, video, () => {
+        current.subtitles = current.subtitles || [];
+        current.subtitles.unshift({ label: 'Downloaded', idx: 0 });
+        currentSubIdx = 0; subVisible = true; setSubtitle(subUrl(0));
+      });
+    });
     menu.querySelectorAll('.vp-offset button').forEach((b) => b.addEventListener('click', () => { subOffset = Math.round((subOffset + +b.dataset.o) * 100) / 100; renderSub(); buildMenu(); }));
   }
   gear.addEventListener('click', () => { if (menu.classList.contains('hidden')) { buildMenu(); menu.classList.remove('hidden'); } else menu.classList.add('hidden'); });

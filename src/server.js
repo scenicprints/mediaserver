@@ -81,7 +81,7 @@ app.get('/api/movies/:id', async (req, reply) => {
   ).all(req.params.id);
   // Highest quality first, so it's the default version to play.
   files.sort((a, b) => qualityRank(b.quality) - qualityRank(a.quality));
-  for (const f of files) { f.subtitle = !!findSubtitle(f.path); delete f.path; }
+  for (const f of files) { f.subtitles = listSubtitles(f.path).map((s, i) => ({ label: s.label, idx: i })); delete f.path; }
   row.files = files;
   return row;
 });
@@ -192,7 +192,7 @@ app.get('/api/shows/:id', async (req, reply) => {
   for (const e of eps) {
     const files = filesStmt.all(e.id);
     files.sort((a, b) => qualityRank(b.quality) - qualityRank(a.quality));
-    for (const f of files) { f.subtitle = !!findSubtitle(f.path); delete f.path; }
+    for (const f of files) { f.subtitles = listSubtitles(f.path).map((s, i) => ({ label: s.label, idx: i })); delete f.path; }
     e.files = files;
   }
 
@@ -383,16 +383,34 @@ app.get('/api/stream/episode/:fileId', (req, reply) => {
 
 // ---- Subtitles: .srt sidecars served as WebVTT ----
 
-function findSubtitle(videoPath) {
+// Find external .srt subtitles for a video: next to it (loose name match, either
+// direction) and in a Subs/Subtitles subfolder. Returns [{ path, label }].
+function listSubtitles(videoPath) {
   const dir = path.dirname(videoPath);
-  const stem = path.basename(videoPath, path.extname(videoPath)).toLowerCase();
-  let files;
-  try { files = fs.readdirSync(dir); } catch { return null; }
-  const hit = files.find(
-    (f) => f.toLowerCase().endsWith('.srt') &&
-      path.basename(f, path.extname(f)).toLowerCase().startsWith(stem)
-  );
-  return hit ? path.join(dir, hit) : null;
+  const stem = path.basename(videoPath, path.extname(videoPath));
+  const norm = (s) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const nstem = norm(stem);
+  const out = [];
+
+  const consider = (folder, loose) => {
+    let files;
+    try { files = fs.readdirSync(folder); } catch { return; }
+    for (const f of files) {
+      if (!/\.srt$/i.test(f)) continue;
+      const b = path.basename(f, path.extname(f));
+      const nb = norm(b);
+      const match = loose || nb === nstem || nb.startsWith(nstem) || nstem.startsWith(nb) || nb.includes(nstem) || nstem.includes(nb);
+      if (!match) continue;
+      const lang = (b.toLowerCase().match(/[.\-_ ]([a-z]{2,3})(\.forced|\.sdh)?$/) || [])[1];
+      const extra = b.length > stem.length ? b.slice(stem.length).replace(/[.\-_]+/g, ' ').trim() : '';
+      out.push({ path: path.join(folder, f), label: lang ? lang.toUpperCase() : (extra || 'Subtitles') });
+    }
+  };
+  consider(dir, false);
+  for (const sub of ['Subs', 'Subtitles', 'subs', 'subtitles', 'Sub']) consider(path.join(dir, sub), true);
+
+  const seen = new Set();
+  return out.filter((s) => (seen.has(s.path) ? false : seen.add(s.path)));
 }
 
 function srtToVtt(srt) {
@@ -403,23 +421,24 @@ function srtToVtt(srt) {
   return 'WEBVTT\n\n' + body;
 }
 
-function serveSubtitle(videoPath, reply) {
-  const sub = videoPath && findSubtitle(videoPath);
+function serveSubtitle(videoPath, idx, reply) {
+  const subs = videoPath ? listSubtitles(videoPath) : [];
+  const sub = subs[idx] || subs[0];
   if (!sub) return reply.code(404).send({ error: 'no subtitle' });
   let srt;
-  try { srt = fs.readFileSync(sub, 'utf8'); } catch { return reply.code(404).send({ error: 'unreadable' }); }
+  try { srt = fs.readFileSync(sub.path, 'utf8'); } catch { return reply.code(404).send({ error: 'unreadable' }); }
   reply.header('Content-Type', 'text/vtt; charset=utf-8');
   return reply.send(srtToVtt(srt));
 }
 
 app.get('/api/subtitle/episode/:fileId', (req, reply) => {
   const row = db.prepare('SELECT path FROM episode_files WHERE id = ?').get(req.params.fileId);
-  return serveSubtitle(row && row.path, reply);
+  return serveSubtitle(row && row.path, parseInt(req.query.idx, 10) || 0, reply);
 });
 
 app.get('/api/subtitle/:fileId', (req, reply) => {
   const row = db.prepare('SELECT path FROM movie_files WHERE id = ?').get(req.params.fileId);
-  return serveSubtitle(row && row.path, reply);
+  return serveSubtitle(row && row.path, parseInt(req.query.idx, 10) || 0, reply);
 });
 
 // ---- Subtitle search + download (OpenSubtitles) ----
