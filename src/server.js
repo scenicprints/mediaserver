@@ -866,9 +866,11 @@ async function start() {
   }
 
   // Intro (theme-song) detection + episode-duration probing — its own background
-  // job (needs ffmpeg/fpcalc, not TMDB). Slow on a big first import; runs once
-  // per episode (intro_checked guards it) and picks up new episodes on rescan.
+  // job (needs ffmpeg/fpcalc, not TMDB). Fully async so it never blocks playback;
+  // waits for the server to settle first, runs once per episode (intro_checked
+  // guards it), and picks up new episodes on rescan.
   (async () => {
+    await new Promise((r) => setTimeout(r, 45000)); // let boot/scan settle before the heavy job
     await runIntroDetection(db, ROOT, config, { log: (x) => console.log(x) });
   })().catch((e) => console.error('Intro detection error:', e.message));
 

@@ -7,8 +7,10 @@
 // handles cold opens before the intro.
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFile, execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { playInfo } from './ffmpeg.js';
+
+const yield_ = () => new Promise((r) => setImmediate(r)); // let the event loop breathe
 
 const FPCALC_URL = 'https://github.com/acoustid/chromaprint/releases/download/v1.6.0/chromaprint-fpcalc-1.6.0-windows-x86_64.zip';
 const WIN_TAR = 'C:\\Windows\\System32\\tar.exe';
@@ -65,17 +67,19 @@ async function ensureFpcalc(root, config = {}) {
 }
 
 // Fingerprint the first ANALYZE_SEC of a file → { duration, fp: Int32Array }.
+// Async (execFile, not …Sync) so decoding audio never blocks the event loop —
+// the server stays responsive while this churns through the library.
 function fingerprint(file) {
-  try {
-    const out = execFileSync(fpcalcPath, ['-raw', '-length', String(ANALYZE_SEC), file],
-      { maxBuffer: 64 * 1024 * 1024, windowsHide: true, timeout: 120000 }).toString();
-    const dur = parseFloat((out.match(/DURATION=([\d.]+)/) || [])[1]) || null;
-    const raw = (out.match(/FINGERPRINT=([\d,\-]+)/) || [])[1];
-    if (!raw) return { duration: dur, fp: null };
-    return { duration: dur, fp: Int32Array.from(raw.split(',').map(Number)) };
-  } catch (e) {
-    return { duration: null, fp: null };
-  }
+  return new Promise((resolve) => {
+    execFile(fpcalcPath, ['-raw', '-length', String(ANALYZE_SEC), file],
+      { maxBuffer: 64 * 1024 * 1024, windowsHide: true, timeout: 120000 }, (err, stdout) => {
+        if (err) return resolve({ duration: null, fp: null });
+        const out = String(stdout);
+        const dur = parseFloat((out.match(/DURATION=([\d.]+)/) || [])[1]) || null;
+        const raw = (out.match(/FINGERPRINT=([\d,\-]+)/) || [])[1];
+        resolve({ duration: dur, fp: raw ? Int32Array.from(raw.split(',').map(Number)) : null });
+      });
+  });
 }
 
 function popcount(n) { n = n - ((n >> 1) & 0x55555555); n = (n & 0x33333333) + ((n >> 2) & 0x33333333); return (((n + (n >> 4)) & 0x0f0f0f0f) * 0x01010101) >> 24; }
@@ -83,7 +87,7 @@ function popcount(n) { n = n - ((n >> 1) & 0x55555555); n = (n & 0x33333333) + (
 // Find the longest audio segment common to fingerprints A and B. Returns the
 // segment's position in each (seconds), or null. Handles the segment sitting at
 // different offsets (cold opens of different lengths).
-function matchIntro(A, B) {
+async function matchIntro(A, B) {
   const maxShift = Math.min(MAX_SHIFT_ITEMS, Math.min(A.length, B.length) - 1);
   let bestOff = 0, bestScore = -1;
   for (let d = -maxShift; d <= maxShift; d++) {
@@ -91,6 +95,7 @@ function matchIntro(A, B) {
     const i0 = Math.max(0, -d), i1 = Math.min(A.length, B.length - d);
     for (let i = i0; i < i1; i++) if (popcount(A[i] ^ B[i + d]) <= BIT_THRESH) s++;
     if (s > bestScore) { bestScore = s; bestOff = d; }
+    if (((d + maxShift) & 511) === 0) await yield_(); // don't hog the CPU during the offset search
   }
   const d = bestOff, i0 = Math.max(0, -d), i1 = Math.min(A.length, B.length - d);
   let runS = -1, gap = 0, best = null;
@@ -109,9 +114,11 @@ function matchIntro(A, B) {
 }
 
 // Analyze one season: fingerprint each episode, match consecutive pairs, and
-// return a Map of epId → { start, end } (best/longest match per episode).
-function analyzeSeason(eps) {
-  const fps = eps.map((e) => ({ ep: e, ...fingerprint(e.path) }));
+// return a Map of epId → { start, end } (best/longest match per episode). Fully
+// async + paced so it never blocks playback.
+async function analyzeSeason(eps) {
+  const fps = [];
+  for (const e of eps) { fps.push({ ep: e, ...(await fingerprint(e.path)) }); await new Promise((r) => setTimeout(r, 30)); }
   const introById = new Map();
   const assign = (ep, range) => {
     if (!range) return;
@@ -121,7 +128,7 @@ function analyzeSeason(eps) {
   for (let i = 0; i + 1 < fps.length; i++) {
     const A = fps[i], B = fps[i + 1];
     if (!A.fp || !B.fp) continue;
-    const m = matchIntro(A.fp, B.fp);
+    const m = await matchIntro(A.fp, B.fp);
     if (m) { assign(A.ep, m.a); assign(B.ep, m.b); }
   }
   return { introById, durations: new Map(fps.map((f) => [f.ep.id, f.duration])) };
@@ -148,7 +155,7 @@ export async function runIntroDetection(db, root, config = {}, { log = () => {} 
   for (const eps of seasons.values()) {
     try {
       if (eps.length >= 2) {
-        const { introById, durations } = analyzeSeason(eps);
+        const { introById, durations } = await analyzeSeason(eps);
         for (const ep of eps) {
           const intro = introById.get(ep.id);
           setIntro.run(intro ? intro.start : null, intro ? intro.end : null, durations.get(ep.id) || null, ep.id);
