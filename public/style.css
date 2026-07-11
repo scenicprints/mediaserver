@@ -411,7 +411,7 @@ button { font-family: inherit; }
 .vp-skip { width: 58px; height: 58px; font-size: 13px; font-weight: 700; }
 .vp-skip:hover, .vp-center .vp-bigplay:hover { background: rgba(0,0,0,0.55); }
 .vp-bottom {
-  position: absolute; left: 0; right: 0; bottom: 0; z-index: 4; padding: 0 34px 22px; transition: opacity 0.25s ease;
+  position: absolute; left: 0; right: 0; bottom: 0; z-index: 8; padding: 0 34px 22px; transition: opacity 0.25s ease;
   background: linear-gradient(0deg, rgba(0,0,0,0.75), rgba(0,0,0,0));
 }
 .vp-scrub { position: relative; height: 20px; display: flex; align-items: center; margin-bottom: 6px; cursor: pointer; }

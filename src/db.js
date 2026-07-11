@@ -132,5 +132,9 @@ export function openDb(dbPath) {
   `);
   db.exec('CREATE INDEX IF NOT EXISTS idx_epfiles_episode ON episode_files(episode_id);');
 
+  // Genres for browse categories (movies already have the column).
+  const showCols = new Set(db.prepare('PRAGMA table_info(shows)').all().map((c) => c.name));
+  if (!showCols.has('genres')) db.exec('ALTER TABLE shows ADD COLUMN genres TEXT');
+
   return db;
 }

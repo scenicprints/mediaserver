@@ -41,6 +41,11 @@ Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed
   library (with a count).
 - **Season cards with artwork** — the show view uses TMDB season poster cards (via
   `/api/shows/:id/extra`) instead of number pills.
+- **Categories galore + fixes**: genre + decade + rating/quality/watched categories (genres
+  auto-**backfilled** from TMDB into movies/shows); a **▦ browse-all** nav button; **rich
+  episode detail** (still, air date, rating, runtime, cast & crew via `/api/episodes/:id/extra`).
+  Fixes: grid/search views no longer slide under the nav; player settings menu opens on the
+  gear (SVG click) and CC/settings stay clickable with the menu open.
 - **Player v2 + episode details + categories**: subtitle search now appears **above** the
   player; **custom subtitle renderer** (no freeze on version switch, clean delay/offset,
   styled captions); removed playback speed; SVG-icon player polish. **Episode details screen**

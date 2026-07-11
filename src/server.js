@@ -6,7 +6,7 @@ import Fastify from 'fastify';
 import fastifyStatic from '@fastify/static';
 import { openDb } from './db.js';
 import { scanLibraries, seedLibraries } from './scan.js';
-import { enrichLibrary, enrichShows, enrichEpisodes, movieExtra, showExtra } from './tmdb.js';
+import { enrichLibrary, enrichShows, enrichEpisodes, movieExtra, showExtra, backfillGenres, episodeExtra } from './tmdb.js';
 import { ext, qualityRank } from './parse.js';
 import { listDrives, listDirs } from './fsbrowse.js';
 import { osEnabled, searchSubtitles, downloadSubtitle, clearAuth } from './opensubtitles.js';
@@ -48,7 +48,7 @@ app.register(fastifyStatic, {
 
 app.get('/api/movies', async () => {
   return db.prepare(
-    `SELECT m.id, m.title, m.year, m.poster, m.backdrop, m.overview, m.rating,
+    `SELECT m.id, m.title, m.year, m.poster, m.backdrop, m.overview, m.rating, m.genres,
             m.watched, m.favorite, m.resume_position, m.duration, m.runtime, m.added_at,
             COUNT(f.id) AS versions,
             GROUP_CONCAT(DISTINCT f.quality) AS qualities
@@ -154,7 +154,7 @@ app.get('/api/continue', async () => {
 
 app.get('/api/shows', async () => {
   return db.prepare(
-    `SELECT s.id, s.title, s.year, s.poster, s.backdrop, s.overview, s.rating, s.added_at,
+    `SELECT s.id, s.title, s.year, s.poster, s.backdrop, s.overview, s.rating, s.genres, s.added_at,
             COUNT(e.id) AS episodes,
             SUM(CASE WHEN e.watched = 0 THEN 1 ELSE 0 END) AS unwatched,
             MAX(e.last_played_at) AS last_played_at
@@ -162,6 +162,14 @@ app.get('/api/shows', async () => {
      GROUP BY s.id
      ORDER BY s.title COLLATE NOCASE`
   ).all();
+});
+
+app.get('/api/episodes/:id/extra', async (req, reply) => {
+  const row = db.prepare(
+    'SELECT e.season, e.episode, s.tmdb_id FROM episodes e JOIN shows s ON s.id = e.show_id WHERE e.id = ?'
+  ).get(req.params.id);
+  if (!row) return reply.code(404).send({ error: 'not found' });
+  return (await episodeExtra(config.tmdbApiKey, row.tmdb_id, row.season, row.episode)) || {};
 });
 
 app.get('/api/shows/:id/extra', async (req, reply) => {
@@ -289,6 +297,7 @@ app.post('/api/libraries', async (req, reply) => {
     enrichLibrary(db, config.tmdbApiKey)
       .then(() => enrichShows(db, config.tmdbApiKey))
       .then(() => enrichEpisodes(db, config.tmdbApiKey))
+      .then(() => backfillGenres(db, config.tmdbApiKey))
       .catch((e) => console.error('Enrichment error:', e.message));
   }
   return { library: lib, scan };
@@ -501,6 +510,7 @@ async function start() {
       console.log(`TMDB enrichment: ${s} show(s) updated.`);
       const ep = await enrichEpisodes(db, config.tmdbApiKey, { log: (x) => console.log(x) });
       console.log(`TMDB enrichment: ${ep} episode(s) updated.`);
+      await backfillGenres(db, config.tmdbApiKey, { log: (x) => console.log(x) });
     })().catch((e) => console.error('Enrichment error:', e.message));
   }
 

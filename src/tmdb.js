@@ -26,6 +26,35 @@ export async function showExtra(apiKey, tmdbId) {
   };
 }
 
+// Rich detail for a single episode: still, air date, rating, runtime, and people
+// (director, writers, guest stars, main cast) — so the episode page matches movies.
+export async function episodeExtra(apiKey, showTmdbId, season, episode) {
+  if (!apiKey || !showTmdbId) return null;
+  const url = new URL(`${BASE}/tv/${showTmdbId}/season/${season}/episode/${episode}`);
+  url.searchParams.set('api_key', apiKey);
+  url.searchParams.set('append_to_response', 'credits');
+  let res;
+  try { res = await fetch(url); } catch { return null; }
+  if (!res.ok) return null;
+  const d = await res.json();
+
+  const person = (c) => ({ name: c.name, role: c.character || c.job, profile: c.profile_path ? PROFILE + c.profile_path : null });
+  const crew = d.crew || [];
+  const directors = crew.filter((c) => c.job === 'Director').map((c) => ({ name: c.name, role: 'Director', profile: c.profile_path ? PROFILE + c.profile_path : null }));
+  const writers = crew.filter((c) => c.department === 'Writing').slice(0, 2).map((c) => ({ name: c.name, role: 'Writer', profile: c.profile_path ? PROFILE + c.profile_path : null }));
+  const guests = (d.guest_stars || []).slice(0, 10).map(person);
+  const cast = (d.credits?.cast || []).slice(0, 8).map(person);
+
+  return {
+    still: d.still_path ? BACKDROP + d.still_path : null,
+    overview: d.overview || null,
+    airDate: d.air_date || null,
+    rating: typeof d.vote_average === 'number' && d.vote_average > 0 ? d.vote_average : null,
+    runtime: d.runtime || null,
+    people: [...directors, ...writers, ...guests, ...cast]
+  };
+}
+
 // Rich detail for a single movie: genres, runtime, cast, director(s), a trailer,
 // and recommendations. One request (append_to_response) so it's cheap.
 export async function movieExtra(apiKey, tmdbId) {
@@ -202,6 +231,42 @@ export async function enrichEpisodes(db, apiKey, { log = () => {} } = {}) {
     log(`  episodes enriched for show ${show.id}`);
   }
   return updated;
+}
+
+async function genresFor(apiKey, type, id) {
+  try {
+    const url = new URL(`${BASE}/${type}/${id}`);
+    url.searchParams.set('api_key', apiKey);
+    const r = await fetch(url);
+    if (!r.ok) return null;
+    const d = await r.json();
+    return (d.genres || []).map((g) => g.name);
+  } catch {
+    return null;
+  }
+}
+
+// Fill in genres for movies/shows that have a tmdb_id but no genres yet, so the
+// browse categories (Action, Comedy, …) populate. Runs in the background.
+export async function backfillGenres(db, apiKey, { log = () => {} } = {}) {
+  if (!apiKey) return 0;
+  const movies = db.prepare("SELECT id, tmdb_id FROM movies WHERE tmdb_id IS NOT NULL AND (genres IS NULL OR genres = '')").all();
+  const shows = db.prepare("SELECT id, tmdb_id FROM shows WHERE tmdb_id IS NOT NULL AND (genres IS NULL OR genres = '')").all();
+  const upM = db.prepare('UPDATE movies SET genres = ? WHERE id = ?');
+  const upS = db.prepare('UPDATE shows SET genres = ? WHERE id = ?');
+  let n = 0;
+  for (const m of movies) {
+    const g = await genresFor(apiKey, 'movie', m.tmdb_id);
+    if (g) { upM.run(JSON.stringify(g), m.id); n++; }
+    await new Promise((r) => setTimeout(r, 60));
+  }
+  for (const s of shows) {
+    const g = await genresFor(apiKey, 'tv', s.tmdb_id);
+    if (g) { upS.run(JSON.stringify(g), s.id); n++; }
+    await new Promise((r) => setTimeout(r, 60));
+  }
+  if (n) log(`Genres backfilled for ${n} title(s).`);
+  return n;
 }
 
 // Enrich every movie that hasn't been matched yet. Returns count updated.

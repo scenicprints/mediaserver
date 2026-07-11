@@ -38,6 +38,11 @@ async function loadAll() {
 document.querySelectorAll('.nav-link').forEach((b) =>
   b.addEventListener('click', () => setView(b.dataset.view))
 );
+document.getElementById('lib-btn').addEventListener('click', () => {
+  const byTitle = (a, b) => a.title.localeCompare(b.title);
+  if (currentView === 'tv') showGridView('All TV Shows', mediaCards([...shows].sort(byTitle), 'show'));
+  else showGridView('All Movies', mediaCards([...movies].sort(byTitle), 'movie'));
+});
 
 function setView(view) {
   currentView = view;
@@ -49,11 +54,15 @@ function setView(view) {
 
 window.addEventListener('scroll', () => nav.classList.toggle('scrolled', window.scrollY > 40));
 
+function genresOf(m) { try { return JSON.parse(m.genres || '[]'); } catch { return []; } }
+function allGenres(list) { const s = new Set(); list.forEach((m) => genresOf(m).forEach((g) => s.add(g))); return [...s].sort(); }
+function decadesOf(list) { return [...new Set(list.map((m) => (m.year ? Math.floor(m.year / 10) * 10 : null)).filter(Boolean))].sort((a, b) => b - a); }
+
 function renderView() {
+  rowsEl.style.paddingTop = '';
   const rows = [];
   const byYear = (a, b) => (b.year || 0) - (a.year || 0);
   const byTitle = (a, b) => a.title.localeCompare(b.title);
-  // A scrollable category row that can expand to a full grid ("See all").
   const cat = (title, list, kind) => { if (list.length) rows.push({ title, kind, cards: mediaCards(list.slice(0, 24), kind), seeAll: () => ({ title, cards: mediaCards(list, kind) }) }); };
 
   if (currentView === 'movies') {
@@ -63,8 +72,13 @@ function renderView() {
     cat('Recently Added', [...movies].sort(byRecent), 'movie');
     cat('Recently Released', [...movies].sort(byYear), 'movie');
     cat('Top Rated', [...movies].sort(byRating), 'movie');
+    cat('Critically Acclaimed', movies.filter((m) => m.rating >= 8).sort(byRating), 'movie');
     cat('Unwatched', movies.filter((m) => !m.watched), 'movie');
+    cat('Watched Again', movies.filter((m) => m.watched), 'movie');
     cat('Favorites', movies.filter((m) => m.favorite), 'movie');
+    cat('4K', movies.filter((m) => (m.qualities || '').includes('4K')), 'movie');
+    allGenres(movies).forEach((g) => cat(g, movies.filter((m) => genresOf(m).includes(g)).sort(byRating), 'movie'));
+    decadesOf(movies).forEach((d) => cat(`${d}s`, movies.filter((m) => m.year >= d && m.year < d + 10).sort(byYear), 'movie'));
     rows.push({ title: 'All Movies', cards: mediaCards([...movies].sort(byTitle), 'movie'), grid: true });
   } else if (currentView === 'tv') {
     setHero(shows.filter((s) => s.backdrop));
@@ -74,6 +88,9 @@ function renderView() {
     cat('New Episodes', shows.filter((s) => s.unwatched > 0), 'show');
     cat('Recently Released', [...shows].sort(byYear), 'show');
     cat('Top Rated', [...shows].sort(byRating), 'show');
+    cat('Critically Acclaimed', shows.filter((s) => s.rating >= 8).sort(byRating), 'show');
+    allGenres(shows).forEach((g) => cat(g, shows.filter((s) => genresOf(s).includes(g)).sort(byRating), 'show'));
+    decadesOf(shows).forEach((d) => cat(`${d}s`, shows.filter((s) => s.year >= d && s.year < d + 10).sort(byYear), 'show'));
     rows.push({ title: 'All Shows', cards: mediaCards([...shows].sort(byTitle), 'show'), grid: true });
   } else {
     const mixed = [...movies.filter((m) => m.backdrop), ...shows.filter((s) => s.backdrop)].sort(byRating);
@@ -83,8 +100,10 @@ function renderView() {
     cat('Movies', [...movies].sort(byRating), 'movie');
     cat('TV Shows', [...shows].sort(byRating), 'show');
     cat('Recently Released', [...movies].sort(byYear), 'movie');
+    cat('Critically Acclaimed', movies.filter((m) => m.rating >= 8).sort(byRating), 'movie');
     cat('Unwatched Movies', movies.filter((m) => !m.watched), 'movie');
     cat('Favorites', movies.filter((m) => m.favorite), 'movie');
+    allGenres(movies).slice(0, 8).forEach((g) => cat(g, movies.filter((m) => genresOf(m).includes(g)).sort(byRating), 'movie'));
   }
   drawRows(rows);
 }
@@ -93,6 +112,7 @@ function showGridView(title, cards) {
   heroEl.classList.add('hidden');
   window.scrollTo({ top: 0 });
   rowsEl.innerHTML = '';
+  rowsEl.style.paddingTop = '78px';
   const sec = document.createElement('section');
   sec.className = 'row';
   sec.innerHTML = `<div class="row-head"><button class="btn sm" id="grid-back">‹ Back</button><h3 class="row-title" style="margin-left:8px">${escapeHtml(title)}</h3><span class="row-count">${cards.length}</span></div><div class="lib-grid"></div>`;
@@ -414,21 +434,31 @@ function playEpisodeAt(show, flat, i, opts = {}) {
   });
 }
 
-function openEpisodeDetail(show, flat, i) {
+async function openEpisodeDetail(show, flat, i) {
   const ep = flat[i].ep;
   const files = ep.files || [];
   let current = files[0];
   const resume = ep.resume_position && ep.resume_position > 5 ? ep.resume_position : 0;
+  const extra = await fetch(`/api/episodes/${ep.id}/extra`).then((r) => r.json()).catch(() => ({}));
+  const still = extra.still || ep.still || show.backdrop || show.poster || '';
+  const overview = extra.overview || ep.overview || 'No description.';
   const versionControl = files.length > 1
     ? `<span class="dp-version"><span>Version</span><select class="dp-select" id="ep-ver">${files.map((f, k) => `<option value="${f.id}">${escapeHtml(versionLabel(f, k))}</option>`).join('')}</select></span>`
     : (current ? `<span class="dp-version"><span>${escapeHtml(versionLabel(current, 0))}</span></span>` : '');
 
   detailInner.innerHTML = `
-    <div class="dp-splash" style="background-image:url('${ep.still || show.backdrop || show.poster || ''}')">
+    <div class="dp-splash" style="background-image:url('${still}')">
       <div class="dp-hero">
+        <div class="dp-poster">${ep.still || show.poster ? `<img src="${ep.still || show.poster}" alt="">` : ''}</div>
         <div class="dp-info">
           <button class="btn sm" id="ep-back" style="margin-bottom:14px">‹ ${escapeHtml(show.title)}</button>
           <h1 class="dp-title" style="font-size:clamp(24px,3.6vw,42px)">${escapeHtml(episodeSub(ep))}</h1>
+          <div class="dp-meta">
+            ${extra.airDate ? `<span class="chip">${escapeHtml(extra.airDate)}</span>` : ''}
+            ${extra.rating ? `<span class="chip rating">★ ${extra.rating.toFixed(1)}</span>` : ''}
+            ${extra.runtime ? `<span class="chip">${extra.runtime}m</span>` : ''}
+            ${current && current.quality ? `<span class="chip q">${current.quality}</span>` : ''}
+          </div>
           <div class="dp-actions">
             ${resume ? `<button class="btn btn-play" id="ep-resume">▶ Resume</button><button class="btn" id="ep-begin">↺ From beginning</button>` : `<button class="btn btn-play" id="ep-play">▶ Play</button>`}
             <button class="btn" id="ep-watched">${ep.watched ? '✓ Watched' : 'Mark watched'}</button>
@@ -437,9 +467,22 @@ function openEpisodeDetail(show, flat, i) {
         </div>
       </div>
     </div>
-    <div class="dp-body"><p class="overview">${escapeHtml(ep.overview || 'No description.')}</p></div>`;
+    <div class="dp-body">
+      <p class="overview">${escapeHtml(overview)}</p>
+      <div id="ep-sections"></div>
+    </div>`;
   openDetailModal();
   detail.scrollTop = 0;
+
+  const people = extra.people || [];
+  if (people.length) {
+    document.getElementById('ep-sections').innerHTML = `<div class="dp-section"><h3>Cast &amp; Crew</h3><div class="dp-hscroll">${people.map((p) => `
+      <div class="person">
+        ${p.profile ? `<img class="pfp" src="${p.profile}" alt="">` : `<div class="pfp ph">${escapeHtml((p.name || '?')[0])}</div>`}
+        <div class="pname">${escapeHtml(p.name)}</div>
+        <div class="prole">${escapeHtml(p.role || '')}</div>
+      </div>`).join('')}</div></div>`;
+  }
 
   const sel = document.getElementById('ep-ver');
   if (sel) sel.addEventListener('change', () => { const f = files.find((x) => String(x.id) === sel.value); if (f) current = f; });
@@ -735,7 +778,7 @@ function openPlayer(ctx) {
     menu.querySelectorAll('.vp-offset button').forEach((b) => b.addEventListener('click', () => { subOffset = Math.round((subOffset + +b.dataset.o) * 100) / 100; renderSub(); buildMenu(); }));
   }
   gear.addEventListener('click', () => { if (menu.classList.contains('hidden')) { buildMenu(); menu.classList.remove('hidden'); } else menu.classList.add('hidden'); });
-  vp.addEventListener('click', (e) => { if (!menu.contains(e.target) && e.target !== gear) menu.classList.add('hidden'); });
+  vp.addEventListener('click', (e) => { if (!menu.contains(e.target) && !gear.contains(e.target)) menu.classList.add('hidden'); });
 
   // up next
   function maybeUpNext() {
@@ -804,6 +847,7 @@ search.addEventListener('input', () => {
   const q = search.value.trim().toLowerCase();
   if (!q) { renderView(); return; }
   heroEl.classList.add('hidden');
+  rowsEl.style.paddingTop = '78px';
   const mm = movies.filter((m) => m.title.toLowerCase().includes(q)).map((m) => buildMediaCard(m, 'movie'));
   const ss = shows.filter((s) => s.title.toLowerCase().includes(q)).map((s) => buildMediaCard(s, 'show'));
   drawRows([{ title: `Results for “${search.value.trim()}”`, cards: [...mm, ...ss] }]);
