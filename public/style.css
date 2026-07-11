@@ -562,6 +562,12 @@ button { font-family: inherit; }
 }
 .vp.vp-ispaused .vp-pausedbadge { opacity: 1; transform: scale(1); }
 .vp-pausedbadge svg { width: 52px; height: 52px; color: #fff; }
+
+/* Live TV: a real broadcast — hide all time-travel controls, show a LIVE tag. */
+.vp-liveind { display: none; align-items: center; gap: 7px; font-size: 13px; font-weight: 800; letter-spacing: 1px; color: var(--hot); }
+.vp-live .vp-liveind { display: inline-flex; }
+.vp-live .vp-scrub, .vp-live .vp-skip, .vp-live .vp-play, .vp-live .vp-time,
+.vp-live .vp-skipbtn, .vp-live .vp-pausedbadge { display: none !important; }
 .vp-bottom {
   position: absolute; left: 0; right: 0; bottom: 0; z-index: 8; padding: 0 44px 24px; transition: opacity 0.25s ease;
   background: linear-gradient(0deg, rgba(0,0,0,0.88) 0%, rgba(0,0,0,0.45) 55%, rgba(0,0,0,0) 100%);

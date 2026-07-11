@@ -98,6 +98,16 @@ Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed
     `.mkv`), Skip Intro/**Skip Credits** are **precise** and work for anything — they appear only
     inside the Intro/Credits chapters, which correctly handles a **cold open before the intro**.
     Skip Credits jumps to the next episode (or the end).
+- **Ribbon-is-its-own-zone nav + live-only Live TV player.**
+  - **The top ribbon is now reached with Back, not arrows.** Arrow keys stay in the content and
+    never climb into the MARQUEE bar; **Back** lifts focus up to the ribbon (Left/Right across
+    tabs, **Enter or Down** drops back into the content; Back on the ribbon = leave-app on tvOS,
+    no-op on web). Live TV yields to the ribbon when it's focused. (`focus.js` zone logic in
+    `pick`/`move`/`back`/`activate`.)
+  - **Live TV player is a real broadcast** — no play/pause, no seek bar, no ±10s skip, no Skip
+    Intro/Credits (you can't time-travel live). A **● LIVE** tag replaces the scrubber; volume,
+    subtitles/CC, fullscreen and Back(=change channel) remain. Driven by a `live` flag on the
+    player + a `.vp-live` class.
 - **TV-remote batch: text-field nav, meta-collections, seasonal row.** (This is a 10-ft TV app
   first; browser second.)
   - **Text fields are remote-navigable** (no more being "locked in the search box" — remotes have
@@ -236,6 +246,20 @@ Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed
 ---
 
 ## 🔜 Next (start here — priority order)
+0. **Skip Intro via audio fingerprinting (agreed; the current heuristic/chapters aren't enough).**
+   At scan time, per **season**, decode the first ~10 min of each episode's audio, fingerprint it
+   (Chromaprint `fpcalc` installed one-click like ffmpeg/whisper, or a homegrown fingerprint),
+   cross-match episodes to find the **longest recurring segment** = the theme/intro, and store a
+   precise **intro start/end per episode** (new columns, background job after scan). Player uses
+   the stored range (chapters still win when present). Handles cold opens (match found wherever
+   the theme sits) and per-season intro changes. Biggest piece; expect real-library tuning via the
+   Dell's Claude. Optional later: same technique on end-credits for a precise Skip Credits.
+0b. **Whisper "auto-generate subtitles for files that have none" (opt-in toggle).** Owner asked
+    whether to pre-generate like intros — decided NO for the whole library (too expensive, rarely
+    needed), but a targeted background job for files with **zero** existing subtitle tracks is
+    worth a Settings toggle. Explicit translations stay on-demand.
+0c. **Native Apple TV app: drop the fullscreen toggle** (TVs are always fullscreen) + other
+    browser-isms (cursor hiding). Deferred to when the native client is built.
 1. **tvOS look & feel — polish pass (the focus engine itself is DONE, see above).** The remote
    focus engine (arrow/Enter/Back nav, scale+glow, dim, wrap, scoped to modals/detail) shipped.
    Remaining refinements: verify it on the **real Apple TV / Fire TV remote** (their D-pads emit

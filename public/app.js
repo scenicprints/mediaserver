@@ -605,6 +605,7 @@ function renderLiveTv() {
 
   ltState.onKey = (e) => {
     if (currentView !== 'livetv' || !document.getElementById('detail').classList.contains('hidden') || document.querySelector('.vp')) return;
+    if (document.querySelector('.nav .tv-focus')) return; // ribbon has focus → let it drive
     if (e.key === 'ArrowDown') { e.preventDefault(); ltState.sel = (ltState.sel + 1) % channels.length; drawEpg(); drawPreview(); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); ltState.sel = (ltState.sel - 1 + channels.length) % channels.length; drawEpg(); drawPreview(); }
     else if (e.key === 'Enter') { e.preventDefault(); tuneIn(); }
@@ -717,7 +718,7 @@ async function tuneIn() {
   openPlayer({
     title: m.title, files, startFileId: f.id, verKey: 'm' + m.id,
     streamBase: '/api/stream/', subtitleBase: '/api/subtitle/', searchKind: 'movie',
-    startAt: Math.floor(on.offset), progressUrl: null, upNext: null, onEnded: null // live → no Continue Watching
+    startAt: Math.floor(on.offset), progressUrl: null, upNext: null, onEnded: null, live: true // live feed
   });
 }
 
@@ -737,7 +738,7 @@ async function tuneShow(showId) {
   openPlayer({
     title: show.title, subtitle: episodeSub(ep), files, startFileId: f.id, verKey: 'e' + ep.id,
     streamBase: '/api/stream/episode/', subtitleBase: '/api/subtitle/episode/', searchKind: 'episode',
-    startAt: 0, progressUrl: null, upNext: null, onEnded: null // live → no Continue Watching
+    startAt: 0, progressUrl: null, upNext: null, onEnded: null, live: true // live feed
   });
 }
 
@@ -1396,6 +1397,7 @@ function openPlayer(ctx) {
         <button class="vp-skip" data-pf data-d="10" title="Forward 10 seconds">${ICONS.fwd}<b>10</b></button>
         <button class="vp-mute" data-pf title="Mute">${ICONS.volHigh}</button><input class="vp-volbar" type="range" min="0" max="1" step="0.05" value="1">
         <span class="vp-time">0:00 / 0:00</span>
+        <span class="vp-liveind"><span class="lt-live-dot"></span>LIVE</span>
         <div class="vp-spacer"></div>
         <button class="vp-cc" data-pf title="Subtitles">CC</button>
         <button class="vp-gear" data-pf title="Settings">${ICONS.gear}</button>
@@ -1407,6 +1409,8 @@ function openPlayer(ctx) {
     <div class="vp-menu hidden"></div>
     <div class="vp-upnext hidden"></div>
     <div class="vp-error hidden"></div>`;
+  const live = !!ctx.live;             // Live TV: a real broadcast — no time-travel controls
+  if (live) vp.classList.add('vp-live');
   document.body.appendChild(vp);
   document.body.style.overflow = 'hidden';
   activePlayer = vp;
@@ -1516,7 +1520,7 @@ function openPlayer(ctx) {
     playBtns.forEach((b) => (b.innerHTML = i));
     vp.classList.toggle('vp-ispaused', video.paused);
   }
-  function togglePlay() { video.paused ? video.play() : video.pause(); }
+  function togglePlay() { if (live) return; video.paused ? video.play() : video.pause(); } // can't pause live TV
   playBtns.forEach((b) => b.addEventListener('click', togglePlay));
   video.addEventListener('click', togglePlay);
   video.addEventListener('play', setPlayIcons);
@@ -1543,6 +1547,7 @@ function openPlayer(ctx) {
   // for anything, incl. a cold open before the intro). Without chapters we fall
   // back to a heuristic — but only for TV episodes, since movies have no intro.
   function updateSkipButtons() {
+    if (live) return; // no skipping on a live feed
     const t = cur(), d = dur();
     let showIntro = false, showCredits = false;
     if (introCh) showIntro = t >= introCh.start && t < introCh.end;
@@ -1751,7 +1756,7 @@ function openPlayer(ctx) {
   // time bubble previewing the target), Down drops to the buttons, Enter is
   // play/pause. On buttons, Left/Right move, Enter presses, Up returns to the
   // bar. Mouse use hides the ring; the next key brings it back.
-  const pfEls = () => [...vp.querySelectorAll('[data-pf]')];
+  const pfEls = () => [...vp.querySelectorAll('[data-pf]')].filter((el) => el.offsetParent !== null); // visible only (Live TV hides seek/skip/play)
   let pfIdx = 0; // 0 = the scrub bar
   function paintPf() {
     const keys = vp.classList.contains('vp-keys');

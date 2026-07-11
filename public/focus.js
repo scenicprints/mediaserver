@@ -63,11 +63,17 @@
     const cur = rectOf(current);
     const cx = cur.left + cur.width / 2, cy = cur.top + cur.height / 2;
     const horizontal = dir === 'left' || dir === 'right';
+    const inNav = !!current.closest('.nav');
     const grp = horizontal ? current.closest(HGROUP) : null;
     let best = null, bestScore = Infinity;
     for (const el of candidates(root)) {
       if (el === current) continue;
-      if (grp && el.closest(HGROUP) !== grp) continue;   // keep horizontal in-row
+      // The top ribbon is its own zone: arrows never cross into it from the
+      // content, and only Down leaves it (Back is the way up). See back().
+      const elNav = !!el.closest('.nav');
+      if (inNav) { if (dir === 'down' ? elNav : !elNav) continue; }
+      else if (elNav) continue;
+      if (grp && !inNav && el.closest(HGROUP) !== grp) continue;   // keep horizontal in-row
       const r = rectOf(el);
       const dx = r.left + r.width / 2 - cx;
       const dy = r.top + r.height / 2 - cy;
@@ -140,7 +146,8 @@
       setCurrent(firstTarget(root));
       return; // first press only reveals the focus, like tvOS.
     }
-    const next = pick(dir, root) || ((dir === 'right' || dir === 'left') ? wrap(dir, root) : null);
+    const inNav = !!current.closest('.nav');
+    const next = pick(dir, root) || ((!inNav && (dir === 'right' || dir === 'left')) ? wrap(dir, root) : null);
     if (next) setCurrent(next);
   }
 
@@ -149,24 +156,41 @@
     // Enter on a text field / dropdown starts editing (brings up the TV's
     // on-screen keyboard); everything else is a click.
     const t = current.tagName;
-    if (t === 'INPUT' || t === 'TEXTAREA' || t === 'SELECT') current.focus();
-    else current.click();
+    if (t === 'INPUT' || t === 'TEXTAREA' || t === 'SELECT') { current.focus(); return; }
+    const wasTab = current.classList.contains('nav-link');
+    current.click();
+    if (wasTab) {
+      // Opening a tab drops focus into the content below. Live TV owns its own
+      // arrows, so there we just release the ribbon and let it take over.
+      if (document.body.classList.contains('lt-active')) { if (current) current.classList.remove('tv-focus'); current = null; return; }
+      const el = firstTarget(scope());
+      if (el && !el.closest('.nav')) setCurrent(el);
+    }
   }
 
-  // Backspace = the remote's Menu/Back button: dismiss the top layer.
+  // Backspace = the remote's Menu/Back button. Layers close top-down; in the
+  // main browse it lifts focus up to the ribbon (the TV way back to the menu).
   function back() {
     const modal = [...document.querySelectorAll('.modal')].find((m) => !m.classList.contains('hidden'));
     if (modal) { modal.classList.add('hidden'); return; }
     const detail = document.getElementById('detail');
-    if (!detail.classList.contains('hidden')) document.getElementById('detail-close').click();
+    if (!detail.classList.contains('hidden')) { document.getElementById('detail-close').click(); return; }
+    if (current && current.closest('.nav')) return; // already on the ribbon → nothing (leave-app on tvOS)
+    const nav = document.querySelector('.nav-link.active') || document.querySelector('.nav-link');
+    if (nav) { enterNav(); setCurrent(nav); }
   }
 
   const DIRS = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' };
 
   document.addEventListener('keydown', (e) => {
-    // Let the video player, Live TV surfing, and typing own the keyboard.
+    // Let the video player own the keyboard.
     if (document.querySelector('.vp')) return;
-    if (document.body.classList.contains('lt-active') && document.getElementById('detail').classList.contains('hidden')) return;
+    // Live TV surfs with its own arrows — but Back still lifts to the ribbon,
+    // and once the ribbon has focus, its arrows are ours (not the guide's).
+    if (document.body.classList.contains('lt-active') && document.getElementById('detail').classList.contains('hidden')) {
+      const onRibbon = current && current.closest('.nav');
+      if (!onRibbon && e.key !== 'Backspace') return;
+    }
     if (e.altKey || e.ctrlKey || e.metaKey) return;
     // While typing in a field, Up/Down (and Escape) exit it back to spatial nav
     // — remotes have no Tab. Left/Right and characters stay in the field.
