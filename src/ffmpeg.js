@@ -132,7 +132,7 @@ export async function probe(filePath) {
   try { key = filePath + ':' + fs.statSync(filePath).mtimeMs; } catch { return null; }
   if (probeCache.has(key)) return probeCache.get(key);
   const out = await tryRun(ffprobePath, [
-    '-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', filePath
+    '-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', '-show_chapters', filePath
   ]);
   let json = null;
   try { json = JSON.parse(out); } catch {}
@@ -148,20 +148,29 @@ const DIRECT_EXT = new Set(['.mp4', '.m4v', '.webm', '.mov']);
 const VIDEO_OK = new Set(['h264', 'vp8', 'vp9', 'av1']);
 const AUDIO_OK = new Set(['aac', 'mp3', 'opus', 'vorbis', 'flac']);
 
+function chaptersOf(p) {
+  return (p.chapters || []).map((c) => ({
+    start: parseFloat(c.start_time) || 0,
+    end: parseFloat(c.end_time) || 0,
+    title: (c.tags && c.tags.title) || ''
+  })).filter((c) => c.end > c.start);
+}
+
 export async function playInfo(filePath) {
   const ext = path.extname(filePath).toLowerCase();
   if (!ffmpegPath || !ffprobePath) {
-    return { mode: 'direct', duration: null, reason: 'no-ffmpeg' };
+    return { mode: 'direct', duration: null, reason: 'no-ffmpeg', chapters: [] };
   }
   const p = await probe(filePath);
-  if (!p || !p.streams) return { mode: 'direct', duration: null, reason: 'probe-failed' };
+  if (!p || !p.streams) return { mode: 'direct', duration: null, reason: 'probe-failed', chapters: [] };
   const v = p.streams.find((s) => s.codec_type === 'video');
   const a = p.streams.find((s) => s.codec_type === 'audio');
   const duration = parseFloat(p.format && p.format.duration) || null;
+  const chapters = chaptersOf(p);
   const vOK = !!v && VIDEO_OK.has(v.codec_name);
   const aOK = !a || AUDIO_OK.has(a.codec_name);
-  if (DIRECT_EXT.has(ext) && vOK && aOK) return { mode: 'direct', duration };
-  return { mode: 'transcode', duration, vcopy: vOK, acopy: aOK };
+  if (DIRECT_EXT.has(ext) && vOK && aOK) return { mode: 'direct', duration, chapters };
+  return { mode: 'transcode', duration, vcopy: vOK, acopy: aOK, chapters };
 }
 
 // ---- Transcode stream ----

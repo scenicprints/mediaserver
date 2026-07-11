@@ -554,12 +554,12 @@ button { font-family: inherit; }
 .vp-error b { font-size: 21px; }
 .vp-error span { color: var(--muted); max-width: 54ch; font-size: 14.5px; }
 
-.vp-skipintro {
+.vp-skipbtn {
   position: absolute; right: 44px; bottom: 112px; z-index: 5;
   background: rgba(20, 22, 30, 0.9); color: #fff; border: 1px solid rgba(255,255,255,0.35);
   padding: 11px 20px; border-radius: 8px; font-weight: 700; cursor: pointer; font-size: 14px;
 }
-.vp-skipintro:hover { background: #fff; color: #0b0c10; }
+.vp-skipbtn:hover { background: #fff; color: #0b0c10; }
 
 .vp-upnext {
   position: absolute; right: 44px; bottom: 112px; z-index: 6; width: 340px;

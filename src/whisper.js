@@ -176,20 +176,33 @@ export async function installWhisper(root, config, { force = false } = {}) {
 }
 
 // Generate a WebVTT for `videoPath`. `translate` → English; otherwise transcribe
-// in `language` ('auto' lets whisper detect). `onProgress(0..1)` fires as it runs.
+// in `language` ('auto' lets whisper detect). `onProgress(fraction, phase)` fires
+// as it runs, where phase is 'extracting' then 'transcribing' — extraction of a
+// full movie's audio takes a while, so it gets its own progress instead of
+// sitting at 0%. `mediaDuration` (seconds) lets us show extraction %.
 // Returns the .vtt path (cached so re-requests are instant).
-export async function generate(root, ffmpegPath, videoPath, { language = 'auto', translate = false, onProgress } = {}) {
+export async function generate(root, ffmpegPath, videoPath, { language = 'auto', translate = false, onProgress, mediaDuration = 0 } = {}) {
   if (!binPath || !modelPath) throw new Error('whisper not installed');
   if (!ffmpegPath) throw new Error('ffmpeg required to extract audio');
+  const prog = (f, phase) => { if (onProgress) onProgress(f, phase); };
   const tag = translate ? 'en-ai' : (language === 'auto' ? 'orig-ai' : language + '-ai');
   const vttPath = videoPath.replace(/\.[^.]+$/, '') + `.${tag}.vtt`;
-  if (fs.existsSync(vttPath)) { if (onProgress) onProgress(1); return vttPath; }
+  if (fs.existsSync(vttPath)) { prog(1, 'transcribing'); return vttPath; }
 
+  // Extract 16 kHz mono audio, streaming ffmpeg's -progress so the UI shows the
+  // extraction advancing (out_time vs. the media's duration).
   const wav = path.join(root, 'tools', 'whisper', `job-${Date.now()}.wav`);
   await new Promise((resolve, reject) => {
-    execFile(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-y', '-i', videoPath, '-vn', '-ac', '1', '-ar', '16000', '-f', 'wav', wav],
-      { windowsHide: true, maxBuffer: 8 * 1024 * 1024 }, (e) => (e ? reject(new Error('audio extract failed')) : resolve()));
+    const p = spawn(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-y', '-i', videoPath,
+      '-vn', '-ac', '1', '-ar', '16000', '-progress', 'pipe:1', '-f', 'wav', wav], { windowsHide: true });
+    p.stdout.on('data', (d) => {
+      const m = String(d).match(/out_time=(\d+):(\d+):(\d+(?:\.\d+)?)/);
+      if (m && mediaDuration) prog(Math.min(0.99, (+m[1] * 3600 + +m[2] * 60 + +m[3]) / mediaDuration), 'extracting');
+    });
+    p.on('error', (e) => reject(new Error('audio extract failed: ' + e.message)));
+    p.on('close', (c) => (c === 0 ? resolve() : reject(new Error('audio extract failed'))));
   });
+  prog(1, 'extracting');
 
   const outBase = wav.replace(/\.wav$/, '');
   // Speed: use several threads and greedy decoding (beam/best-of = 1) — far
@@ -203,10 +216,18 @@ export async function generate(root, ffmpegPath, videoPath, { language = 'auto',
     // (ggml.dll, whisper.dll, …) regardless of the server's working directory.
     const p = spawn(binPath, args, { windowsHide: true, cwd: path.dirname(binPath) });
     let err = '', out = '';
+    // Progress from whisper's own "progress = NN%" (‑pp), and as a fallback the
+    // end-timestamp of each emitted segment vs. the media duration (streams even
+    // if the % line is buffered).
     const scan = (s) => {
-      if (!onProgress) return;
-      const all = String(s).match(/progress\s*=\s*(\d+)/g);
-      if (all) onProgress(Math.min(0.99, parseInt(all[all.length - 1].match(/\d+/)[0], 10) / 100));
+      const str = String(s);
+      const pp = str.match(/progress\s*=\s*(\d+)/g);
+      if (pp) return prog(Math.min(0.99, parseInt(pp[pp.length - 1].match(/\d+/)[0], 10) / 100), 'transcribing');
+      const seg = str.match(/-->\s*(\d+):(\d+):(\d+(?:\.\d+)?)/g);
+      if (seg && mediaDuration) {
+        const t = seg[seg.length - 1].match(/(\d+):(\d+):(\d+(?:\.\d+)?)/);
+        prog(Math.min(0.99, (+t[1] * 3600 + +t[2] * 60 + +t[3]) / mediaDuration), 'transcribing');
+      }
     };
     p.stderr.on('data', (d) => { err += d; scan(d); });
     p.stdout.on('data', (d) => { out += d; scan(d); });
@@ -221,6 +242,6 @@ export async function generate(root, ffmpegPath, videoPath, { language = 'auto',
   try { fs.copyFileSync(outBase + '.vtt', vttPath); } catch (e) { throw new Error('whisper produced no output'); }
   fs.rmSync(wav, { force: true });
   fs.rmSync(outBase + '.vtt', { force: true });
-  if (onProgress) onProgress(1);
+  prog(1, 'transcribing');
   return vttPath;
 }

@@ -434,6 +434,7 @@ app.get('/api/play/:kind/:fileId', async (req, reply) => {
     mode: info.mode,
     duration: info.duration,
     reason: info.reason || null,
+    chapters: info.chapters || [],
     url: info.mode === 'transcode' ? `/api/transcode/${kind}/${fileId}` : directUrl
   };
 });
@@ -502,10 +503,18 @@ async function runSubJob(job, kind, fileId, target) {
   try {
     const toEnglish = target === 'en' || (target !== 'orig' && target !== 'auto');
     const twoPhase = toEnglish && target !== 'en'; // translate to a non-English target
-    job.phase = 'transcribing';
+    const info = await playInfo(row.path);
+    const mediaDuration = (info && info.duration) || 0;
+    job.phase = 'extracting';
+    // Extraction gets 0–12%, transcription the rest (or up to 70% if we still
+    // have to translate afterwards).
+    const transcribeCap = twoPhase ? 58 : 88;
     const baseVtt = await generateSubs(ROOT, ffmpegBin(), row.path, {
-      language: 'auto', translate: toEnglish,
-      onProgress: (p) => { job.pct = Math.round(p * (twoPhase ? 70 : 100)); }
+      language: 'auto', translate: toEnglish, mediaDuration,
+      onProgress: (p, phase) => {
+        if (phase === 'extracting') { job.phase = 'extracting'; job.pct = Math.round(p * 12); }
+        else { job.phase = 'transcribing'; job.pct = 12 + Math.round(p * transcribeCap); }
+      }
     });
     let vttPath = baseVtt;
     if (twoPhase) {

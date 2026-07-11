@@ -76,6 +76,18 @@ Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed
   New screens (detail, modals) **pre-seat** focus on their primary Play button. Decoupled from
   `app.js` (pure DOM + MutationObservers), so it needed no changes to existing view code.
   In remote mode the top menu also grows slightly to read as a proper 10-ft menu bar.
+- **Whisper progress that actually moves; Skip Intro/Credits via chapters.**
+  - **Whisper "stuck at 0%" fixed.** The wait was mostly **audio extraction** (ffmpeg pulling a
+    full movie's audio out before Whisper starts) shown as "transcribing 0%." Now extraction is
+    its own phase with ffmpeg `-progress` streamed to a real bar ("Extracting audio… NN%"), then
+    "Transcribing… NN%". Transcribe progress also falls back to segment timestamps vs. duration
+    if whisper's `%` line is buffered.
+  - **Skip Intro no longer shows on movies.** The old heuristic ran for everything; now the
+    heuristic is **TV-episodes only** (movies have no intro). Added **ffprobe chapter detection**
+    (`-show_chapters` → `/api/play` returns chapters): when a file has named chapters (common in
+    `.mkv`), Skip Intro/**Skip Credits** are **precise** and work for anything — they appear only
+    inside the Intro/Credits chapters, which correctly handles a **cold open before the intro**.
+    Skip Credits jumps to the next episode (or the end).
 - **Whisper on the GPU + faster decoding; watched-button fix.**
   - **AI subtitles now run on the GPU.** Install auto-picks the whisper **cuBLAS** build when an
     NVIDIA driver is present (`nvcuda.dll`) — it bundles the CUDA runtime, so the Dell's 1050 Ti

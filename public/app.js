@@ -1100,7 +1100,8 @@ function openPlayer(ctx) {
         <button class="vp-fs" data-pf title="Fullscreen">${ICONS.fullscreen}</button>
       </div>
     </div>
-    <button class="vp-skipintro hidden">Skip Intro ⏭</button>
+    <button class="vp-skipbtn vp-skipintro hidden">Skip Intro ⏭</button>
+    <button class="vp-skipbtn vp-skipcredits hidden">Skip Credits ⏭</button>
     <div class="vp-menu hidden"></div>
     <div class="vp-upnext hidden"></div>
     <div class="vp-error hidden"></div>`;
@@ -1117,8 +1118,13 @@ function openPlayer(ctx) {
   const timeEl = vp.querySelector('.vp-time');
   const playBtns = [vp.querySelector('.vp-play')];
   const bubble = vp.querySelector('.vp-bubble');
+  const isEpisode = ctx.searchKind === 'episode';
   const skipIntro = vp.querySelector('.vp-skipintro');
-  skipIntro.addEventListener('click', () => { seekTo(cur() + 80); skipIntro.classList.add('hidden'); });
+  const skipCredits = vp.querySelector('.vp-skipcredits');
+  // Chapter ranges for the current file, detected in loadFile() from ffprobe.
+  let introCh = null, creditsCh = null;
+  skipIntro.addEventListener('click', () => { seekTo(introCh ? introCh.end : cur() + 85); skipIntro.classList.add('hidden'); });
+  skipCredits.addEventListener('click', () => { if (ctx.onEnded) ctx.onEnded(); else seekTo((dur() || cur()) - 1); skipCredits.classList.add('hidden'); });
   const errEl = vp.querySelector('.vp-error');
   video.addEventListener('error', () => {
     if (!video.getAttribute('src')) return;
@@ -1171,6 +1177,11 @@ function openPlayer(ctx) {
     play = info && info.mode === 'transcode'
       ? { mode: 'transcode', duration: info.duration || null, url: info.url, reason: null }
       : { mode: 'direct', duration: (info && info.duration) || null, url: ctx.streamBase + f.id, reason: (info && info.reason) || null };
+    // Chapter-based Skip Intro / Skip Credits (precise when the file has named
+    // chapters — common in .mkv rips).
+    const chaps = (info && info.chapters) || [];
+    introCh = chaps.find((c) => /\b(intro|opening|op|main title|titles?)\b/i.test(c.title)) || null;
+    creditsCh = chaps.find((c) => /\b(credits?|ending|outro|ed|end ?card)\b/i.test(c.title)) || null;
     base = 0;
     if (play.mode === 'transcode') {
       base = at || 0;
@@ -1209,11 +1220,24 @@ function openPlayer(ctx) {
       const buffered = (play.mode === 'transcode' ? base : 0) + video.buffered.end(video.buffered.length - 1);
       bufferedBar.style.width = Math.min(100, (buffered / d) * 100) + '%';
     }
-    skipIntro.classList.toggle('hidden', !(cur() >= 5 && cur() <= 90));
+    updateSkipButtons();
     renderSub();
     maybeUpNext();
     throttledSave();
   });
+  // Skip Intro / Skip Credits visibility. Chapters are authoritative (and work
+  // for anything, incl. a cold open before the intro). Without chapters we fall
+  // back to a heuristic — but only for TV episodes, since movies have no intro.
+  function updateSkipButtons() {
+    const t = cur(), d = dur();
+    let showIntro = false, showCredits = false;
+    if (introCh) showIntro = t >= introCh.start && t < introCh.end;
+    else if (isEpisode) showIntro = t >= 1 && t <= 150; // click when the intro plays (handles cold opens)
+    if (creditsCh) showCredits = t >= creditsCh.start;
+    else if (isEpisode && ctx.onEnded && d) showCredits = t >= d - 45 && t < d - 1;
+    skipIntro.classList.toggle('hidden', !showIntro);
+    skipCredits.classList.toggle('hidden', !showCredits);
+  }
   seek.addEventListener('input', () => {
     seeking = true;
     if (!dur()) return;
@@ -1307,7 +1331,7 @@ function openPlayer(ctx) {
       menu.querySelector('#gen-back').addEventListener('click', buildMenu);
       return;
     }
-    const PHASE = { transcribing: 'Transcribing spoken audio', translating: 'Translating', starting: 'Starting' };
+    const PHASE = { extracting: 'Extracting audio', transcribing: 'Transcribing spoken audio', translating: 'Translating', starting: 'Starting' };
     let polling = false;
     const showProgress = (d) => {
       const pct = d.pct || 0;
