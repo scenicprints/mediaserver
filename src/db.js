@@ -136,6 +136,15 @@ export function openDb(dbPath) {
   const showCols = new Set(db.prepare('PRAGMA table_info(shows)').all().map((c) => c.name));
   if (!showCols.has('genres')) db.exec('ALTER TABLE shows ADD COLUMN genres TEXT');
 
+  // TMDB franchise/collection grouping + a "details fetched" flag, so the
+  // Collections tab can group owned movies without a live lookup per render.
+  // `col_checked` = we've fetched movie details once (collection may be null).
+  const movieCols = new Set(db.prepare('PRAGMA table_info(movies)').all().map((c) => c.name));
+  if (!movieCols.has('collection_id')) db.exec('ALTER TABLE movies ADD COLUMN collection_id INTEGER');
+  if (!movieCols.has('collection_name')) db.exec('ALTER TABLE movies ADD COLUMN collection_name TEXT');
+  if (!movieCols.has('collection_poster')) db.exec('ALTER TABLE movies ADD COLUMN collection_poster TEXT');
+  if (!movieCols.has('col_checked')) db.exec('ALTER TABLE movies ADD COLUMN col_checked INTEGER DEFAULT 0');
+
   // Small key-value store for playback preferences that must survive across
   // browsers/devices (preferred version per title, caption delay per file+track,
   // last quality picked). The web client mirrors this in memory.

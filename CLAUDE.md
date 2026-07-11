@@ -49,6 +49,7 @@ node C:\Users\jkevi\mediaserver\src\server.js
 | `src/tmdb.js` | TMDB: `enrichLibrary` (movies), `enrichShows`, `enrichEpisodes` |
 | `src/opensubtitles.js` | OpenSubtitles: `searchSubtitles`, `downloadSubtitle`, login/token |
 | `src/ffmpeg.js` | Playback engine: FFmpeg detect + one-click install (→ `tools/`, git-ignored), ffprobe probing, direct-vs-transcode decision, live fMP4 transcode |
+| `src/whisper.js` | AI subtitles: whisper.cpp detect + one-click install (→ `tools/whisper/`), ffmpeg audio extract → transcribe/translate → WebVTT sidecar |
 | `src/fsbrowse.js` | Server-side folder browser for the in-app picker |
 | `src/scan-cli.js`, `src/enrich-cli.js` | Standalone CLI helpers (`npm run scan` / `enrich`) |
 | `public/index.html` | UI markup (grids, modals, player, overlays) |
@@ -85,6 +86,9 @@ node C:\Users\jkevi\mediaserver\src\server.js
   `sd:<fileId>:<trackIdx>` caption delay, `pq` last quality. **Never store these in
   localStorage — it's per-browser and the owner watches from multiple devices.**
 - **Self-update:** `GET /version`, `GET /check-update`, `POST /update` (exits 42 → `run.bat` pulls & restarts)
+- **Collections:** `GET /collections` (owned movies grouped by TMDB franchise), `GET /collections/:id`
+- **Playback engine:** `GET /play/:kind/:fileId` (direct vs transcode + duration), `GET /transcode/:kind/:fileId?start=`, `GET/POST /ffmpeg[/install]`
+- **AI subtitles:** `GET/POST /whisper[/install]`, `POST /subtitles/generate` `{kind,fileId,language,translate}`
 
 ## Deploy & update workflow — IMPORTANT
 The Dell auto-updates from GitHub:

@@ -76,6 +76,29 @@ Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed
   New screens (detail, modals) **pre-seat** focus on their primary Play button. Decoupled from
   `app.js` (pure DOM + MutationObservers), so it needed no changes to existing view code.
   In remote mode the top menu also grows slightly to read as a proper 10-ft menu bar.
+- **Collections tab + Live TV + AI subtitles (Whisper)** — three pipeline features in one batch:
+  - **Collections tab** (nav, beside Library): owned movies grouped by TMDB franchise. A new
+    background `backfillMovieDetails()` fetches each movie's details **once** (`col_checked`
+    flag) to store `collection_id/name/poster` **and** runtime (one request, reused by Live TV).
+    `GET /api/collections` + `/api/collections/:id`; Movies/TV toggle (TV shows a friendly
+    empty state — TMDB rarely groups TV); grid of franchise cards → collection page of owned
+    films, playable. Remote-navigable (`.coll-card` added to the focus engine).
+  - **Live TV (channel surfing)**: a deterministic virtual broadcast built client-side from the
+    library — every channel is a seeded looping playlist and "now playing" is computed from the
+    **wall clock**, so every device tuned in sees the same thing on air. Channels: THE MAIN EVENT
+    (movies), THE BINGE (series), genre stations (ADRENALINE/NEBULA/PRESTIGE…), a REWIND decade
+    channel; movies + shows mixed. A cinematic "TV screen" (now-playing backdrop, ● LIVE,
+    progress through the program, up-next time) + a channel **guide**; ▲▼ surf, Enter tunes in
+    (a movie **drops in at the live offset** like catching a broadcast mid-way; a show plays its
+    next episode). Live TV owns the arrows while active (focus engine steps aside via `lt-active`).
+  - **AI subtitles (whisper.cpp)**: one-click install from ⚙ Settings (CPU build into `tools/`;
+    the Dell's 1050 Ti can use the cuBLAS build via `whisperBinUrl` in config). In the player's
+    subtitle menu, **✨ Generate with AI** → *Transcribe spoken audio* or *Translate to English*;
+    ffmpeg extracts 16 kHz mono → whisper → WebVTT sidecar (`<file>.<lang>-ai.vtt`, cached), which
+    the subtitle plumbing now serves (`.vtt` sidecars are first-class alongside `.srt`) and labels
+    "EN (AI)"/"Auto (AI)". Verified end-to-end on real media (install → generate → served track).
+    Note: translating *to non-English* targets (e.g. English→Spanish) still needs a separate
+    translator step — whisper only translates to English; captured as a follow-up.
 - **Server-side playback prefs + player v4 (visible remote focus, cleaner theater UI)** —
   fixes the owner's top complaints for real this time:
   - **Version & caption-delay memory moved server-side** (new `prefs` key-value table in
@@ -149,8 +172,24 @@ Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed
 **Decision still open:** the native Apple TV *app* delivery — cloud‑build → TestFlight ($99/yr)
 vs a Fire TV / Nvidia Shield box. (Separate from #1, which is the *web* UI feeling tvOS‑like.)
 
-## 🎯 Owner's requested pipeline (queued 2026‑07‑10 — build in this order)
-These are the owner's explicit next asks, captured verbatim-in-intent. Big batched work.
+## 🎯 Owner's requested pipeline (queued 2026‑07‑10)
+**Items 1–3 SHIPPED** (see "Collections tab + Live TV + AI subtitles" under Done). Remaining
+follow-ups + the still-gated item 4:
+
+- **AI subtitles — translate to arbitrary languages** (the owner's Spanish example). Whisper only
+  translates *to English*; transcription (original language) and English translation both ship.
+  Real English→Spanish (etc.) needs a translation step: an offline translator (argos-translate)
+  or a configurable LibreTranslate URL, applied to the generated cues, then saved as `<file>.es-ai.vtt`.
+  Add a language picker to the "Generate with AI" menu once a translator is wired.
+- **Live TV polish**: real EPG grid (time columns), per-show episode-length durations in the
+  schedule (currently a 30-min block per series airing), channel numbers/logos, "jump to live"
+  when a tuned movie drifts, and letting a tuned **show** drop into the live episode+offset.
+- **Collections**: a Home "Your Collections" row; group TV franchises where TMDB has them.
+
+4. **Requests window → Sonarr/Radarr.** STILL GATED — **do not build until the owner greenlights.**
+   (Then: a Requests view + `requests` table; Radarr/Sonarr APIs with keys in `config.json`.)
+
+<details><summary>Original detailed notes for items 1–3 (kept for reference)</summary>
 
 1. **Auto‑generated / translated subtitles (Whisper).** When no subtitles exist for a title —
    or the owner wants a language we don't have (e.g. an English movie, but they need **Spanish**
@@ -192,6 +231,8 @@ These are the owner's explicit next asks, captured verbatim-in-intent. Big batch
    — the owner will greenlight this explicitly.** (When greenlit: a Requests view + a `requests`
    table; integrate Radarr/Sonarr APIs with server‑side API keys in `config.json`, never
    committed. Until then, leave this untouched.)
+
+</details>
 
 ## 📋 Backlog (owner-requested — fill in)
 > The owner said there's "a massive amount of things to get done." List them here with

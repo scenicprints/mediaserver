@@ -13,7 +13,9 @@
       <button class="nav-link active" data-view="home">Home</button>
       <button class="nav-link" data-view="movies">Movies</button>
       <button class="nav-link" data-view="tv">TV Shows</button>
+      <button class="nav-link" data-view="livetv">Live TV</button>
       <button class="nav-link" data-view="library">Library</button>
+      <button class="nav-link" data-view="collections">Collections</button>
     </div>
     <div class="spacer"></div>
     <input id="search" class="nav-search" type="search" placeholder="Search…" />
@@ -60,6 +62,12 @@
         <h3>Playback engine (FFmpeg)</h3>
         <p class="muted" id="ff-status">Checking…</p>
         <button class="btn primary hidden" id="ff-install">⬇ Install playback engine</button>
+      </div>
+
+      <div class="sub-account">
+        <h3>AI subtitles (Whisper)</h3>
+        <p class="muted" id="ws-status">Checking…</p>
+        <button class="btn primary hidden" id="ws-install">⬇ Install AI subtitle engine</button>
       </div>
 
       <div class="settings-footer">

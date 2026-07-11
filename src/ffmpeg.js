@@ -74,6 +74,8 @@ export async function detectFfmpeg(root, config = {}) {
   return status();
 }
 
+export const ffmpegBin = () => ffmpegPath;
+
 export function status() {
   return {
     available: !!(ffmpegPath && ffprobePath),

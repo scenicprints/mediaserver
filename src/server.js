@@ -6,11 +6,12 @@ import Fastify from 'fastify';
 import fastifyStatic from '@fastify/static';
 import { openDb } from './db.js';
 import { scanLibraries, seedLibraries } from './scan.js';
-import { enrichLibrary, enrichShows, enrichEpisodes, movieExtra, showExtra, backfillGenres, episodeExtra } from './tmdb.js';
+import { enrichLibrary, enrichShows, enrichEpisodes, movieExtra, showExtra, backfillGenres, episodeExtra, backfillMovieDetails } from './tmdb.js';
 import { ext, qualityRank } from './parse.js';
 import { listDrives, listDirs } from './fsbrowse.js';
 import { osEnabled, searchSubtitles, downloadSubtitle, clearAuth } from './opensubtitles.js';
-import { detectFfmpeg, status as ffmpegStatus, installFfmpeg, playInfo, transcodeStream } from './ffmpeg.js';
+import { detectFfmpeg, status as ffmpegStatus, installFfmpeg, playInfo, transcodeStream, ffmpegBin } from './ffmpeg.js';
+import { detectWhisper, status as whisperStatus, installWhisper, generate as generateSubs } from './whisper.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -58,6 +59,35 @@ app.get('/api/movies', async () => {
      GROUP BY m.id
      ORDER BY m.title COLLATE NOCASE`
   ).all();
+});
+
+// Collections tab: owned movies grouped by TMDB franchise/collection. Each
+// entry has the collection art (falls back to a member poster) and how many of
+// its films are in the library.
+app.get('/api/collections', async () => {
+  const rows = db.prepare(
+    `SELECT collection_id AS id, collection_name AS name,
+            COUNT(*) AS count,
+            MAX(collection_poster) AS poster,
+            MAX(backdrop) AS backdrop,
+            MIN(poster) AS memberPoster
+     FROM movies
+     WHERE collection_id IS NOT NULL
+     GROUP BY collection_id, collection_name
+     HAVING count >= 1
+     ORDER BY name COLLATE NOCASE`
+  ).all();
+  return rows.map((r) => ({ id: r.id, name: r.name, count: r.count, poster: r.poster || r.memberPoster, backdrop: r.backdrop }));
+});
+
+// One collection's owned entries, in release order (playable).
+app.get('/api/collections/:id', async (req) => {
+  const meta = db.prepare('SELECT collection_name AS name, MAX(collection_poster) AS poster, MAX(backdrop) AS backdrop FROM movies WHERE collection_id = ?').get(req.params.id);
+  const items = db.prepare(
+    `SELECT id, title, year, poster, backdrop, overview, rating, watched, resume_position, duration, runtime
+     FROM movies WHERE collection_id = ? ORDER BY year, title COLLATE NOCASE`
+  ).all(req.params.id);
+  return { name: meta && meta.name, poster: meta && meta.poster, backdrop: meta && meta.backdrop, items };
 });
 
 // Rich TMDB detail (genres, cast, director, trailer, recommendations). Owned
@@ -450,6 +480,33 @@ app.post('/api/ffmpeg/install', async () => {
   return ffmpegStatus();
 });
 
+// ---- AI subtitle generation (whisper.cpp) ----
+app.get('/api/whisper', async () => whisperStatus());
+app.post('/api/whisper/install', async () => {
+  if (!whisperStatus().installing) installWhisper(ROOT, config);
+  return whisperStatus();
+});
+
+// Generate subtitles for a file with whisper: transcribe (language='auto' or a
+// forced code) or translate to English. Returns the refreshed track list + the
+// index of the new one so the player can switch to it.
+app.post('/api/subtitles/generate', async (req, reply) => {
+  const { kind, fileId, language = 'auto', translate = false } = req.body || {};
+  const row = fileRow(kind, fileId);
+  if (!row) return reply.code(404).send({ error: 'not found' });
+  const ws = whisperStatus();
+  if (!ws.available) return reply.code(400).send({ error: 'The AI subtitle engine is not installed yet — install it in ⚙ Settings.' });
+  let vttPath;
+  try {
+    vttPath = await generateSubs(ROOT, ffmpegBin(), row.path, { language, translate });
+  } catch (e) {
+    return reply.code(500).send({ error: 'Generation failed: ' + e.message });
+  }
+  const list = listSubtitles(row.path);
+  const idx = Math.max(0, list.findIndex((s) => s.path === vttPath));
+  return { ok: true, subtitles: list.map((s, i) => ({ label: s.label, idx: i })), idx };
+});
+
 // ---- Subtitles: .srt sidecars served as WebVTT ----
 
 // Find external .srt subtitles for a video: next to it (loose name match, either
@@ -465,14 +522,21 @@ function listSubtitles(videoPath) {
     let files;
     try { files = fs.readdirSync(folder); } catch { return; }
     for (const f of files) {
-      if (!/\.srt$/i.test(f)) continue;
+      if (!/\.(srt|vtt)$/i.test(f)) continue;
       const b = path.basename(f, path.extname(f));
       const nb = norm(b);
       const match = loose || nb === nstem || nb.startsWith(nstem) || nstem.startsWith(nb) || nb.includes(nstem) || nstem.includes(nb);
       if (!match) continue;
-      const lang = (b.toLowerCase().match(/[.\-_ ]([a-z]{2,3})(\.forced|\.sdh)?$/) || [])[1];
-      const extra = b.length > stem.length ? b.slice(stem.length).replace(/[.\-_]+/g, ' ').trim() : '';
-      out.push({ path: path.join(folder, f), label: lang ? lang.toUpperCase() : (extra || 'Subtitles') });
+      // AI-generated tracks are tagged "<lang>-ai" or "orig-ai" by whisper.js.
+      const ai = b.match(/[.\-_ ](orig|[a-z]{2,3})-ai$/i);
+      let label;
+      if (ai) label = (ai[1].toLowerCase() === 'orig' ? 'Auto' : ai[1].toUpperCase()) + ' (AI)';
+      else {
+        const lang = (b.toLowerCase().match(/[.\-_ ]([a-z]{2,3})(\.forced|\.sdh)?$/) || [])[1];
+        const extra = b.length > stem.length ? b.slice(stem.length).replace(/[.\-_]+/g, ' ').trim() : '';
+        label = lang ? lang.toUpperCase() : (extra || 'Subtitles');
+      }
+      out.push({ path: path.join(folder, f), label });
     }
   };
   consider(dir, false);
@@ -494,10 +558,11 @@ function serveSubtitle(videoPath, idx, reply) {
   const subs = videoPath ? listSubtitles(videoPath) : [];
   const sub = subs[idx] || subs[0];
   if (!sub) return reply.code(404).send({ error: 'no subtitle' });
-  let srt;
-  try { srt = fs.readFileSync(sub.path, 'utf8'); } catch { return reply.code(404).send({ error: 'unreadable' }); }
+  let text;
+  try { text = fs.readFileSync(sub.path, 'utf8'); } catch { return reply.code(404).send({ error: 'unreadable' }); }
   reply.header('Content-Type', 'text/vtt; charset=utf-8');
-  return reply.send(srtToVtt(srt));
+  // .vtt sidecars (e.g. AI-generated) are already WebVTT; .srt needs converting.
+  return reply.send(/\.vtt$/i.test(sub.path) ? text.replace(/^﻿/, '') : srtToVtt(text));
 }
 
 app.get('/api/subtitle/episode/:fileId', (req, reply) => {
@@ -589,6 +654,8 @@ async function start() {
   console.log(ff.available
     ? `FFmpeg playback engine: ready${ff.nvenc ? ' (NVENC hardware encoding)' : ''}.`
     : 'FFmpeg playback engine: not installed — exotic formats will not transcode (install from ⚙ Settings).');
+  const ws = await detectWhisper(ROOT, config);
+  console.log(ws.available ? 'AI subtitle engine (whisper): ready.' : 'AI subtitle engine (whisper): not installed (optional; install from ⚙ Settings).');
 
   // Scan on startup so the library is fresh, then kick off enrichment in the
   // background (don't block the server coming up).
@@ -604,6 +671,7 @@ async function start() {
       const ep = await enrichEpisodes(db, config.tmdbApiKey, { log: (x) => console.log(x) });
       console.log(`TMDB enrichment: ${ep} episode(s) updated.`);
       await backfillGenres(db, config.tmdbApiKey, { log: (x) => console.log(x) });
+      await backfillMovieDetails(db, config.tmdbApiKey, { log: (x) => console.log(x) });
     })().catch((e) => console.error('Enrichment error:', e.message));
   }
 

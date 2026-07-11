@@ -83,7 +83,10 @@ function recommended(list) {
 function shuffle(a) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
 
 function renderView() {
+  if (currentView !== 'livetv') stopLiveTv();
   if (currentView === 'library') { renderLibrary(); return; }
+  if (currentView === 'collections') { renderCollections(); return; }
+  if (currentView === 'livetv') { renderLiveTv(); return; }
   rowsEl.style.paddingTop = '';
   const top = [], rest = [];
   const byYear = (a, b) => (b.year || 0) - (a.year || 0);
@@ -174,6 +177,252 @@ function renderLibrary() {
   }
   wrap.querySelectorAll('.tab').forEach((b) => b.addEventListener('click', () => { libraryKind = b.dataset.k; renderLibrary(); }));
   wrap.querySelectorAll('.az').forEach((b) => b.addEventListener('click', () => document.getElementById('L-' + b.dataset.l)?.scrollIntoView({ behavior: 'smooth', block: 'start' })));
+}
+
+// ---------- Collections tab ----------
+let collectionKind = 'movie';
+async function renderCollections() {
+  heroEl.classList.add('hidden');
+  rowsEl.style.paddingTop = '78px';
+  rowsEl.innerHTML = '';
+  const wrap = document.createElement('div');
+  wrap.className = 'library';
+  wrap.innerHTML = `
+    <div class="lib-head">
+      <div class="tabs">
+        <button class="tab${collectionKind === 'movie' ? ' active' : ''}" data-k="movie">Movies</button>
+        <button class="tab${collectionKind === 'tv' ? ' active' : ''}" data-k="tv">TV Shows</button>
+      </div>
+      <span class="row-count" id="col-count"></span>
+    </div>
+    <div class="coll-grid" id="coll-grid"></div>`;
+  rowsEl.appendChild(wrap);
+  wrap.querySelectorAll('.tab').forEach((b) => b.addEventListener('click', () => { collectionKind = b.dataset.k; renderCollections(); }));
+  const grid = wrap.querySelector('#coll-grid');
+
+  if (collectionKind === 'tv') {
+    grid.innerHTML = `<div class="lib-empty" style="padding:40px 2px">TV shows aren't grouped into collections yet — browse them under <b>TV Shows</b> or <b>Library</b>.</div>`;
+    return;
+  }
+  let cols = [];
+  try { cols = await (await fetch('/api/collections')).json(); } catch {}
+  document.getElementById('col-count').textContent = cols.length ? `${cols.length} collection${cols.length === 1 ? '' : 's'}` : '';
+  if (!cols.length) {
+    grid.innerHTML = `<div class="lib-empty" style="padding:40px 2px">No franchises found yet. Collections appear once TMDB details finish loading for your movies (they backfill in the background after a scan).</div>`;
+    return;
+  }
+  for (const c of cols) {
+    const card = document.createElement('div');
+    card.className = 'coll-card';
+    card.innerHTML = `
+      <div class="coll-poster">${c.poster ? `<img src="${c.poster}" alt="" loading="lazy">` : `<span class="ph">${escapeHtml(c.name)}</span>`}
+        <div class="coll-count">${c.count}</div></div>
+      <div class="coll-name">${escapeHtml(c.name.replace(/ Collection$/, ''))}</div>`;
+    card.addEventListener('click', () => openCollection(c.id));
+    grid.appendChild(card);
+  }
+}
+
+async function openCollection(id) {
+  let data;
+  try { data = await (await fetch('/api/collections/' + id)).json(); } catch { return; }
+  const items = data.items || [];
+  detailInner.innerHTML = `
+    <div class="dp-splash" style="background-image:url('${data.backdrop || data.poster || (items[0] && items[0].backdrop) || ''}')">
+      <div class="dp-hero">
+        <div class="dp-poster">${data.poster ? `<img src="${data.poster}" alt="">` : ''}</div>
+        <div class="dp-info">
+          <h1 class="dp-title">${escapeHtml((data.name || 'Collection').replace(/ Collection$/, ''))}</h1>
+          <div class="dp-meta"><span class="chip">${items.length} film${items.length === 1 ? '' : 's'} in your library</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="dp-body">
+      <h3 class="seasons-h">Films</h3>
+      <div class="lib-grid" id="coll-items"></div>
+    </div>`;
+  openDetailModal();
+  detail.scrollTop = 0;
+  const g = document.getElementById('coll-items');
+  items.forEach((m) => g.appendChild(buildMediaCard(m, 'movie')));
+}
+
+// ---------- Live TV (channel surfing) ----------
+// A deterministic virtual broadcast: every channel is a looping playlist, and
+// the "now playing" is computed from the wall clock, so every device tuned to
+// a channel sees the same thing "on air." Movies and shows are mixed.
+const LT_EPOCH = 1704067200; // 2024-01-01 UTC — a fixed origin for the schedule
+const STATION_NAMES = {
+  Action: 'ADRENALINE', Comedy: 'THE LAUGH TRACK', Drama: 'PRESTIGE', 'Science Fiction': 'NEBULA',
+  Horror: 'NIGHTMARE', Family: 'FAMILY ROOM', Animation: 'TOON CITY', Romance: 'HEARTLINE',
+  Thriller: 'PULSE', Fantasy: 'MYTHOS', Crime: 'PRECINCT', Adventure: 'TRAILBLAZER',
+  Mystery: 'ENIGMA', Documentary: 'THE REAL', War: 'FRONTLINE', Western: 'FRONTIER', Music: 'THE MIX'
+};
+let ltState = null; // { channels, sel, timer, onKey }
+
+function hashStr(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; }
+function seededShuffle(arr, seed) {
+  const a = arr.slice();
+  let s = seed || 1;
+  const rnd = () => { s = (Math.imul(s, 1103515245) + 12345) & 0x7fffffff; return s / 0x7fffffff; };
+  for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+  return a;
+}
+const ltDuration = (it) => it.kind === 'show' ? 30 * 60 : ((it.ref.runtime && it.ref.runtime * 60) || it.ref.duration || 105 * 60);
+
+function buildChannels() {
+  const chans = [];
+  const withBackdrop = (list, kind) => list.filter((x) => x.backdrop || x.poster).map((ref) => ({ kind, ref }));
+  const mv = withBackdrop(movies, 'movie');
+  const sh = withBackdrop(shows, 'show');
+
+  // A prime movie channel + an all-TV channel.
+  if (mv.length) chans.push({ name: 'THE MAIN EVENT', sub: 'Feature Presentations', items: [...mv].sort((a, b) => (b.ref.rating || 0) - (a.ref.rating || 0)) });
+  if (sh.length) chans.push({ name: 'THE BINGE', sub: 'All Series', items: sh });
+
+  // Genre channels (mixing movies + shows), for the most common genres.
+  const all = [...mv, ...sh];
+  const counts = {};
+  all.forEach((it) => genresOf(it.ref).forEach((g) => (counts[g] = (counts[g] || 0) + 1)));
+  Object.keys(counts).sort((a, b) => counts[b] - counts[a]).filter((g) => counts[g] >= 2).slice(0, 8).forEach((g) => {
+    const items = all.filter((it) => genresOf(it.ref).includes(g));
+    chans.push({ name: STATION_NAMES[g] || g.toUpperCase(), sub: `${g} · 24/7`, items });
+  });
+
+  // A nostalgia channel from the most-represented decade.
+  const decCounts = {};
+  mv.forEach((it) => { if (it.ref.year) { const d = Math.floor(it.ref.year / 10) * 10; decCounts[d] = (decCounts[d] || 0) + 1; } });
+  const topDec = Object.keys(decCounts).sort((a, b) => decCounts[b] - decCounts[a])[0];
+  if (topDec) chans.push({ name: `REWIND ${String(topDec).slice(2)}s`, sub: `${topDec}s Classics`, items: mv.filter((it) => it.ref.year >= +topDec && it.ref.year < +topDec + 10) });
+
+  // Finalize: give each a number + a stable looping playlist + total runtime.
+  return chans.filter((c) => c.items.length).map((c, i) => {
+    const playlist = seededShuffle(c.items, hashStr(c.name));
+    const total = playlist.reduce((s, it) => s + ltDuration(it), 0);
+    return { ...c, number: i + 2, playlist, total };
+  });
+}
+
+// What's on this channel right now (and the item + offset), from the wall clock.
+function nowOn(chan, atSec) {
+  let pos = ((atSec - LT_EPOCH) % chan.total + chan.total) % chan.total;
+  for (let i = 0; i < chan.playlist.length; i++) {
+    const d = ltDuration(chan.playlist[i]);
+    if (pos < d) return { item: chan.playlist[i], offset: pos, endsIn: d - pos, idx: i };
+    pos -= d;
+  }
+  return { item: chan.playlist[0], offset: 0, endsIn: ltDuration(chan.playlist[0]), idx: 0 };
+}
+function upcoming(chan, atSec, n) {
+  const out = []; const cur = nowOn(chan, atSec); let clock = atSec + cur.endsIn; let idx = cur.idx + 1;
+  for (let k = 0; k < n; k++) { const it = chan.playlist[idx % chan.playlist.length]; out.push({ item: it, at: clock }); clock += ltDuration(it); idx++; }
+  return out;
+}
+const clockTime = (sec) => new Date(sec * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+
+function renderLiveTv() {
+  heroEl.classList.add('hidden');
+  rowsEl.style.paddingTop = '0';
+  document.body.classList.add('lt-active');
+  const channels = buildChannels();
+  if (!channels.length) { rowsEl.innerHTML = '<div class="lib-empty" style="padding:100px var(--edge)">Add some movies or shows to start broadcasting.</div>'; return; }
+  if (ltState) stopLiveTv();
+  ltState = { channels, sel: 0, timer: null, onKey: null };
+
+  rowsEl.innerHTML = `
+    <div class="livetv">
+      <div class="lt-screen" id="lt-screen"></div>
+      <div class="lt-guide" id="lt-guide">
+        <div class="lt-guide-head"><span class="lt-live-dot"></span> CHANNEL GUIDE <span class="muted" style="margin-left:auto;font-weight:600">▲▼ surf · Enter to watch</span></div>
+        <div id="lt-rows"></div>
+      </div>
+    </div>`;
+  drawGuide(); drawScreen();
+
+  ltState.onKey = (e) => {
+    if (currentView !== 'livetv' || !document.getElementById('detail').classList.contains('hidden') || document.querySelector('.vp')) return;
+    if (e.key === 'ArrowDown') { e.preventDefault(); ltState.sel = (ltState.sel + 1) % channels.length; drawGuide(); drawScreen(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); ltState.sel = (ltState.sel - 1 + channels.length) % channels.length; drawGuide(); drawScreen(); }
+    else if (e.key === 'Enter') { e.preventDefault(); tuneIn(); }
+  };
+  document.addEventListener('keydown', ltState.onKey, true);
+  ltState.timer = setInterval(() => { drawGuide(); drawScreen(); }, 15000);
+}
+
+function stopLiveTv() {
+  document.body.classList.remove('lt-active');
+  if (!ltState) return;
+  clearInterval(ltState.timer);
+  if (ltState.onKey) document.removeEventListener('keydown', ltState.onKey, true);
+  ltState = null;
+}
+
+function drawScreen() {
+  const s = document.getElementById('lt-screen'); if (!s) return;
+  const chan = ltState.channels[ltState.sel];
+  const now = Math.floor(Date.now() / 1000);
+  const on = nowOn(chan, now);
+  const it = on.item.ref;
+  const dur = ltDuration(on.item);
+  const pct = Math.min(100, (on.offset / dur) * 100);
+  const up = upcoming(chan, now, 1)[0];
+  s.style.backgroundImage = `url('${it.backdrop || it.poster || ''}')`;
+  s.innerHTML = `
+    <div class="lt-screen-fade"></div>
+    <div class="lt-screen-body">
+      <div class="lt-chan-badge"><span class="lt-num">${chan.number}</span><span class="lt-name">${escapeHtml(chan.name)}</span><span class="lt-onair"><span class="lt-live-dot"></span>LIVE</span></div>
+      <h1 class="lt-title">${escapeHtml(it.title)}</h1>
+      <div class="lt-meta">
+        ${on.item.kind === 'show' ? '<span class="chip">Series</span>' : (it.year ? `<span class="chip">${it.year}</span>` : '')}
+        ${it.rating ? `<span class="chip rating">★ ${it.rating.toFixed(1)}</span>` : ''}
+        <span class="chip">${chan.sub}</span>
+      </div>
+      <p class="lt-over">${escapeHtml(it.overview || '')}</p>
+      <div class="lt-prog"><div class="lt-prog-fill" style="width:${pct}%"></div></div>
+      <div class="lt-times"><span>▶ ${on.item.kind === 'show' ? 'Now airing' : `${Math.round(on.offset / 60)}m in`}</span>${up ? `<span class="muted">Up next ${clockTime(up.at)} · ${escapeHtml(up.item.ref.title)}</span>` : ''}</div>
+      <div class="lt-actions"><button class="btn btn-play" id="lt-tune">▶ Tune In</button></div>
+    </div>`;
+  const t = document.getElementById('lt-tune'); if (t) t.addEventListener('click', tuneIn);
+}
+
+function drawGuide() {
+  const rows = document.getElementById('lt-rows'); if (!rows) return;
+  const now = Math.floor(Date.now() / 1000);
+  rows.innerHTML = '';
+  ltState.channels.forEach((chan, i) => {
+    const on = nowOn(chan, now);
+    const up = upcoming(chan, now, 1)[0];
+    const row = document.createElement('div');
+    row.className = 'lt-row' + (i === ltState.sel ? ' sel' : '');
+    row.innerHTML = `
+      <div class="lt-row-num">${chan.number}</div>
+      <div class="lt-row-body">
+        <div class="lt-row-name">${escapeHtml(chan.name)}</div>
+        <div class="lt-row-now">${escapeHtml(on.item.ref.title)}</div>
+      </div>
+      <div class="lt-row-next">${up ? `${clockTime(up.at)} · ${escapeHtml(up.item.ref.title)}` : ''}</div>`;
+    row.addEventListener('click', () => { ltState.sel = i; drawGuide(); drawScreen(); });
+    row.addEventListener('dblclick', tuneIn);
+    rows.appendChild(row);
+  });
+  const sel = rows.children[ltState.sel];
+  if (sel) sel.scrollIntoView({ block: 'nearest' });
+}
+
+async function tuneIn() {
+  const chan = ltState.channels[ltState.sel];
+  const on = nowOn(chan, Math.floor(Date.now() / 1000));
+  if (on.item.kind === 'show') { openShow(on.item.ref.id, null, true); return; }
+  // Movie: drop in at the live offset (like catching it mid-broadcast).
+  const m = await (await fetch('/api/movies/' + on.item.ref.id)).json();
+  const files = m.files || [];
+  if (!files.length) { openDetail(m.id, false); return; }
+  const f = preferredFile(files, 'm' + m.id);
+  openPlayer({
+    title: m.title, files, startFileId: f.id, verKey: 'm' + m.id,
+    streamBase: '/api/stream/', subtitleBase: '/api/subtitle/', searchKind: 'movie',
+    startAt: Math.floor(on.offset), progressUrl: `/api/movies/${m.id}/progress`, upNext: null, onEnded: null
+  });
 }
 
 function showGridView(title, cards) {
@@ -944,6 +1193,7 @@ function openPlayer(ctx) {
       <button class="vp-opt subt" data-i="-1">Off<span class="tick">${!(subVisible && currentSubIdx >= 0) ? '✓' : ''}</span></button>
       ${subs.map((s, i) => `<button class="vp-opt subt" data-i="${i}">${escapeHtml(s.label || 'Track ' + (i + 1))}<span class="tick">${subVisible && currentSubIdx === i ? '✓' : ''}</span></button>`).join('')}
       <button class="vp-opt" id="sub-search">Search online…</button>
+      <button class="vp-opt" id="sub-generate">✨ Generate with AI…</button>
       <div class="vp-offset"><span style="color:var(--muted);font-size:12px">Delay</span><button data-o="-0.25">−</button><span class="val">${subOffset.toFixed(2)}s</span><button data-o="0.25">+</button></div>`;
     menu.querySelectorAll('.ver').forEach((b) => b.addEventListener('click', () => {
       const f = ctx.files.find((x) => String(x.id) === b.dataset.fid);
@@ -962,6 +1212,8 @@ function openPlayer(ctx) {
       menu.classList.add('hidden');
       openSubSearch(ctx.searchKind, current.id, video, onSubDownloaded);
     });
+    const gen = menu.querySelector('#sub-generate');
+    if (gen) gen.addEventListener('click', () => generateSubsFlow());
     menu.querySelectorAll('.vp-offset button').forEach((b) => b.addEventListener('click', () => { subOffset = Math.round((subOffset + +b.dataset.o) * 100) / 100; saveDelay(); renderSub(); buildMenu(); }));
     paintMenu();
   }
@@ -970,6 +1222,44 @@ function openPlayer(ctx) {
   // e.target is detached by the time this runs — a detached target must NOT
   // count as "outside" (that's what made the delay popup close on every press).
   vp.addEventListener('click', (e) => { if (!e.target.isConnected) return; if (!menu.contains(e.target) && !gear.contains(e.target)) menu.classList.add('hidden'); });
+
+  // AI subtitle generation: pick transcribe vs translate-to-English, POST, wait
+  // (it's slow — minutes), then switch to the new track. Stays inside the menu.
+  async function generateSubsFlow() {
+    let ws = {};
+    try { ws = await (await fetch('/api/whisper')).json(); } catch {}
+    if (!ws.available) {
+      menu.innerHTML = `<h4>Generate with AI</h4><div class="vp-genmsg">The AI subtitle engine isn't installed yet. Open <b>⚙ Settings → AI subtitles</b> on the server to install it (one click), then try again.</div><button class="vp-opt" id="gen-back">‹ Back</button>`;
+      menu.querySelector('#gen-back').addEventListener('click', buildMenu);
+      return;
+    }
+    const run = async (opts, label) => {
+      menu.innerHTML = `<h4>Generating…</h4><div class="vp-genmsg"><div class="spinner" style="margin:6px auto 14px"></div>${label}.<br>This can take a few minutes for a full movie — you can keep watching; it'll appear when ready.</div>`;
+      try {
+        const r = await fetch('/api/subtitles/generate', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ kind: ctx.searchKind, fileId: current.id, language: opts.language || 'auto', translate: !!opts.translate })
+        });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || 'failed');
+        current.subtitles = d.subtitles || current.subtitles;
+        currentSubIdx = d.idx; subVisible = true; loadDelay(); setSubtitle(subUrl(d.idx));
+        buildMenu();
+      } catch (e) {
+        menu.innerHTML = `<h4>Generate with AI</h4><div class="vp-genmsg">Couldn't generate: ${escapeHtml(e.message)}</div><button class="vp-opt" id="gen-back">‹ Back</button>`;
+        menu.querySelector('#gen-back').addEventListener('click', buildMenu);
+      }
+    };
+    menu.innerHTML = `
+      <h4>Generate with AI</h4>
+      <button class="vp-opt" id="gen-transcribe">Transcribe spoken audio<span class="tick">›</span></button>
+      <button class="vp-opt" id="gen-translate">Translate to English<span class="tick">›</span></button>
+      <div class="vp-genmsg">Runs locally on the server. Great when no subtitles exist, or to get an English track for a foreign film.</div>
+      <button class="vp-opt" id="gen-back">‹ Back</button>`;
+    menu.querySelector('#gen-transcribe').addEventListener('click', () => run({ language: 'auto', translate: false }, 'Transcribing the spoken audio'));
+    menu.querySelector('#gen-translate').addEventListener('click', () => run({ translate: true }, 'Translating to English'));
+    menu.querySelector('#gen-back').addEventListener('click', buildMenu);
+  }
 
   // up next
   function maybeUpNext() {
@@ -1216,9 +1506,37 @@ settingsBtn.addEventListener('click', openSettings);
 
 async function openSettings() {
   settingsModal.classList.remove('hidden');
-  loadVersion(); checkForUpdate(); loadSettings(); loadFfmpeg();
+  loadVersion(); checkForUpdate(); loadSettings(); loadFfmpeg(); loadWhisper();
   await renderLibraries();
 }
+
+// ---- AI subtitle engine (whisper) status + one-click install ----
+const wsStatus = document.getElementById('ws-status');
+const wsInstall = document.getElementById('ws-install');
+let wsTimer = null;
+async function loadWhisper() {
+  clearTimeout(wsTimer); wsTimer = null;
+  let s;
+  try { s = await (await fetch('/api/whisper')).json(); } catch { wsStatus.textContent = ''; return; }
+  if (s.available) { wsStatus.textContent = '✓ Ready — generate subtitles from any video in the player.'; wsInstall.classList.add('hidden'); return; }
+  wsInstall.classList.remove('hidden');
+  if (s.installing) {
+    wsInstall.disabled = true; wsInstall.textContent = 'Installing…';
+    const p = s.installing;
+    wsStatus.textContent = p.phase && p.phase.startsWith('downloading') ? `⬇ ${p.phase}… ${p.pct}%` : `⚙ ${p.phase || 'setting up'}…`;
+    wsTimer = setTimeout(loadWhisper, 1200);
+  } else {
+    wsInstall.disabled = false; wsInstall.textContent = '⬇ Install AI subtitle engine';
+    wsStatus.textContent = s.error
+      ? `Install failed: ${s.error}`
+      : 'Not installed. Generates subtitles locally when none exist (or translates to English) — needs the playback engine too. ~200 MB download.';
+  }
+}
+wsInstall.addEventListener('click', async () => {
+  wsInstall.disabled = true;
+  try { await fetch('/api/whisper/install', { method: 'POST' }); } catch {}
+  loadWhisper();
+});
 
 // ---- Playback engine (ffmpeg) status + one-click install ----
 const ffStatus = document.getElementById('ff-status');

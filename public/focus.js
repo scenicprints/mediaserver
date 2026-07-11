@@ -12,7 +12,7 @@
   // control nested inside a bigger one (e.g. the ▶ inside a card) —
   // the ancestor rule below keeps only the outermost target.
   const SELECTOR = [
-    '.card', '.nav-link', '.hero-dot', '.see-all', '.season-card',
+    '.card', '.coll-card', '.nav-link', '.hero-dot', '.see-all', '.season-card',
     '.episode', '.rec', '.trailer-card', '.tab', '.az', '.frow',
     '.btn', '.close', '.detail-close', '.icon-btn', '.rm', '#update-pill'
   ].join(',');
@@ -158,8 +158,9 @@
   const DIRS = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' };
 
   document.addEventListener('keydown', (e) => {
-    // Let the video player and typing own the keyboard.
+    // Let the video player, Live TV surfing, and typing own the keyboard.
     if (document.querySelector('.vp')) return;
+    if (document.body.classList.contains('lt-active') && document.getElementById('detail').classList.contains('hidden')) return;
     const a = document.activeElement;
     if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.isContentEditable)) return;
     if (e.altKey || e.ctrlKey || e.metaKey) return;

@@ -269,6 +269,46 @@ export async function backfillGenres(db, apiKey, { log = () => {} } = {}) {
   return n;
 }
 
+// One detail fetch per movie (cheap: same endpoint as genres) to capture the
+// franchise/collection, runtime, and any missing genres — powers the
+// Collections tab and gives Live TV real durations. `col_checked` guards it so
+// each movie is only fetched once.
+export async function backfillMovieDetails(db, apiKey, { log = () => {} } = {}) {
+  if (!apiKey) return 0;
+  const rows = db.prepare(
+    'SELECT id, tmdb_id, genres, runtime FROM movies WHERE tmdb_id IS NOT NULL AND (col_checked IS NULL OR col_checked = 0)'
+  ).all();
+  const upd = db.prepare(
+    `UPDATE movies SET collection_id = ?, collection_name = ?, collection_poster = ?,
+       runtime = COALESCE(runtime, ?), genres = CASE WHEN genres IS NULL OR genres = '' THEN ? ELSE genres END,
+       col_checked = 1 WHERE id = ?`
+  );
+  let n = 0;
+  for (const m of rows) {
+    let d = null;
+    try {
+      const url = new URL(`${BASE}/movie/${m.tmdb_id}`);
+      url.searchParams.set('api_key', apiKey);
+      const r = await fetch(url);
+      if (r.ok) d = await r.json();
+    } catch {}
+    if (!d) { db.prepare('UPDATE movies SET col_checked = 1 WHERE id = ?').run(m.id); continue; }
+    const col = d.belongs_to_collection;
+    upd.run(
+      col ? col.id : null,
+      col ? col.name : null,
+      col && col.poster_path ? POSTER + col.poster_path : null,
+      d.runtime || null,
+      d.genres ? JSON.stringify(d.genres.map((g) => g.name)) : null,
+      m.id
+    );
+    n++;
+    await new Promise((r) => setTimeout(r, 70));
+  }
+  if (n) log(`Collection/details backfilled for ${n} movie(s).`);
+  return n;
+}
+
 // Enrich every movie that hasn't been matched yet. Returns count updated.
 export async function enrichLibrary(db, apiKey, { log = () => {} } = {}) {
   if (!apiKey) {
