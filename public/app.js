@@ -84,6 +84,7 @@ function shuffle(a) { for (let i = a.length - 1; i > 0; i--) { const j = Math.fl
 
 function renderView() {
   if (currentView !== 'livetv') stopLiveTv();
+  if (currentView !== 'requests') stopRequestsPolling();
   if (currentView === 'library') { renderLibrary(); return; }
   if (currentView === 'collections') { renderCollections(); return; }
   if (currentView === 'requests') { renderRequests(); return; }
@@ -249,7 +250,11 @@ async function openCollection(id) {
 }
 
 // ---------- Requests (Radarr / Sonarr) ----------
-let reqSearchTimer = null;
+let reqSearchTimer = null, reqQueueTimer = null;
+let reqProfiles = { radarr: null, sonarr: null };   // { profiles:[{id,name}], default }
+let reqMovieProfile = null, reqTvProfile = null;     // chosen quality profile ids
+function stopRequestsPolling() { clearTimeout(reqQueueTimer); reqQueueTimer = null; }
+
 async function renderRequests() {
   heroEl.classList.add('hidden');
   rowsEl.style.paddingTop = '78px';
@@ -258,8 +263,12 @@ async function renderRequests() {
       <div class="req-head">
         <h2 class="req-title">Request something</h2>
         <p class="muted" id="req-sub">Can't find a movie or show? Search for it — it'll be sent to your downloaders and show up when it's ready.</p>
-        <input id="req-search" class="req-input" type="search" placeholder="Search for a movie or TV show to request…" autocomplete="off" />
+        <div class="req-controls">
+          <input id="req-search" class="req-input" type="search" placeholder="Search for a movie or TV show to request…" autocomplete="off" />
+          <div id="req-quality" class="req-quality"></div>
+        </div>
       </div>
+      <div id="req-queue" class="req-queue"></div>
       <div id="req-results" class="req-results"></div>
     </div>`;
   const input = document.getElementById('req-search');
@@ -285,6 +294,10 @@ async function renderRequests() {
   document.getElementById('req-sub').textContent =
     `Connected to ${[radarrOk && 'Radarr (movies)', sonarrOk && 'Sonarr (TV)'].filter(Boolean).join(' and ')}. Search below.`;
 
+  // Quality picker (one select per configured service).
+  try { reqProfiles = await (await fetch('/api/requests/profiles')).json(); } catch {}
+  renderQualityPicker(radarrOk, sonarrOk);
+
   input.focus();
   input.addEventListener('input', () => {
     clearTimeout(reqSearchTimer);
@@ -292,6 +305,55 @@ async function renderRequests() {
     if (q.length < 2) { results.innerHTML = ''; return; }
     reqSearchTimer = setTimeout(() => doRequestSearch(q, results), 350);
   });
+
+  // Live download queue, refreshed while this view is open.
+  const pollQueue = async () => {
+    if (currentView !== 'requests') return;
+    await loadQueue();
+    reqQueueTimer = setTimeout(pollQueue, 8000);
+  };
+  pollQueue();
+}
+
+function renderQualityPicker(radarrOk, sonarrOk) {
+  const wrap = document.getElementById('req-quality'); if (!wrap) return;
+  const sel = (label, data, chosen, onPick) => {
+    if (!data || !data.profiles || !data.profiles.length) return '';
+    const cur = chosen || data.default;
+    return `<label class="req-qsel"><span>${label}</span><select data-role="${label}">${
+      data.profiles.map((p) => `<option value="${p.id}"${p.id === cur ? ' selected' : ''}>${escapeHtml(p.name)}</option>`).join('')
+    }</select></label>`;
+  };
+  reqMovieProfile = reqMovieProfile || (reqProfiles.radarr && reqProfiles.radarr.default) || null;
+  reqTvProfile = reqTvProfile || (reqProfiles.sonarr && reqProfiles.sonarr.default) || null;
+  wrap.innerHTML =
+    (radarrOk ? sel('Movie quality', reqProfiles.radarr, reqMovieProfile) : '') +
+    (sonarrOk ? sel('Show quality', reqProfiles.sonarr, reqTvProfile) : '');
+  const sels = wrap.querySelectorAll('select');
+  sels.forEach((s) => s.addEventListener('change', () => {
+    if (s.dataset.role === 'Movie quality') reqMovieProfile = +s.value; else reqTvProfile = +s.value;
+  }));
+}
+
+async function loadQueue() {
+  const box = document.getElementById('req-queue'); if (!box) return;
+  let q;
+  try { q = await (await fetch('/api/requests/queue')).json(); } catch { return; }
+  if (!q.length) { box.innerHTML = ''; return; }
+  box.innerHTML = `<h3 class="req-qhead">Downloading now <span class="row-count">${q.length}</span></h3>` +
+    q.map((d) => {
+      const pct = Math.round(d.progress);
+      const state = d.errorMessage ? `<span class="req-err">⚠ ${escapeHtml(d.errorMessage)}</span>`
+        : `${escapeHtml((d.state || '').replace(/([A-Z])/g, ' $1').trim() || 'queued')}${d.timeleft ? ' · ' + escapeHtml(d.timeleft) : ''}${d.quality ? ' · ' + escapeHtml(d.quality) : ''}`;
+      return `<div class="req-qrow">
+        <span class="req-badge ${d.type}">${d.type === 'movie' ? 'MOVIE' : 'TV'}</span>
+        <div class="req-qbody">
+          <div class="req-qtitle">${escapeHtml(d.title)}</div>
+          <div class="req-qbar"><i style="width:${pct}%"></i></div>
+        </div>
+        <div class="req-qmeta"><div class="req-qpct">${pct}%</div><div class="req-qstate">${state}</div></div>
+      </div>`;
+    }).join('');
 }
 
 async function doRequestSearch(q, results) {
@@ -323,12 +385,13 @@ function requestCard(it) {
   if (!owned) btn.addEventListener('click', async () => {
     btn.disabled = true; btn.textContent = 'Requesting…';
     try {
+      const qualityProfileId = it.type === 'movie' ? reqMovieProfile : reqTvProfile;
       const r = await fetch('/api/requests/add', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: it.type, tmdbId: it.tmdbId, tvdbId: it.tvdbId })
+        body: JSON.stringify({ type: it.type, tmdbId: it.tmdbId, tvdbId: it.tvdbId, qualityProfileId })
       });
       const d = await r.json();
-      if (r.ok) { btn.textContent = d.already ? '✓ Already requested' : '✓ Requested — searching'; btn.classList.remove('primary'); btn.classList.add('req-done'); }
+      if (r.ok) { btn.textContent = d.already ? '✓ Already requested' : '✓ Requested — searching'; btn.classList.remove('primary'); btn.classList.add('req-done'); loadQueue(); }
       else { btn.textContent = '⚠ ' + (d.error || 'Failed'); btn.disabled = false; }
     } catch { btn.textContent = '⚠ Failed'; btn.disabled = false; }
   });

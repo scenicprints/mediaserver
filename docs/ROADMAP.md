@@ -247,8 +247,11 @@ follow-ups + the still-gated item 4:
    Sonarr 4.0.18.2978 (2026-07-11):** status connected, search returns movies+shows with in-library
    flags, adds land in both apps monitored with a search triggered (movie picked HD-1080p profile;
    Sonarr v4 language-profile handling clean). No API-compat issues.
-   Possible next: a status/queue view (Radarr/Sonarr `queue`), a quality-profile picker in the UI,
-   and a "my requests" list.
+   **Follow-ons shipped:** a live **"Downloading now" queue** in the Requests tab (polls
+   Radarr/Sonarr `/queue` every 8s — title, progress bar, state/ETA/quality, error rows first)
+   and a **quality-profile picker** (per-service Movie/Show selects; the chosen `qualityProfileId`
+   is passed through to the add; defaults to 1080p). Verified against the mock.
+   Possible next: a "my requests" history list; per-item cancel/remove from the queue.
 
 <details><summary>Original detailed notes for items 1–3 (kept for reference)</summary>
 

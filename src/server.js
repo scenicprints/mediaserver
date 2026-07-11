@@ -13,7 +13,7 @@ import { osEnabled, searchSubtitles, downloadSubtitle, clearAuth } from './opens
 import { detectFfmpeg, status as ffmpegStatus, installFfmpeg, playInfo, transcodeStream, ffmpegBin } from './ffmpeg.js';
 import { detectWhisper, status as whisperStatus, installWhisper, generate as generateSubs } from './whisper.js';
 import { translateVttFile } from './translate.js';
-import { radarrEnabled, sonarrEnabled, testConn, radarrSearch, radarrAdd, sonarrSearch, sonarrAdd } from './arr.js';
+import { radarrEnabled, sonarrEnabled, testConn, radarrSearch, radarrAdd, sonarrSearch, sonarrAdd, getProfiles, radarrQueue, sonarrQueue } from './arr.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -579,22 +579,37 @@ app.get('/api/requests/search', async (req, reply) => {
 });
 
 app.post('/api/requests/add', async (req, reply) => {
-  const { type, tmdbId, tvdbId } = req.body || {};
+  const { type, tmdbId, tvdbId, qualityProfileId } = req.body || {};
   try {
     if (type === 'movie') {
       if (!radarrEnabled(config.radarr)) return reply.code(400).send({ error: 'Radarr is not configured.' });
-      const r = await radarrAdd(config.radarr, tmdbId);
+      const r = await radarrAdd(config.radarr, tmdbId, qualityProfileId);
       return r.ok ? { ok: true, already: !!r.already, title: r.title } : reply.code(502).send({ error: r.error });
     }
     if (type === 'tv') {
       if (!sonarrEnabled(config.sonarr)) return reply.code(400).send({ error: 'Sonarr is not configured.' });
-      const r = await sonarrAdd(config.sonarr, tvdbId);
+      const r = await sonarrAdd(config.sonarr, tvdbId, qualityProfileId);
       return r.ok ? { ok: true, already: !!r.already, title: r.title } : reply.code(502).send({ error: r.error });
     }
     return reply.code(400).send({ error: 'unknown type' });
   } catch (e) {
     return reply.code(500).send({ error: e.message });
   }
+});
+
+// Quality profiles per service (for the picker) + the current download queues.
+app.get('/api/requests/profiles', async () => ({
+  radarr: await getProfiles(config.radarr).catch(() => null),
+  sonarr: await getProfiles(config.sonarr).catch(() => null)
+}));
+
+app.get('/api/requests/queue', async () => {
+  const [rq, sq] = await Promise.all([
+    radarrQueue(config.radarr).catch(() => []),
+    sonarrQueue(config.sonarr).catch(() => [])
+  ]);
+  // Show unfinished/erroring items first, then by progress.
+  return [...rq, ...sq].sort((a, b) => (b.errorMessage ? 1 : 0) - (a.errorMessage ? 1 : 0) || b.progress - a.progress);
 });
 
 // Save Radarr/Sonarr connection settings (url + apiKey) to config.json.

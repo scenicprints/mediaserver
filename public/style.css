@@ -252,6 +252,30 @@ button { font-family: inherit; }
   padding: 15px 20px; border-radius: 12px; font-size: 17px; outline: none; transition: border-color 0.15s ease;
 }
 .req-input:focus { border-color: var(--accent); }
+.req-controls { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; margin-top: 14px; }
+.req-controls .req-input { flex: 1; min-width: 260px; margin-top: 0; }
+.req-quality { display: flex; gap: 10px; flex-wrap: wrap; }
+.req-qsel { display: flex; flex-direction: column; gap: 4px; font-size: 11px; font-weight: 700; letter-spacing: 0.3px; color: var(--muted); text-transform: uppercase; }
+.req-qsel select {
+  background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 10px;
+  padding: 12px 12px; font-size: 14px; font-weight: 600; cursor: pointer; outline: none;
+}
+.req-qsel select:focus { border-color: var(--accent); }
+
+/* Downloading queue */
+.req-queue { margin: 22px 0 8px; }
+.req-qhead { font-size: 15px; font-weight: 800; letter-spacing: 0.3px; margin: 0 0 12px; display: flex; align-items: center; gap: 8px; }
+.req-qrow { display: flex; align-items: center; gap: 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-bottom: 8px; }
+.req-qrow .req-badge { position: static; }
+.req-qbody { flex: 1; min-width: 0; }
+.req-qtitle { font-size: 14px; font-weight: 600; margin-bottom: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.req-qbar { height: 6px; border-radius: 4px; background: rgba(255,255,255,0.14); overflow: hidden; }
+.req-qbar > i { display: block; height: 100%; background: var(--grad); transition: width 0.5s ease; }
+.req-qmeta { text-align: right; min-width: 120px; }
+.req-qpct { font-size: 15px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.req-qstate { font-size: 11.5px; color: var(--muted); }
+.req-err { color: var(--hot); }
+
 .req-results { display: flex; flex-direction: column; gap: 12px; }
 .req-empty { text-align: center; padding: 40px 10px; }
 .req-empty p { margin: 0 0 10px; }

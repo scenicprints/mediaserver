@@ -31,20 +31,60 @@ export async function testConn(cfg) {
   }
 }
 
-// Pick a quality profile + root folder: honor an explicit config value, else
-// take the first the instance offers.
-async function pickDefaults(cfg) {
+// The instance's default quality profile: config override, else prefer 1080p.
+function defaultProfileId(cfg, profileList) {
+  const byPref = (re) => profileList.find((p) => re.test(p.name));
+  return cfg.qualityProfileId || (byPref(/1080/i) || byPref(/\bhd\b|720/i) || byPref(/any|standard/i) || profileList[0] || {}).id;
+}
+
+// Quality profiles offered by an instance, plus which one we'd default to.
+export async function getProfiles(cfg) {
+  if (!radarrEnabled(cfg)) return null;
+  const r = await arr(cfg, '/api/v3/qualityprofile');
+  const list = Array.isArray(r.body) ? r.body.map((p) => ({ id: p.id, name: p.name })) : [];
+  return { profiles: list, default: defaultProfileId(cfg, list) };
+}
+
+// Pick a quality profile (explicit override wins) + root folder for an add.
+async function pickDefaults(cfg, profileId) {
   const [profiles, roots] = await Promise.all([
     arr(cfg, '/api/v3/qualityprofile'),
     arr(cfg, '/api/v3/rootfolder')
   ]);
   const profileList = Array.isArray(profiles.body) ? profiles.body : [];
   const rootList = Array.isArray(roots.body) ? roots.body : [];
-  const byPref = (re) => profileList.find((p) => re.test(p.name));
-  const qualityProfileId = cfg.qualityProfileId
-    || (byPref(/1080/i) || byPref(/\bhd\b|720/i) || byPref(/any|standard/i) || profileList[0] || {}).id;
+  const qualityProfileId = profileId || defaultProfileId(cfg, profileList);
   const rootFolderPath = cfg.rootFolder || (rootList[0] || {}).path;
-  return { qualityProfileId, rootFolderPath, profileList, rootList };
+  return { qualityProfileId, rootFolderPath };
+}
+
+// Normalize a Radarr/Sonarr queue record to a compact download-status row.
+function normQueue(x, type, parent) {
+  const size = x.size || 0;
+  const left = x.sizeleft != null ? x.sizeleft : size;
+  return {
+    type,
+    title: (parent && parent.title) || x.title || '—',
+    quality: (x.quality && x.quality.quality && x.quality.quality.name) || '',
+    state: x.trackedDownloadState || x.status || '',
+    status: x.trackedDownloadStatus || '',
+    progress: size > 0 ? Math.max(0, Math.min(100, ((size - left) / size) * 100)) : 0,
+    timeleft: x.timeleft || '',
+    errorMessage: x.errorMessage || ''
+  };
+}
+
+export async function radarrQueue(cfg) {
+  if (!radarrEnabled(cfg)) return [];
+  const r = await arr(cfg, '/api/v3/queue?pageSize=200&includeMovie=true');
+  const recs = (r.body && r.body.records) || [];
+  return recs.map((x) => normQueue(x, 'movie', x.movie));
+}
+export async function sonarrQueue(cfg) {
+  if (!sonarrEnabled(cfg)) return [];
+  const r = await arr(cfg, '/api/v3/queue?pageSize=200&includeSeries=true&includeEpisode=true');
+  const recs = (r.body && r.body.records) || [];
+  return recs.map((x) => normQueue(x, 'tv', x.series));
 }
 
 function poster(images) {
@@ -64,12 +104,12 @@ export async function radarrSearch(cfg, term) {
   }));
 }
 
-export async function radarrAdd(cfg, tmdbId) {
+export async function radarrAdd(cfg, tmdbId, profileId) {
   const look = await arr(cfg, '/api/v3/movie/lookup/tmdb?tmdbId=' + tmdbId);
   const movie = look.body && !Array.isArray(look.body) ? look.body : (Array.isArray(look.body) ? look.body[0] : null);
   if (!movie) return { ok: false, error: 'Movie not found in Radarr lookup.' };
   if (movie.id && movie.id > 0) return { ok: true, already: true, title: movie.title };
-  const { qualityProfileId, rootFolderPath } = await pickDefaults(cfg);
+  const { qualityProfileId, rootFolderPath } = await pickDefaults(cfg, profileId);
   if (!qualityProfileId || !rootFolderPath) return { ok: false, error: 'Radarr has no quality profile or root folder set up.' };
   const payload = {
     ...movie, qualityProfileId, rootFolderPath, monitored: true,
@@ -91,12 +131,12 @@ export async function sonarrSearch(cfg, term) {
   }));
 }
 
-export async function sonarrAdd(cfg, tvdbId) {
+export async function sonarrAdd(cfg, tvdbId, profileId) {
   const look = await arr(cfg, '/api/v3/series/lookup?term=tvdb:' + tvdbId);
   const series = Array.isArray(look.body) ? look.body[0] : null;
   if (!series) return { ok: false, error: 'Series not found in Sonarr lookup.' };
   if (series.id && series.id > 0) return { ok: true, already: true, title: series.title };
-  const { qualityProfileId, rootFolderPath } = await pickDefaults(cfg);
+  const { qualityProfileId, rootFolderPath } = await pickDefaults(cfg, profileId);
   if (!qualityProfileId || !rootFolderPath) return { ok: false, error: 'Sonarr has no quality profile or root folder set up.' };
   // languageprofile only exists on Sonarr v3 (v4 dropped it) — include it only
   // if the instance still has the endpoint.
