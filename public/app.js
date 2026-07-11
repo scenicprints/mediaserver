@@ -51,29 +51,55 @@ window.addEventListener('scroll', () => nav.classList.toggle('scrolled', window.
 
 function renderView() {
   const rows = [];
+  const byYear = (a, b) => (b.year || 0) - (a.year || 0);
+  const byTitle = (a, b) => a.title.localeCompare(b.title);
+  // A scrollable category row that can expand to a full grid ("See all").
+  const cat = (title, list, kind) => { if (list.length) rows.push({ title, kind, cards: mediaCards(list.slice(0, 24), kind), seeAll: () => ({ title, cards: mediaCards(list, kind) }) }); };
+
   if (currentView === 'movies') {
     setHero(movies.filter((m) => m.backdrop));
-    rows.push(['Continue Watching', continueCards(continueItems.filter((c) => c.kind === 'movie'))]);
-    rows.push(['Recently Added', mediaCards([...movies].sort(byRecent).slice(0, 20), 'movie')]);
-    rows.push(['Top Rated', mediaCards([...movies].sort(byRating).slice(0, 20), 'movie')]);
-    rows.push(['Favorites', mediaCards(movies.filter((m) => m.favorite), 'movie')]);
-    rows.push(['All Movies', mediaCards([...movies].sort((a, b) => a.title.localeCompare(b.title)), 'movie'), { grid: true }]);
+    const cw = continueItems.filter((c) => c.kind === 'movie');
+    if (cw.length) rows.push({ title: 'Continue Watching', cards: continueCards(cw) });
+    cat('Recently Added', [...movies].sort(byRecent), 'movie');
+    cat('Recently Released', [...movies].sort(byYear), 'movie');
+    cat('Top Rated', [...movies].sort(byRating), 'movie');
+    cat('Unwatched', movies.filter((m) => !m.watched), 'movie');
+    cat('Favorites', movies.filter((m) => m.favorite), 'movie');
+    rows.push({ title: 'All Movies', cards: mediaCards([...movies].sort(byTitle), 'movie'), grid: true });
   } else if (currentView === 'tv') {
     setHero(shows.filter((s) => s.backdrop));
-    rows.push(['Continue Watching', continueCards(continueItems.filter((c) => c.kind === 'episode'))]);
-    rows.push(['Recently Added', mediaCards([...shows].sort(byRecent).slice(0, 20), 'show')]);
-    rows.push(['Top Rated', mediaCards([...shows].sort(byRating).slice(0, 20), 'show')]);
-    rows.push(['All Shows', mediaCards([...shows].sort((a, b) => a.title.localeCompare(b.title)), 'show'), { grid: true }]);
+    const cw = continueItems.filter((c) => c.kind === 'episode');
+    if (cw.length) rows.push({ title: 'Continue Watching', cards: continueCards(cw) });
+    cat('Recently Added', [...shows].sort(byRecent), 'show');
+    cat('New Episodes', shows.filter((s) => s.unwatched > 0), 'show');
+    cat('Recently Released', [...shows].sort(byYear), 'show');
+    cat('Top Rated', [...shows].sort(byRating), 'show');
+    rows.push({ title: 'All Shows', cards: mediaCards([...shows].sort(byTitle), 'show'), grid: true });
   } else {
     const mixed = [...movies.filter((m) => m.backdrop), ...shows.filter((s) => s.backdrop)].sort(byRating);
     setHero(mixed);
-    rows.push(['Continue Watching', continueCards(continueItems)]);
-    rows.push(['Recently Added', mixedRecent(20)]);
-    rows.push(['Movies', mediaCards([...movies].sort(byRating), 'movie')]);
-    rows.push(['TV Shows', mediaCards([...shows].sort(byRating), 'show')]);
-    rows.push(['Favorites', mediaCards(movies.filter((m) => m.favorite), 'movie')]);
+    if (continueItems.length) rows.push({ title: 'Continue Watching', cards: continueCards(continueItems) });
+    rows.push({ title: 'Recently Added', cards: mixedRecent(24) });
+    cat('Movies', [...movies].sort(byRating), 'movie');
+    cat('TV Shows', [...shows].sort(byRating), 'show');
+    cat('Recently Released', [...movies].sort(byYear), 'movie');
+    cat('Unwatched Movies', movies.filter((m) => !m.watched), 'movie');
+    cat('Favorites', movies.filter((m) => m.favorite), 'movie');
   }
   drawRows(rows);
+}
+
+function showGridView(title, cards) {
+  heroEl.classList.add('hidden');
+  window.scrollTo({ top: 0 });
+  rowsEl.innerHTML = '';
+  const sec = document.createElement('section');
+  sec.className = 'row';
+  sec.innerHTML = `<div class="row-head"><button class="btn sm" id="grid-back">‹ Back</button><h3 class="row-title" style="margin-left:8px">${escapeHtml(title)}</h3><span class="row-count">${cards.length}</span></div><div class="lib-grid"></div>`;
+  const grid = sec.querySelector('.lib-grid');
+  cards.forEach((c) => grid.appendChild(c));
+  rowsEl.appendChild(sec);
+  document.getElementById('grid-back').addEventListener('click', renderView);
 }
 
 function mixedRecent(n) {
@@ -121,25 +147,27 @@ function drawHero() {
 // ---------- Rows & cards ----------
 function drawRows(rows) {
   rowsEl.innerHTML = '';
-  for (const [title, cards, opts] of rows) {
-    if (!cards.length) continue;
-    if (opts && opts.grid) {
+  for (const r of rows) {
+    if (!r.cards.length) continue;
+    if (r.grid) {
       const sec = document.createElement('section');
       sec.className = 'row';
-      sec.innerHTML = `<div class="row-head"><h3 class="row-title">${escapeHtml(title)}</h3><span class="row-count">${cards.length}</span></div><div class="lib-grid"></div>`;
+      sec.innerHTML = `<div class="row-head"><h3 class="row-title">${escapeHtml(r.title)}</h3><span class="row-count">${r.cards.length}</span></div><div class="lib-grid"></div>`;
       const grid = sec.querySelector('.lib-grid');
-      cards.forEach((c) => grid.appendChild(c));
+      r.cards.forEach((c) => grid.appendChild(c));
       rowsEl.appendChild(sec);
       continue;
     }
     const row = document.createElement('section');
     row.className = 'row';
-    row.innerHTML = `<div class="row-head"><h3 class="row-title">${escapeHtml(title)}</h3></div>
+    row.innerHTML = `<div class="row-head"><h3 class="row-title">${escapeHtml(r.title)}</h3>${r.seeAll ? '<button class="see-all">See all ›</button>' : ''}</div>
       <button class="row-nav left">‹</button><div class="row-track"></div><button class="row-nav right">›</button>`;
     const track = row.querySelector('.row-track');
-    cards.forEach((c) => track.appendChild(c));
+    r.cards.forEach((c) => track.appendChild(c));
     row.querySelector('.row-nav.left').addEventListener('click', () => track.scrollBy({ left: -track.clientWidth * 0.8, behavior: 'smooth' }));
     row.querySelector('.row-nav.right').addEventListener('click', () => track.scrollBy({ left: track.clientWidth * 0.8, behavior: 'smooth' }));
+    const sa = row.querySelector('.see-all');
+    if (sa) sa.addEventListener('click', () => { const g = r.seeAll(); showGridView(g.title, g.cards); });
     rowsEl.appendChild(row);
   }
 }
@@ -363,6 +391,73 @@ async function openDetail(id, autoplay = true) {
   sections.querySelectorAll('.rec.owned').forEach((c) => c.addEventListener('click', () => openDetail(+c.dataset.local, false)));
 }
 
+// ---------- Episode play + detail ----------
+function episodeSub(ep) {
+  return `S${ep.season}·E${String(ep.episode).padStart(2, '0')}${ep.title ? ' · ' + ep.title : ''}`;
+}
+
+function playEpisodeAt(show, flat, i, opts = {}) {
+  if (i < 0 || i >= flat.length) return;
+  const ep = flat[i].ep;
+  const files = ep.files || [];
+  if (!files.length) return;
+  const next = flat[i + 1];
+  openPlayer({
+    title: show.title,
+    subtitle: episodeSub(ep),
+    files, startFileId: opts.fileId || files[0].id,
+    streamBase: '/api/stream/episode/', subtitleBase: '/api/subtitle/episode/', searchKind: 'episode',
+    startAt: opts.startAt != null ? opts.startAt : (ep.resume_position > 5 ? ep.resume_position : 0),
+    progressUrl: `/api/episodes/${ep.id}/progress`,
+    upNext: next ? { label: 'Up Next', still: next.ep.still, title: episodeSub(next.ep), play: () => playEpisodeAt(show, flat, i + 1) } : null,
+    onEnded: next ? () => playEpisodeAt(show, flat, i + 1) : null
+  });
+}
+
+function openEpisodeDetail(show, flat, i) {
+  const ep = flat[i].ep;
+  const files = ep.files || [];
+  let current = files[0];
+  const resume = ep.resume_position && ep.resume_position > 5 ? ep.resume_position : 0;
+  const versionControl = files.length > 1
+    ? `<span class="dp-version"><span>Version</span><select class="dp-select" id="ep-ver">${files.map((f, k) => `<option value="${f.id}">${escapeHtml(versionLabel(f, k))}</option>`).join('')}</select></span>`
+    : (current ? `<span class="dp-version"><span>${escapeHtml(versionLabel(current, 0))}</span></span>` : '');
+
+  detailInner.innerHTML = `
+    <div class="dp-splash" style="background-image:url('${ep.still || show.backdrop || show.poster || ''}')">
+      <div class="dp-hero">
+        <div class="dp-info">
+          <button class="btn sm" id="ep-back" style="margin-bottom:14px">‹ ${escapeHtml(show.title)}</button>
+          <h1 class="dp-title" style="font-size:clamp(24px,3.6vw,42px)">${escapeHtml(episodeSub(ep))}</h1>
+          <div class="dp-actions">
+            ${resume ? `<button class="btn btn-play" id="ep-resume">▶ Resume</button><button class="btn" id="ep-begin">↺ From beginning</button>` : `<button class="btn btn-play" id="ep-play">▶ Play</button>`}
+            <button class="btn" id="ep-watched">${ep.watched ? '✓ Watched' : 'Mark watched'}</button>
+            ${versionControl}
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="dp-body"><p class="overview">${escapeHtml(ep.overview || 'No description.')}</p></div>`;
+  openDetailModal();
+  detail.scrollTop = 0;
+
+  const sel = document.getElementById('ep-ver');
+  if (sel) sel.addEventListener('change', () => { const f = files.find((x) => String(x.id) === sel.value); if (f) current = f; });
+  const playAt = (at) => playEpisodeAt(show, flat, i, { fileId: current.id, startAt: at });
+  if (resume) {
+    document.getElementById('ep-resume').addEventListener('click', () => playAt(resume));
+    document.getElementById('ep-begin').addEventListener('click', () => playAt(0));
+  } else {
+    document.getElementById('ep-play').addEventListener('click', () => playAt(0));
+  }
+  document.getElementById('ep-watched').addEventListener('click', async (e) => {
+    const next = ep.watched ? 0 : 1;
+    await fetch(`/api/episodes/${ep.id}/watched`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ watched: next }) });
+    ep.watched = next; e.target.textContent = next ? '✓ Watched' : 'Mark watched';
+  });
+  document.getElementById('ep-back').addEventListener('click', () => openShow(show.id, null, false));
+}
+
 // ---------- Show detail ----------
 async function openShow(id, autoEpId, autoplay = true) {
   const [show, extra] = await Promise.all([
@@ -406,38 +501,8 @@ async function openShow(id, autoEpId, autoplay = true) {
 
   document.getElementById('s-play').addEventListener('click', () => {
     const idx = flat.findIndex((f) => !f.ep.watched);
-    playByFlatIndex(idx >= 0 ? idx : 0);
+    playEpisodeAt(show, flat, idx >= 0 ? idx : 0);
   });
-
-  function playByFlatIndex(i) {
-    if (i < 0 || i >= flat.length) return;
-    const { ep, si } = flat[i];
-    seasonCards.querySelectorAll('.season-card').forEach((c, ci) => c.classList.toggle('active', ci === si));
-    renderSeason(seasons[si]);
-    const ei = seasons[si].episodes.findIndex((e) => e.id === ep.id);
-    playEpisode(ep, epList.children[ei], i);
-  }
-
-  function playEpisode(ep, row, flatIndex) {
-    epList.querySelectorAll('.episode').forEach((r) => r.classList.remove('playing'));
-    if (row) row.classList.add('playing');
-    if (!(ep.files || []).length) return;
-    const nextEntry = flat[flatIndex + 1];
-    const upNext = nextEntry ? {
-      label: 'Up Next', still: nextEntry.ep.still,
-      title: `S${nextEntry.ep.season}·E${String(nextEntry.ep.episode).padStart(2, '0')} · ${nextEntry.ep.title || 'Episode ' + nextEntry.ep.episode}`,
-      play: () => playByFlatIndex(flatIndex + 1)
-    } : null;
-    openPlayer({
-      title: show.title,
-      subtitle: `S${ep.season}·E${String(ep.episode).padStart(2, '0')}${ep.title ? ' · ' + ep.title : ''}`,
-      files: ep.files, startFileId: ep.files[0].id,
-      streamBase: '/api/stream/episode/', subtitleBase: '/api/subtitle/episode/', searchKind: 'episode',
-      startAt: ep.resume_position && ep.resume_position > 5 ? ep.resume_position : 0,
-      progressUrl: `/api/episodes/${ep.id}/progress`,
-      upNext, onEnded: nextEntry ? () => playByFlatIndex(flatIndex + 1) : null
-    });
-  }
 
   function renderSeason(seasonObj) {
     epList.innerHTML = '';
@@ -456,7 +521,7 @@ async function openShow(id, autoEpId, autoplay = true) {
         <button class="wtoggle${ep.watched ? ' on' : ''}" title="Watched">${ep.watched ? '✓' : '○'}</button>
         ${pct > 1 ? `<div class="eprog" style="width:${pct}%"></div>` : ''}`;
       const fi = flat.findIndex((f) => f.ep.id === ep.id);
-      row.addEventListener('click', () => playByFlatIndex(fi));
+      row.addEventListener('click', () => openEpisodeDetail(show, flat, fi));
       row.querySelector('.wtoggle').addEventListener('click', async (e) => {
         e.stopPropagation();
         const next = ep.watched ? 0 : 1;
@@ -485,8 +550,8 @@ async function openShow(id, autoEpId, autoplay = true) {
   });
   if (seasons.length) renderSeason(seasons[0]);
 
-  if (autoEpId) { const fi = flat.findIndex((f) => f.ep.id === autoEpId); if (fi >= 0) playByFlatIndex(fi); }
-  else if (autoplay && flat.length) { const idx = flat.findIndex((f) => !f.ep.watched); playByFlatIndex(idx >= 0 ? idx : 0); }
+  if (autoEpId) { const fi = flat.findIndex((f) => f.ep.id === autoEpId); if (fi >= 0) playEpisodeAt(show, flat, fi); }
+  else if (autoplay && flat.length) { const idx = flat.findIndex((f) => !f.ep.watched); playEpisodeAt(show, flat, idx >= 0 ? idx : 0); }
 }
 
 // Save playback position periodically; onEnd optional (auto-advance).
@@ -515,37 +580,50 @@ function fmtTime(t) {
   return (h ? h + ':' : '') + mm + ':' + String(s).padStart(2, '0');
 }
 
+const ICONS = {
+  play: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>',
+  pause: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h4v14H6zm8 0h4v14h-4z"/></svg>',
+  back: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5V2L7 6l5 4V7a6 6 0 1 1-6 6"/></svg>',
+  fwd: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5V2l5 4-5 4V7a6 6 0 1 0 6 6"/></svg>',
+  volHigh: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 10v4h4l5 5V5L7 10H3zm13 2a4 4 0 0 0-2-3.46v6.92A4 4 0 0 0 16 12zm-2-7.5v2.06a6 6 0 0 1 0 10.88v2.06a8 8 0 0 0 0-15z"/></svg>',
+  volMute: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 10v4h4l5 5V5L7 10H3zm18.3 2 1.4-1.4L21.4 9 20 10.6 18.4 9 17 10.4 18.6 12 17 13.6 18.4 15 20 13.4 21.6 15 23 13.6z"/></svg>',
+  gear: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M19.4 13a7.6 7.6 0 0 0 0-2l2-1.5-2-3.4-2.3.9a7 7 0 0 0-1.7-1l-.4-2.5H10.9l-.3 2.5a7 7 0 0 0-1.7 1l-2.4-.9-2 3.4L6.6 11a7.6 7.6 0 0 0 0 2l-2 1.5 2 3.4 2.4-.9c.5.4 1.1.7 1.7 1l.3 2.5h4.2l.4-2.5c.6-.3 1.2-.6 1.7-1l2.3.9 2-3.4-2-1.5zM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7z"/></svg>',
+  fullscreen: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>'
+};
+
 function openPlayer(ctx) {
   if (activePlayer) { activePlayer.remove(); activePlayer = null; }
   let current = ctx.files.find((f) => f.id === ctx.startFileId) || ctx.files[0];
   if (!current) return;
   let subOffset = 0;
-  let baseCues = [];
+  let cues = [];
+  let subVisible = true;
   let upnextShown = false;
 
   const vp = document.createElement('div');
   vp.className = 'vp';
   vp.innerHTML = `
     <video playsinline></video>
+    <div class="vp-subs"></div>
     <div class="vp-top vp-fade">
       <button class="vp-back">‹ Back</button>
       <div class="vp-titles"><div class="vp-t">${escapeHtml(ctx.title)}</div>${ctx.subtitle ? `<div class="vp-st">${escapeHtml(ctx.subtitle)}</div>` : ''}</div>
     </div>
     <div class="vp-center vp-fade">
-      <button class="vp-skip" data-d="-10">« 10</button>
-      <button class="vp-bigplay">❚❚</button>
-      <button class="vp-skip" data-d="10">10 »</button>
+      <button class="vp-skip" data-d="-10">${ICONS.back}<b>10</b></button>
+      <button class="vp-bigplay">${ICONS.pause}</button>
+      <button class="vp-skip" data-d="10">${ICONS.fwd}<b>10</b></button>
     </div>
     <div class="vp-bottom vp-fade">
       <div class="vp-scrub"><div class="vp-track"></div><div class="vp-buffered"></div><div class="vp-played"></div><input class="vp-seek" type="range" min="0" max="1000" value="0"></div>
       <div class="vp-ctrls">
-        <button class="vp-play">❚❚</button>
-        <button class="vp-mute">🔊</button><input class="vp-volbar" type="range" min="0" max="1" step="0.05" value="1">
+        <button class="vp-play">${ICONS.pause}</button>
+        <button class="vp-mute">${ICONS.volHigh}</button><input class="vp-volbar" type="range" min="0" max="1" step="0.05" value="1">
         <span class="vp-time">0:00 / 0:00</span>
         <div class="vp-spacer"></div>
         <button class="vp-cc" title="Subtitles">CC</button>
-        <button class="vp-gear" title="Settings">⚙</button>
-        <button class="vp-fs" title="Fullscreen">⛶</button>
+        <button class="vp-gear" title="Settings">${ICONS.gear}</button>
+        <button class="vp-fs" title="Fullscreen">${ICONS.fullscreen}</button>
       </div>
     </div>
     <button class="vp-skipintro hidden">Skip Intro ⏭</button>
@@ -566,21 +644,35 @@ function openPlayer(ctx) {
   const skipIntro = vp.querySelector('.vp-skipintro');
   skipIntro.addEventListener('click', () => { video.currentTime = Math.min((video.duration || 9e9), video.currentTime + 80); skipIntro.classList.add('hidden'); });
 
-  function applyOffset() { baseCues.forEach(({ c, s, e }) => { c.startTime = Math.max(0, s + subOffset); c.endTime = Math.max(0, e + subOffset); }); }
-  function setSubtitle(url) {
-    video.querySelectorAll('track').forEach((t) => t.remove());
-    baseCues = [];
-    if (!url) return;
-    const track = document.createElement('track');
-    track.kind = 'subtitles'; track.default = true; track.srclang = 'en'; track.src = url;
-    video.appendChild(track);
-    track.addEventListener('load', () => {
-      const tt = track.track; tt.mode = 'showing';
-      baseCues = [...(tt.cues || [])].map((c) => ({ c, s: c.startTime, e: c.endTime }));
-      applyOffset();
+  const subsDiv = vp.querySelector('.vp-subs');
+  function parseVtt(text) {
+    const out = [];
+    text.replace(/\r/g, '').split(/\n\n+/).forEach((block) => {
+      const lines = block.split('\n').filter((l) => l.trim() !== '');
+      const timeLine = lines.find((l) => l.includes('-->'));
+      if (!timeLine) return;
+      const m = timeLine.match(/(\d{2}):(\d{2}):(\d{2})[.,](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[.,](\d{3})/);
+      if (!m) return;
+      const start = +m[1] * 3600 + +m[2] * 60 + +m[3] + +m[4] / 1000;
+      const end = +m[5] * 3600 + +m[6] * 60 + +m[7] + +m[8] / 1000;
+      const body = lines.slice(lines.indexOf(timeLine) + 1).join('\n').replace(/<[^>]+>/g, '');
+      out.push({ start, end, html: escapeHtml(body).replace(/\n/g, '<br>') });
     });
+    return out;
   }
-  function subOn() { const tt = video.textTracks[0]; return tt && tt.mode === 'showing'; }
+  async function setSubtitle(url) {
+    cues = []; renderSub();
+    if (!url) return;
+    try { const r = await fetch(url); if (r.ok) cues = parseVtt(await r.text()); } catch {}
+    renderSub();
+  }
+  function renderSub() {
+    if (!subVisible || !cues.length) { subsDiv.innerHTML = ''; return; }
+    const t = video.currentTime - subOffset;
+    const cue = cues.find((c) => t >= c.start && t <= c.end);
+    subsDiv.innerHTML = cue ? cue.html : '';
+  }
+  function subOn() { return subVisible && cues.length > 0; }
 
   function loadFile(f, at) {
     current = f;
@@ -590,7 +682,7 @@ function openPlayer(ctx) {
   }
   loadFile(current, ctx.startAt || 0);
 
-  function setPlayIcons() { const i = video.paused ? '▶' : '❚❚'; playBtns.forEach((b) => (b.textContent = i)); }
+  function setPlayIcons() { const i = video.paused ? ICONS.play : ICONS.pause; playBtns.forEach((b) => (b.innerHTML = i)); }
   function togglePlay() { video.paused ? video.play() : video.pause(); }
   playBtns.forEach((b) => b.addEventListener('click', togglePlay));
   video.addEventListener('click', togglePlay);
@@ -605,6 +697,7 @@ function openPlayer(ctx) {
     timeEl.textContent = `${fmtTime(video.currentTime)} / ${fmtTime(video.duration)}`;
     if (video.buffered.length) bufferedBar.style.width = (video.buffered.end(video.buffered.length - 1) / (video.duration || 1)) * 100 + '%';
     skipIntro.classList.toggle('hidden', !(video.currentTime >= 5 && video.currentTime <= 90));
+    renderSub();
     maybeUpNext();
     throttledSave();
   });
@@ -614,35 +707,32 @@ function openPlayer(ctx) {
   // volume
   const mute = vp.querySelector('.vp-mute'), volbar = vp.querySelector('.vp-volbar');
   volbar.addEventListener('input', () => { video.volume = +volbar.value; video.muted = false; });
-  mute.addEventListener('click', () => { video.muted = !video.muted; mute.textContent = video.muted ? '🔇' : '🔊'; });
+  mute.addEventListener('click', () => { video.muted = !video.muted; mute.innerHTML = video.muted ? ICONS.volMute : ICONS.volHigh; });
 
   // fullscreen
   vp.querySelector('.vp-fs').addEventListener('click', () => { if (document.fullscreenElement) document.exitFullscreen(); else vp.requestFullscreen?.(); });
 
   // subtitles quick toggle
-  vp.querySelector('.vp-cc').addEventListener('click', () => { const tt = video.textTracks[0]; if (tt) tt.mode = tt.mode === 'showing' ? 'hidden' : 'showing'; });
+  vp.querySelector('.vp-cc').addEventListener('click', () => { subVisible = !subVisible; renderSub(); });
 
   // settings menu
   const gear = vp.querySelector('.vp-gear');
   function buildMenu() {
-    const speeds = [0.5, 0.75, 1, 1.25, 1.5, 2];
     const audio = video.audioTracks && video.audioTracks.length > 1 ? [...video.audioTracks] : [];
     menu.innerHTML = `
-      <h4>Speed</h4>${speeds.map((s) => `<button class="vp-opt sp" data-s="${s}">${s === 1 ? 'Normal' : s + '×'}<span class="tick">${video.playbackRate === s ? '✓' : ''}</span></button>`).join('')}
       ${ctx.files.length > 1 ? `<h4>Version</h4>${ctx.files.map((f, i) => `<button class="vp-opt ver" data-fid="${f.id}">${escapeHtml(versionLabel(f, i))}<span class="tick">${current.id === f.id ? '✓' : ''}</span></button>`).join('')}` : ''}
       ${audio.length ? `<h4>Audio</h4>${audio.map((a, i) => `<button class="vp-opt aud" data-i="${i}">${escapeHtml(a.label || a.language || 'Track ' + (i + 1))}<span class="tick">${a.enabled ? '✓' : ''}</span></button>`).join('')}` : ''}
       <h4>Subtitles</h4>
       <button class="vp-opt subo" data-m="off">Off<span class="tick">${!subOn() ? '✓' : ''}</span></button>
-      ${current.subtitle ? `<button class="vp-opt subo" data-m="on">English<span class="tick">${subOn() ? '✓' : ''}</span></button>` : ''}
+      ${cues.length || current.subtitle ? `<button class="vp-opt subo" data-m="on">English<span class="tick">${subOn() ? '✓' : ''}</span></button>` : ''}
       <button class="vp-opt" id="sub-search">Search online…</button>
       <div class="vp-offset"><span style="color:var(--muted);font-size:12px">Delay</span><button data-o="-0.25">−</button><span class="val">${subOffset.toFixed(2)}s</span><button data-o="0.25">+</button></div>`;
-    menu.querySelectorAll('.sp').forEach((b) => b.addEventListener('click', () => { video.playbackRate = +b.dataset.s; buildMenu(); }));
     menu.querySelectorAll('.ver').forEach((b) => b.addEventListener('click', () => { const f = ctx.files.find((x) => String(x.id) === b.dataset.fid); if (f && f.id !== current.id) loadFile(f, video.currentTime); buildMenu(); }));
     menu.querySelectorAll('.aud').forEach((b) => b.addEventListener('click', () => { [...video.audioTracks].forEach((a, i) => (a.enabled = i === +b.dataset.i)); buildMenu(); }));
-    menu.querySelectorAll('.subo').forEach((b) => b.addEventListener('click', () => { const tt = video.textTracks[0]; if (b.dataset.m === 'off') { if (tt) tt.mode = 'hidden'; } else if (tt) tt.mode = 'showing'; buildMenu(); }));
+    menu.querySelectorAll('.subo').forEach((b) => b.addEventListener('click', () => { subVisible = b.dataset.m === 'on'; renderSub(); buildMenu(); }));
     const ss = menu.querySelector('#sub-search');
-    if (ss) ss.addEventListener('click', () => { menu.classList.add('hidden'); openSubSearch(ctx.searchKind, current.id, video, (url) => { current.subtitle = true; setSubtitle(url); }); });
-    menu.querySelectorAll('.vp-offset button').forEach((b) => b.addEventListener('click', () => { subOffset = Math.round((subOffset + +b.dataset.o) * 100) / 100; applyOffset(); buildMenu(); }));
+    if (ss) ss.addEventListener('click', () => { menu.classList.add('hidden'); openSubSearch(ctx.searchKind, current.id, video, (url) => { current.subtitle = true; subVisible = true; setSubtitle(url); }); });
+    menu.querySelectorAll('.vp-offset button').forEach((b) => b.addEventListener('click', () => { subOffset = Math.round((subOffset + +b.dataset.o) * 100) / 100; renderSub(); buildMenu(); }));
   }
   gear.addEventListener('click', () => { if (menu.classList.contains('hidden')) { buildMenu(); menu.classList.remove('hidden'); } else menu.classList.add('hidden'); });
   vp.addEventListener('click', (e) => { if (!menu.contains(e.target) && e.target !== gear) menu.classList.add('hidden'); });
@@ -716,7 +806,7 @@ search.addEventListener('input', () => {
   heroEl.classList.add('hidden');
   const mm = movies.filter((m) => m.title.toLowerCase().includes(q)).map((m) => buildMediaCard(m, 'movie'));
   const ss = shows.filter((s) => s.title.toLowerCase().includes(q)).map((s) => buildMediaCard(s, 'show'));
-  drawRows([[`Results for “${search.value.trim()}”`, [...mm, ...ss]]]);
+  drawRows([{ title: `Results for “${search.value.trim()}”`, cards: [...mm, ...ss] }]);
 });
 
 // ---------- Subtitle search ----------

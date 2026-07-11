@@ -41,6 +41,12 @@ Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed
   library (with a count).
 - **Season cards with artwork** — the show view uses TMDB season poster cards (via
   `/api/shows/:id/extra`) instead of number pills.
+- **Player v2 + episode details + categories**: subtitle search now appears **above** the
+  player; **custom subtitle renderer** (no freeze on version switch, clean delay/offset,
+  styled captions); removed playback speed; SVG-icon player polish. **Episode details screen**
+  (still/overview/version selector/Resume/From-beginning) before playing. **More home
+  categories** (Recently Released, Unwatched, New Episodes…) and every row has **"See all" →
+  full grid**.
 - **Franchise / collection grouping** — movie detail shows a "… Collection" section (TMDB
   `belongs_to_collection` → `/collection/{id}`), entries in order, owned ones playable.
 - **Full cinematic detail page** (movies + shows): full-page takeover with a big backdrop splash

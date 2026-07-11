@@ -149,6 +149,8 @@ button { font-family: inherit; }
   display: flex; align-items: baseline; gap: 10px; padding: 0 var(--edge); margin-bottom: 4px;
 }
 .row-title { font-size: 20px; font-weight: 700; margin: 0; }
+.see-all { margin-left: auto; background: none; border: none; color: var(--muted); cursor: pointer; font-size: 13px; font-weight: 600; }
+.see-all:hover { color: var(--accent-2); }
 .row-track {
   display: flex; gap: 12px; overflow-x: auto; overflow-y: hidden; scroll-behavior: smooth;
   padding: 26px var(--edge); scrollbar-width: none;
@@ -328,7 +330,7 @@ button { font-family: inherit; }
 
 /* ---------- Generic modals (settings / picker / subtitles) ---------- */
 .modal {
-  position: fixed; inset: 0; z-index: 65; display: flex; align-items: center; justify-content: center;
+  position: fixed; inset: 0; z-index: 120; display: flex; align-items: center; justify-content: center;
   padding: 24px; background: rgba(6, 7, 10, 0.72); backdrop-filter: blur(8px);
 }
 .sheet {
@@ -456,6 +458,28 @@ button { font-family: inherit; }
 .vp-upnext .un-label { color: var(--muted); font-size: 12px; }
 .vp-upnext .un-title { font-weight: 700; margin: 3px 0 10px; }
 .vp-upnext .un-actions { display: flex; gap: 8px; }
+
+/* player polish */
+.vp-ctrls { gap: 14px; }
+.vp-ctrls button { display: inline-flex; align-items: center; justify-content: center; padding: 7px; border-radius: 9px; color: #eef1f8; }
+.vp-ctrls button:hover { background: rgba(255, 255, 255, 0.13); color: #fff; }
+.vp-ctrls button svg { width: 24px; height: 24px; display: block; }
+.vp-cc { font-weight: 800 !important; font-size: 13px !important; letter-spacing: 0.5px; border: 1.5px solid currentColor !important; border-radius: 5px !important; padding: 2px 5px !important; }
+.vp-bigplay svg { width: 42px; height: 42px; }
+.vp-skip { position: relative; }
+.vp-skip svg { width: 30px; height: 30px; }
+.vp-skip b { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 800; padding-top: 3px; }
+.vp-played { position: relative; }
+.vp-played::after { content: ''; position: absolute; right: -6px; top: 50%; transform: translateY(-50%); width: 13px; height: 13px; border-radius: 50%; background: #fff; opacity: 0; transition: opacity 0.12s ease; box-shadow: 0 1px 4px rgba(0,0,0,0.5); }
+.vp-scrub:hover .vp-played::after { opacity: 1; }
+.vp-scrub:hover .vp-track, .vp-scrub:hover .vp-buffered, .vp-scrub:hover .vp-played { height: 6px; }
+.vp-subs {
+  position: absolute; left: 0; right: 0; bottom: 13%; z-index: 3; text-align: center; pointer-events: none; padding: 0 8%;
+  font-size: clamp(18px, 2.5vw, 30px); font-weight: 600; line-height: 1.35; color: #fff;
+  text-shadow: 0 2px 5px rgba(0,0,0,0.95), 0 0 3px rgba(0,0,0,0.9);
+}
+.vp-subs:empty { display: none; }
+.vp.hide-ui .vp-subs { bottom: 8%; }
 
 /* ---------- Skeleton ---------- */
 .skel { background: linear-gradient(90deg, #171a22 25%, #20242f 50%, #171a22 75%); background-size: 200% 100%;
