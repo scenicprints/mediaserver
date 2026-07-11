@@ -86,6 +86,7 @@ function renderView() {
   if (currentView !== 'livetv') stopLiveTv();
   if (currentView === 'library') { renderLibrary(); return; }
   if (currentView === 'collections') { renderCollections(); return; }
+  if (currentView === 'requests') { renderRequests(); return; }
   if (currentView === 'livetv') { renderLiveTv(); return; }
   rowsEl.style.paddingTop = '';
   const top = [], rest = [];
@@ -245,6 +246,93 @@ async function openCollection(id) {
   detail.scrollTop = 0;
   const g = document.getElementById('coll-items');
   items.forEach((m) => g.appendChild(buildMediaCard(m, 'movie')));
+}
+
+// ---------- Requests (Radarr / Sonarr) ----------
+let reqSearchTimer = null;
+async function renderRequests() {
+  heroEl.classList.add('hidden');
+  rowsEl.style.paddingTop = '78px';
+  rowsEl.innerHTML = `
+    <div class="requests">
+      <div class="req-head">
+        <h2 class="req-title">Request something</h2>
+        <p class="muted" id="req-sub">Can't find a movie or show? Search for it — it'll be sent to your downloaders and show up when it's ready.</p>
+        <input id="req-search" class="req-input" type="search" placeholder="Search for a movie or TV show to request…" autocomplete="off" />
+      </div>
+      <div id="req-results" class="req-results"></div>
+    </div>`;
+  const input = document.getElementById('req-search');
+  const results = document.getElementById('req-results');
+
+  let status;
+  try { status = await (await fetch('/api/requests/status')).json(); } catch { status = {}; }
+  const radarrOk = status.radarr && status.radarr.ok;
+  const sonarrOk = status.sonarr && status.sonarr.ok;
+  if (!radarrOk && !sonarrOk) {
+    const both = status.radarr, so = status.sonarr;
+    const detail = (both && both.configured) || (so && so.configured)
+      ? 'Configured, but the server can\'t reach them right now. Check the URLs/keys in Settings.'
+      : 'Not set up yet.';
+    results.innerHTML = `<div class="req-empty">
+      <p><b>Requests need Radarr and/or Sonarr.</b></p>
+      <p class="muted">${detail}</p>
+      <button class="btn primary" id="req-settings">⚙ Open Settings</button></div>`;
+    document.getElementById('req-settings').addEventListener('click', openSettings);
+    input.disabled = true;
+    return;
+  }
+  document.getElementById('req-sub').textContent =
+    `Connected to ${[radarrOk && 'Radarr (movies)', sonarrOk && 'Sonarr (TV)'].filter(Boolean).join(' and ')}. Search below.`;
+
+  input.focus();
+  input.addEventListener('input', () => {
+    clearTimeout(reqSearchTimer);
+    const q = input.value.trim();
+    if (q.length < 2) { results.innerHTML = ''; return; }
+    reqSearchTimer = setTimeout(() => doRequestSearch(q, results), 350);
+  });
+}
+
+async function doRequestSearch(q, results) {
+  results.innerHTML = '<div class="req-empty muted">Searching…</div>';
+  let list;
+  try {
+    const r = await fetch('/api/requests/search?q=' + encodeURIComponent(q));
+    if (!r.ok) { results.innerHTML = `<div class="req-empty muted">${escapeHtml((await r.json()).error || 'Search failed.')}</div>`; return; }
+    list = await r.json();
+  } catch { results.innerHTML = '<div class="req-empty muted">Search failed.</div>'; return; }
+  if (!list.length) { results.innerHTML = '<div class="req-empty muted">No matches found.</div>'; return; }
+  results.innerHTML = '';
+  for (const it of list) results.appendChild(requestCard(it));
+}
+
+function requestCard(it) {
+  const card = document.createElement('div');
+  card.className = 'req-card';
+  const owned = it.inLibrary || it.hasFile;
+  card.innerHTML = `
+    <div class="req-poster">${it.poster ? `<img src="${it.poster}" alt="" loading="lazy">` : `<span class="ph">${escapeHtml(it.title)}</span>`}
+      <span class="req-badge ${it.type}">${it.type === 'movie' ? 'MOVIE' : 'TV'}</span></div>
+    <div class="req-info">
+      <div class="req-name">${escapeHtml(it.title)}${it.year ? ` <span class="muted">(${it.year})</span>` : ''}</div>
+      <div class="req-over">${escapeHtml(it.overview || '')}</div>
+      <button class="btn ${owned ? '' : 'primary'} req-btn" ${owned ? 'disabled' : ''}>${owned ? '✓ Already in library' : '＋ Request'}</button>
+    </div>`;
+  const btn = card.querySelector('.req-btn');
+  if (!owned) btn.addEventListener('click', async () => {
+    btn.disabled = true; btn.textContent = 'Requesting…';
+    try {
+      const r = await fetch('/api/requests/add', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: it.type, tmdbId: it.tmdbId, tvdbId: it.tvdbId })
+      });
+      const d = await r.json();
+      if (r.ok) { btn.textContent = d.already ? '✓ Already requested' : '✓ Requested — searching'; btn.classList.remove('primary'); btn.classList.add('req-done'); }
+      else { btn.textContent = '⚠ ' + (d.error || 'Failed'); btn.disabled = false; }
+    } catch { btn.textContent = '⚠ Failed'; btn.disabled = false; }
+  });
+  return card;
 }
 
 // ---------- Live TV (channel surfing) ----------
@@ -1683,9 +1771,45 @@ settingsBtn.addEventListener('click', openSettings);
 
 async function openSettings() {
   settingsModal.classList.remove('hidden');
-  loadVersion(); checkForUpdate(); loadSettings(); loadFfmpeg(); loadWhisper();
+  loadVersion(); checkForUpdate(); loadSettings(); loadFfmpeg(); loadWhisper(); loadArr();
   await renderLibraries();
 }
+
+// ---- Requests: Radarr/Sonarr connection settings ----
+const arrStatus = document.getElementById('arr-status');
+const arrSave = document.getElementById('arr-save');
+const radarrUrl = document.getElementById('radarr-url');
+const radarrKey = document.getElementById('radarr-key');
+const sonarrUrl = document.getElementById('sonarr-url');
+const sonarrKey = document.getElementById('sonarr-key');
+function arrStatusText(s) {
+  const one = (name, x) => x && x.configured ? `${name} ${x.ok ? '✓ connected' + (x.version ? ' (v' + x.version + ')' : '') : '⚠ ' + (x.error || 'unreachable')}` : `${name} — not set`;
+  return `${one('Radarr', s.radarr)} · ${one('Sonarr', s.sonarr)}`;
+}
+async function loadArr() {
+  try {
+    const s = await (await fetch('/api/settings')).json();
+    if (s.radarr) radarrUrl.value = s.radarr.url || '';
+    if (s.sonarr) sonarrUrl.value = s.sonarr.url || '';
+    if (s.radarr && s.radarr.configured || s.sonarr && s.sonarr.configured) {
+      const st = await (await fetch('/api/requests/status')).json();
+      arrStatus.textContent = arrStatusText(st);
+    }
+  } catch {}
+}
+arrSave.addEventListener('click', async () => {
+  arrSave.textContent = 'Testing…'; arrSave.disabled = true;
+  const body = {
+    radarr: { url: radarrUrl.value.trim(), apiKey: radarrKey.value.trim() },
+    sonarr: { url: sonarrUrl.value.trim(), apiKey: sonarrKey.value.trim() }
+  };
+  try {
+    const st = await (await fetch('/api/settings/arr', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })).json();
+    arrStatus.textContent = arrStatusText(st);
+  } catch { arrStatus.textContent = 'Could not save.'; }
+  arrSave.textContent = 'Save & test connection'; arrSave.disabled = false;
+  radarrKey.value = ''; sonarrKey.value = ''; // don't keep secrets in the field
+});
 
 // ---- AI subtitle engine (whisper) status + one-click install ----
 const wsStatus = document.getElementById('ws-status');

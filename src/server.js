@@ -13,6 +13,7 @@ import { osEnabled, searchSubtitles, downloadSubtitle, clearAuth } from './opens
 import { detectFfmpeg, status as ffmpegStatus, installFfmpeg, playInfo, transcodeStream, ffmpegBin } from './ffmpeg.js';
 import { detectWhisper, status as whisperStatus, installWhisper, generate as generateSubs } from './whisper.js';
 import { translateVttFile } from './translate.js';
+import { radarrEnabled, sonarrEnabled, testConn, radarrSearch, radarrAdd, sonarrSearch, sonarrAdd } from './arr.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -554,6 +555,62 @@ app.get('/api/subtitles/generate', async (req) => {
   return { status: job.status, pct: job.pct, phase: job.phase, error: job.error, result: job.result };
 });
 
+// ---- Requests (Radarr / Sonarr) ----
+// Search either service and add ("request") titles you don't own yet; Radarr/
+// Sonarr then fetch them. Config (url + apiKey per service) lives in the
+// git-ignored config.json, entered via Settings.
+
+app.get('/api/requests/status', async () => ({
+  radarr: await testConn(config.radarr),
+  sonarr: await testConn(config.sonarr)
+}));
+
+app.get('/api/requests/search', async (req, reply) => {
+  const q = (req.query.q || '').trim();
+  if (!q) return [];
+  const tasks = [];
+  if (radarrEnabled(config.radarr)) tasks.push(radarrSearch(config.radarr, q).catch(() => []));
+  if (sonarrEnabled(config.sonarr)) tasks.push(sonarrSearch(config.sonarr, q).catch(() => []));
+  if (!tasks.length) return reply.code(400).send({ error: 'Radarr/Sonarr are not configured yet — add them in Settings.' });
+  const results = (await Promise.all(tasks)).flat();
+  // Interleave movies and shows, most relevant first-ish (they arrive ranked
+  // per service); keep a reasonable cap.
+  return results.slice(0, 40);
+});
+
+app.post('/api/requests/add', async (req, reply) => {
+  const { type, tmdbId, tvdbId } = req.body || {};
+  try {
+    if (type === 'movie') {
+      if (!radarrEnabled(config.radarr)) return reply.code(400).send({ error: 'Radarr is not configured.' });
+      const r = await radarrAdd(config.radarr, tmdbId);
+      return r.ok ? { ok: true, already: !!r.already, title: r.title } : reply.code(502).send({ error: r.error });
+    }
+    if (type === 'tv') {
+      if (!sonarrEnabled(config.sonarr)) return reply.code(400).send({ error: 'Sonarr is not configured.' });
+      const r = await sonarrAdd(config.sonarr, tvdbId);
+      return r.ok ? { ok: true, already: !!r.already, title: r.title } : reply.code(502).send({ error: r.error });
+    }
+    return reply.code(400).send({ error: 'unknown type' });
+  } catch (e) {
+    return reply.code(500).send({ error: e.message });
+  }
+});
+
+// Save Radarr/Sonarr connection settings (url + apiKey) to config.json.
+app.post('/api/settings/arr', async (req, reply) => {
+  const { radarr, sonarr } = req.body || {};
+  const clean = (s) => (s && s.url ? { url: s.url.trim().replace(/\/+$/, ''), apiKey: (s.apiKey || '').trim() } : undefined);
+  if (radarr !== undefined) config.radarr = clean(radarr);
+  if (sonarr !== undefined) config.sonarr = clean(sonarr);
+  try {
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), 'utf8');
+  } catch (e) {
+    return reply.code(500).send({ error: 'could not save: ' + e.message });
+  }
+  return { radarr: await testConn(config.radarr), sonarr: await testConn(config.sonarr) };
+});
+
 // ---- Subtitles: .srt sidecars served as WebVTT ----
 
 // Find external .srt subtitles for a video: next to it (loose name match, either
@@ -670,7 +727,9 @@ app.get('/api/settings', async () => ({
   openSubtitles: {
     configured: osEnabled(config.openSubtitles),
     username: (config.openSubtitles && config.openSubtitles.username) || ''
-  }
+  },
+  radarr: { configured: radarrEnabled(config.radarr), url: (config.radarr && config.radarr.url) || '' },
+  sonarr: { configured: sonarrEnabled(config.sonarr), url: (config.sonarr && config.sonarr.url) || '' }
 }));
 
 app.post('/api/settings/opensubtitles', async (req, reply) => {

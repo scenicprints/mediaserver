@@ -238,8 +238,14 @@ follow-ups + the still-gated item 4:
 - **Collections**: a Home "Your Collections" row; group TV franchises where TMDB has them.
   DONE this pass: only surface franchises with 2+ owned films.
 
-4. **Requests window → Sonarr/Radarr.** STILL GATED — **do not build until the owner greenlights.**
-   (Then: a Requests view + `requests` table; Radarr/Sonarr APIs with keys in `config.json`.)
+4. **Requests → Radarr/Sonarr — DONE (2026-07-11).** A **Requests** nav tab: type a movie/show,
+   it searches Radarr (`movie/lookup`) + Sonarr (`series/lookup`) and one click **adds + triggers
+   a search** so the downloader grabs it. `src/arr.js` talks to the v3 APIs (`X-Api-Key`), fetching
+   each instance's quality profile / root folder / language profile so nothing's hardcoded. Connect
+   in ⚙ Settings (Radarr/Sonarr URL + API key → saved in git-ignored `config.json`). Owned titles
+   show "Already in library." Verified end-to-end against a mock Radarr/Sonarr; **needs a real
+   test on the Dell's Radarr/Sonarr** (coordinate via the Dell's Claude).
+   Possible next: a status/queue view (Radarr/Sonarr `queue`), a quality-profile picker in the UI.
 
 <details><summary>Original detailed notes for items 1–3 (kept for reference)</summary>
 
