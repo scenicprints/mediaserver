@@ -21,7 +21,7 @@ android {
     // the SAME key — required for the app to update itself over the old install.
     signingConfigs {
         release {
-            def ks = file('keystore/marquee.jks')
+            def ks = rootProject.file('keystore/marquee.jks')
             if (ks.exists()) {
                 storeFile ks
                 storePassword 'marquee'
@@ -34,7 +34,7 @@ android {
     buildTypes {
         release {
             minifyEnabled false
-            if (file('keystore/marquee.jks').exists()) {
+            if (rootProject.file('keystore/marquee.jks').exists()) {
                 signingConfig signingConfigs.release
             }
         }
