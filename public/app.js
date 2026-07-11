@@ -553,6 +553,16 @@ function drawPreview() {
   const t = document.getElementById('lt-tune'); if (t) t.addEventListener('click', tuneIn);
 }
 
+// Lightweight select (hover): move the highlight + refresh the preview pane
+// without rebuilding the whole grid (avoids flicker).
+function selectChannel(i) {
+  if (!ltState || i === ltState.sel) return;
+  ltState.sel = i;
+  const rows = document.getElementById('lt-epg-rows');
+  if (rows) [...rows.children].forEach((r, idx) => r.classList.toggle('sel', idx === i));
+  drawPreview();
+}
+
 function drawEpg() {
   const rowsEl2 = document.getElementById('lt-epg-rows'); if (!rowsEl2) return;
   const now = Math.floor(Date.now() / 1000);
@@ -585,11 +595,10 @@ function drawEpg() {
     row.innerHTML = `
       <div class="lt-echan"><span class="lt-enum">${chan.number}</span><span class="lt-ename">${escapeHtml(chan.name)}</span></div>
       <div class="lt-etrack"><span class="lt-nowline" style="left:${pos(now)}%"></span>${blocks}</div>`;
-    row.querySelector('.lt-echan').addEventListener('click', () => { ltState.sel = i; drawEpg(); drawPreview(); });
-    row.querySelectorAll('.lt-block').forEach((b, bi) => b.addEventListener('click', () => {
-      ltState.sel = i; drawEpg(); drawPreview();
-      if (progs[bi] && now >= progs[bi].start && now < progs[bi].end) tuneIn();
-    }));
+    // Hover previews the channel; a single click tunes straight in — no need to
+    // go back up to a Tune In button.
+    row.addEventListener('mouseenter', () => selectChannel(i));
+    row.addEventListener('click', () => { ltState.sel = i; tuneIn(); });
     rowsEl2.appendChild(row);
   });
   const sel = rowsEl2.children[ltState.sel];
