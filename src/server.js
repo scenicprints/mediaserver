@@ -849,7 +849,7 @@ async function start() {
   // Scan on startup so the library is fresh, then kick off enrichment in the
   // background (don't block the server coming up).
   const scan = scanLibraries(db);
-  console.log(`Scan complete: ${scan.added} new file(s), ${scan.seen} video file(s) seen.`);
+  console.log(`Scan complete: ${scan.added} new file(s), ${scan.seen} video file(s) seen${scan.removed ? `, ${scan.removed} stale file(s) pruned` : ''}.`);
 
   if (config.tmdbApiKey) {
     (async () => {

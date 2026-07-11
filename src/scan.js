@@ -105,7 +105,43 @@ export function scanLibraries(db) {
       });
     }
   }
-  return { added, seen };
+  const { removed } = pruneMissing(db);
+  return { added, seen, removed };
+}
+
+// Remove DB rows for files that were deleted or replaced on disk, then drop any
+// logical movie/episode/show left with no files. The files on disk are the
+// source of truth. SAFETY: only prune within libraries whose root is currently
+// reachable — a temporarily disconnected drive (unplugged USB, offline share)
+// must never wipe its whole library.
+export function pruneMissing(db) {
+  const libs = db.prepare('SELECT id, path FROM libraries').all();
+  const reachable = new Set();
+  for (const lib of libs) {
+    try {
+      if (fs.statSync(path.resolve(lib.path)).isDirectory()) reachable.add(lib.id);
+    } catch { /* unreadable/missing root — leave its rows untouched */ }
+  }
+
+  let removed = 0;
+  const delMovieFile = db.prepare('DELETE FROM movie_files WHERE id = ?');
+  for (const f of db.prepare('SELECT id, path, library_id FROM movie_files').all()) {
+    if (!reachable.has(f.library_id)) continue;
+    if (!fs.existsSync(f.path)) { delMovieFile.run(f.id); removed++; }
+  }
+  const delEpFile = db.prepare('DELETE FROM episode_files WHERE id = ?');
+  for (const f of db.prepare('SELECT id, path, library_id FROM episode_files').all()) {
+    if (!reachable.has(f.library_id)) continue;
+    if (!fs.existsSync(f.path)) { delEpFile.run(f.id); removed++; }
+  }
+
+  // Drop logical rows that no longer have any files (same cleanup the
+  // library-delete handler uses).
+  db.prepare('DELETE FROM movies WHERE id NOT IN (SELECT DISTINCT movie_id FROM movie_files)').run();
+  db.prepare('DELETE FROM episodes WHERE id NOT IN (SELECT DISTINCT episode_id FROM episode_files)').run();
+  db.prepare('DELETE FROM shows WHERE id NOT IN (SELECT DISTINCT show_id FROM episodes)').run();
+
+  return { removed };
 }
 
 function walk(dir, cb) {
