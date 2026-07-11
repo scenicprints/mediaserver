@@ -48,6 +48,7 @@ node C:\Users\jkevi\mediaserver\src\server.js
 | `src/parse.js` | Filename parsing: `parseMovie`, `parseEpisode`, `detectQuality`, `scrubTitle`, group keys |
 | `src/tmdb.js` | TMDB: `enrichLibrary` (movies), `enrichShows`, `enrichEpisodes` |
 | `src/opensubtitles.js` | OpenSubtitles: `searchSubtitles`, `downloadSubtitle`, login/token |
+| `src/ffmpeg.js` | Playback engine: FFmpeg detect + one-click install (→ `tools/`, git-ignored), ffprobe probing, direct-vs-transcode decision, live fMP4 transcode |
 | `src/fsbrowse.js` | Server-side folder browser for the in-app picker |
 | `src/scan-cli.js`, `src/enrich-cli.js` | Standalone CLI helpers (`npm run scan` / `enrich`) |
 | `public/index.html` | UI markup (grids, modals, player, overlays) |
@@ -117,6 +118,10 @@ an update.
 - Sample data: `sample-media/` (movies, incl. tricky `(500) Days of Summer` and scene-named
   files) and `sample-tv/` (Breaking Bad / The Office). These are placeholder files — they
   don't actually play, but they exercise scanning/metadata/UI.
+- **Real playable test media** (dev machine): `C:\Users\jkevi\mediaserver-testmedia\` —
+  ffmpeg-generated `Transcode Test (2020) 1080p.mkv` (HEVC+AC3 → exercises the transcode
+  path; has a matching `.srt`) and `Direct Test (2021) 720p.mp4` (H264+AAC → direct play).
+  Added as a movie library in the dev DB. Regenerate with ffmpeg's `testsrc2`/`sine` if lost.
 - Browser checks via the preview tools: **screenshots hang on remote TMDB poster images —
   use `preview_snapshot` / `preview_eval` to read the DOM instead.**
 - Simulate progress by POSTing to `/progress`; simulate an episode ending with

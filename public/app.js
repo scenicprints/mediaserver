@@ -330,10 +330,20 @@ function versionLabel(f, i) {
   const tags = fileTags(f.filename); if (tags.length) parts.push(tags.join(' · '));
   return parts.join('   ·   ');
 }
-// Default to the quality the user last chose, if that version exists.
-function preferredFile(files) {
+// Version memory: this title's last-played version first (verid:m12 / verid:e34
+// → file id), then the last quality picked anywhere (pq), then the first file.
+function preferredFile(files, key) {
+  if (key) {
+    const f = files.find((x) => x.id === +localStorage.getItem('verid:' + key));
+    if (f) return f;
+  }
   const pq = localStorage.getItem('pq');
   return (pq && files.find((f) => f.quality === pq)) || files[0] || null;
+}
+function rememberVersion(key, f) {
+  if (!f) return;
+  if (key) localStorage.setItem('verid:' + key, f.id);
+  if (f.quality) localStorage.setItem('pq', f.quality);
 }
 function playTrailer(key) {
   const ov = document.createElement('div');
@@ -351,7 +361,7 @@ async function openDetail(id, autoplay = true) {
     fetch('/api/movies/' + id + '/extra').then((r) => r.json()).catch(() => ({}))
   ]);
   const files = m.files || [];
-  let current = preferredFile(files);
+  let current = preferredFile(files, 'm' + m.id);
   const resume = m.resume_position && m.resume_position > 5 ? m.resume_position : 0;
   const runtime = extra.runtime ? `${Math.floor(extra.runtime / 60)}h ${extra.runtime % 60}m` : '';
   const genres = extra.genres || [];
@@ -392,11 +402,12 @@ async function openDetail(id, autoplay = true) {
   detail.scrollTop = 0;
 
   const sel = document.getElementById('ver-select');
-  if (sel) sel.addEventListener('change', () => { const f = files.find((x) => String(x.id) === sel.value); if (f) { current = f; localStorage.setItem('pq', f.quality || ''); } });
+  if (sel && current) sel.value = String(current.id); // reflect the remembered version
+  if (sel) sel.addEventListener('change', () => { const f = files.find((x) => String(x.id) === sel.value); if (f) { current = f; rememberVersion('m' + m.id, f); } });
 
   function play(at) {
     openPlayer({
-      title: m.title, files, startFileId: current.id,
+      title: m.title, files, startFileId: current.id, verKey: 'm' + m.id,
       streamBase: '/api/stream/', subtitleBase: '/api/subtitle/', searchKind: 'movie',
       startAt: at, progressUrl: `/api/movies/${m.id}/progress`, upNext: null, onEnded: null
     });
@@ -475,7 +486,7 @@ function playEpisodeAt(show, flat, i, opts = {}) {
   openPlayer({
     title: show.title,
     subtitle: episodeSub(ep),
-    files, startFileId: opts.fileId || preferredFile(files).id,
+    files, startFileId: opts.fileId || preferredFile(files, 'e' + ep.id).id, verKey: 'e' + ep.id,
     streamBase: '/api/stream/episode/', subtitleBase: '/api/subtitle/episode/', searchKind: 'episode',
     startAt: opts.startAt != null ? opts.startAt : (ep.resume_position > 5 ? ep.resume_position : 0),
     progressUrl: `/api/episodes/${ep.id}/progress`,
@@ -487,7 +498,7 @@ function playEpisodeAt(show, flat, i, opts = {}) {
 async function openEpisodeDetail(show, flat, i) {
   const ep = flat[i].ep;
   const files = ep.files || [];
-  let current = preferredFile(files);
+  let current = preferredFile(files, 'e' + ep.id);
   const resume = ep.resume_position && ep.resume_position > 5 ? ep.resume_position : 0;
   const extra = await fetch(`/api/episodes/${ep.id}/extra`).then((r) => r.json()).catch(() => ({}));
   const still = extra.still || ep.still || show.backdrop || show.poster || '';
@@ -535,7 +546,8 @@ async function openEpisodeDetail(show, flat, i) {
   }
 
   const sel = document.getElementById('ep-ver');
-  if (sel) sel.addEventListener('change', () => { const f = files.find((x) => String(x.id) === sel.value); if (f) { current = f; localStorage.setItem('pq', f.quality || ''); } });
+  if (sel && current) sel.value = String(current.id); // reflect the remembered version
+  if (sel) sel.addEventListener('change', () => { const f = files.find((x) => String(x.id) === sel.value); if (f) { current = f; rememberVersion('e' + ep.id, f); } });
   const playAt = (at) => playEpisodeAt(show, flat, i, { fileId: current.id, startAt: at });
   if (resume) {
     document.getElementById('ep-resume').addEventListener('click', () => playAt(resume));
@@ -694,6 +706,24 @@ function openPlayer(ctx) {
   let currentSubIdx = -1;
   let upnextShown = false;
   const subUrl = (idx) => `${ctx.subtitleBase}${current.id}?idx=${idx}`;
+  // Caption delay is remembered per file+track and restored next time.
+  const delayKey = () => `sd:${current.id}:${currentSubIdx}`;
+  const loadDelay = () => { subOffset = parseFloat(localStorage.getItem(delayKey())) || 0; };
+  const saveDelay = () => { if (subOffset) localStorage.setItem(delayKey(), subOffset); else localStorage.removeItem(delayKey()); };
+
+  // Playback mode: `direct` (native range streaming, seekable) or `transcode`
+  // (ffmpeg fragmented-MP4 pipe for formats the browser can't play). Transcode
+  // streams always begin at 0, so the player keeps a virtual timeline: real
+  // position = base + video.currentTime, and seeking restarts the stream.
+  let play = { mode: 'direct', duration: null, url: '', reason: null };
+  let base = 0;
+  const cur = () => (play.mode === 'transcode' ? base + video.currentTime : video.currentTime);
+  const dur = () => play.duration || video.duration || 0;
+  function seekTo(t) {
+    t = Math.max(0, dur() ? Math.min(t, dur() - 0.3) : t);
+    if (play.mode === 'transcode') { base = t; video.src = play.url + '?start=' + t.toFixed(2); video.play(); }
+    else video.currentTime = t;
+  }
 
   const vp = document.createElement('div');
   vp.className = 'vp';
@@ -723,7 +753,8 @@ function openPlayer(ctx) {
     </div>
     <button class="vp-skipintro hidden">Skip Intro ⏭</button>
     <div class="vp-menu hidden"></div>
-    <div class="vp-upnext hidden"></div>`;
+    <div class="vp-upnext hidden"></div>
+    <div class="vp-error hidden"></div>`;
   document.body.appendChild(vp);
   document.body.style.overflow = 'hidden';
   activePlayer = vp;
@@ -737,7 +768,15 @@ function openPlayer(ctx) {
   const timeEl = vp.querySelector('.vp-time');
   const playBtns = [vp.querySelector('.vp-play'), vp.querySelector('.vp-bigplay')];
   const skipIntro = vp.querySelector('.vp-skipintro');
-  skipIntro.addEventListener('click', () => { video.currentTime = Math.min((video.duration || 9e9), video.currentTime + 80); skipIntro.classList.add('hidden'); });
+  skipIntro.addEventListener('click', () => { seekTo(cur() + 80); skipIntro.classList.add('hidden'); });
+  const errEl = vp.querySelector('.vp-error');
+  video.addEventListener('error', () => {
+    if (!video.getAttribute('src')) return;
+    errEl.innerHTML = play.reason === 'no-ffmpeg'
+      ? `<b>The browser can't play this file format.</b><span>Install the playback engine (one click in ⚙ Settings on the server) and it will play everything — MKV, HEVC, AVI, surround audio…</span>`
+      : `<b>Playback failed.</b><span>This file may be corrupt or use a codec the player can't read.</span>`;
+    errEl.classList.remove('hidden');
+  });
 
   const subsDiv = vp.querySelector('.vp-subs');
   function parseVtt(text) {
@@ -746,10 +785,11 @@ function openPlayer(ctx) {
       const lines = block.split('\n').filter((l) => l.trim() !== '');
       const timeLine = lines.find((l) => l.includes('-->'));
       if (!timeLine) return;
-      const m = timeLine.match(/(\d{2}):(\d{2}):(\d{2})[.,](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[.,](\d{3})/);
+      // Hours are optional (VTT allows MM:SS.mmm), milliseconds . or , (SRT).
+      const m = timeLine.match(/(?:(\d{1,2}):)?(\d{2}):(\d{2})[.,](\d{3})\s*-->\s*(?:(\d{1,2}):)?(\d{2}):(\d{2})[.,](\d{3})/);
       if (!m) return;
-      const start = +m[1] * 3600 + +m[2] * 60 + +m[3] + +m[4] / 1000;
-      const end = +m[5] * 3600 + +m[6] * 60 + +m[7] + +m[8] / 1000;
+      const start = (+m[1] || 0) * 3600 + +m[2] * 60 + +m[3] + +m[4] / 1000;
+      const end = (+m[5] || 0) * 3600 + +m[6] * 60 + +m[7] + +m[8] / 1000;
       const body = lines.slice(lines.indexOf(timeLine) + 1).join('\n').replace(/<[^>]+>/g, '');
       out.push({ start, end, html: escapeHtml(body).replace(/\n/g, '<br>') });
     });
@@ -763,19 +803,36 @@ function openPlayer(ctx) {
   }
   function renderSub() {
     if (!subVisible || !cues.length) { subsDiv.innerHTML = ''; return; }
-    const t = video.currentTime - subOffset;
-    const cue = cues.find((c) => t >= c.start && t <= c.end);
-    subsDiv.innerHTML = cue ? cue.html : '';
+    const t = cur() - subOffset;
+    const active = cues.filter((c) => t >= c.start && t <= c.end);
+    subsDiv.innerHTML = active.map((c) => c.html).join('<br>');
   }
-  function subOn() { return subVisible && cues.length > 0; }
+  // Cues update on a short timer, not just `timeupdate` (which only fires ~4×/s
+  // and made captions appear late / linger).
+  const subTimer = setInterval(renderSub, 200);
 
-  function loadFile(f, at) {
+  async function loadFile(f, at) {
     current = f;
-    video.src = ctx.streamBase + f.id;
-    video.addEventListener('loadedmetadata', () => { if (at) video.currentTime = at; video.play(); }, { once: true });
+    errEl.classList.add('hidden');
+    // Ask the server how to play this file (direct vs ffmpeg transcode) and
+    // for its real duration. Falls back to direct if the endpoint fails.
+    let info = null;
+    try { info = await (await fetch(`/api/play/${ctx.searchKind}/${f.id}`)).json(); } catch {}
+    play = info && info.mode === 'transcode'
+      ? { mode: 'transcode', duration: info.duration || null, url: info.url, reason: null }
+      : { mode: 'direct', duration: (info && info.duration) || null, url: ctx.streamBase + f.id, reason: (info && info.reason) || null };
+    base = 0;
+    if (play.mode === 'transcode') {
+      base = at || 0;
+      video.src = play.url + '?start=' + (at || 0);
+      video.addEventListener('loadedmetadata', () => video.play(), { once: true });
+    } else {
+      video.src = play.url;
+      video.addEventListener('loadedmetadata', () => { if (at) video.currentTime = at; video.play(); }, { once: true });
+    }
     const subs = current.subtitles || [];
-    if (subs.length) { currentSubIdx = 0; subVisible = true; setSubtitle(subUrl(0)); }
-    else { currentSubIdx = -1; setSubtitle(null); }
+    if (subs.length) { currentSubIdx = 0; subVisible = true; loadDelay(); setSubtitle(subUrl(0)); }
+    else { currentSubIdx = -1; subOffset = 0; setSubtitle(null); }
   }
   loadFile(current, ctx.startAt || 0);
 
@@ -785,21 +842,25 @@ function openPlayer(ctx) {
   video.addEventListener('click', togglePlay);
   video.addEventListener('play', setPlayIcons);
   video.addEventListener('pause', setPlayIcons);
-  vp.querySelectorAll('.vp-skip').forEach((b) => b.addEventListener('click', () => { video.currentTime += +b.dataset.d; }));
+  vp.querySelectorAll('.vp-skip').forEach((b) => b.addEventListener('click', () => { seekTo(cur() + +b.dataset.d); }));
 
-  // scrub + time
+  // scrub + time (all through cur()/dur() so transcode's virtual timeline works)
   let seeking = false;
   video.addEventListener('timeupdate', () => {
-    if (!seeking && video.duration) { const p = video.currentTime / video.duration; playedBar.style.width = p * 100 + '%'; seek.value = p * 1000; }
-    timeEl.textContent = `${fmtTime(video.currentTime)} / ${fmtTime(video.duration)}`;
-    if (video.buffered.length) bufferedBar.style.width = (video.buffered.end(video.buffered.length - 1) / (video.duration || 1)) * 100 + '%';
-    skipIntro.classList.toggle('hidden', !(video.currentTime >= 5 && video.currentTime <= 90));
+    const d = dur();
+    if (!seeking && d) { const p = cur() / d; playedBar.style.width = p * 100 + '%'; seek.value = p * 1000; }
+    timeEl.textContent = `${fmtTime(cur())} / ${fmtTime(d)}`;
+    if (video.buffered.length && d) {
+      const buffered = (play.mode === 'transcode' ? base : 0) + video.buffered.end(video.buffered.length - 1);
+      bufferedBar.style.width = Math.min(100, (buffered / d) * 100) + '%';
+    }
+    skipIntro.classList.toggle('hidden', !(cur() >= 5 && cur() <= 90));
     renderSub();
     maybeUpNext();
     throttledSave();
   });
-  seek.addEventListener('input', () => { seeking = true; if (video.duration) playedBar.style.width = (seek.value / 10) + '%'; });
-  seek.addEventListener('change', () => { if (video.duration) video.currentTime = (seek.value / 1000) * video.duration; seeking = false; });
+  seek.addEventListener('input', () => { seeking = true; if (dur()) playedBar.style.width = (seek.value / 10) + '%'; });
+  seek.addEventListener('change', () => { if (dur()) seekTo((seek.value / 1000) * dur()); seeking = false; });
 
   // volume
   const mute = vp.querySelector('.vp-mute'), volbar = vp.querySelector('.vp-volbar');
@@ -809,15 +870,30 @@ function openPlayer(ctx) {
   // fullscreen
   vp.querySelector('.vp-fs').addEventListener('click', () => { if (document.fullscreenElement) document.exitFullscreen(); else vp.requestFullscreen?.(); });
 
-  // subtitles quick toggle
+  // subtitles quick toggle (no tracks at all -> jump straight to online search)
+  function onSubDownloaded() {
+    current.subtitles = current.subtitles || [];
+    current.subtitles.unshift({ label: 'Downloaded', idx: 0 });
+    currentSubIdx = 0; subVisible = true; loadDelay(); setSubtitle(subUrl(0));
+  }
   vp.querySelector('.vp-cc').addEventListener('click', () => {
     const subs = current.subtitles || [];
-    if (currentSubIdx < 0 && subs.length) { currentSubIdx = 0; subVisible = true; setSubtitle(subUrl(0)); }
+    if (!subs.length) { openSubSearch(ctx.searchKind, current.id, video, onSubDownloaded); return; }
+    if (currentSubIdx < 0) { currentSubIdx = 0; subVisible = true; loadDelay(); setSubtitle(subUrl(0)); }
     else { subVisible = !subVisible; renderSub(); }
   });
 
-  // settings menu
+  // settings menu — navigable by remote: Up/Down move a highlighted option,
+  // Enter activates, Left/Right nudge the caption delay, Back closes.
   const gear = vp.querySelector('.vp-gear');
+  let menuIdx = 0;
+  const menuBtns = () => [...menu.querySelectorAll('button')];
+  function paintMenu() {
+    const btns = menuBtns();
+    menuIdx = Math.max(0, Math.min(menuIdx, btns.length - 1));
+    btns.forEach((b, i) => b.classList.toggle('focused', i === menuIdx));
+    if (btns[menuIdx]) btns[menuIdx].scrollIntoView({ block: 'nearest' });
+  }
   function buildMenu() {
     const audio = video.audioTracks && video.audioTracks.length > 1 ? [...video.audioTracks] : [];
     const subs = current.subtitles || [];
@@ -831,34 +907,34 @@ function openPlayer(ctx) {
       <div class="vp-offset"><span style="color:var(--muted);font-size:12px">Delay</span><button data-o="-0.25">−</button><span class="val">${subOffset.toFixed(2)}s</span><button data-o="0.25">+</button></div>`;
     menu.querySelectorAll('.ver').forEach((b) => b.addEventListener('click', () => {
       const f = ctx.files.find((x) => String(x.id) === b.dataset.fid);
-      if (f && f.id !== current.id) { localStorage.setItem('pq', f.quality || ''); loadFile(f, video.currentTime); }
+      if (f && f.id !== current.id) { rememberVersion(ctx.verKey, f); loadFile(f, cur()); }
       buildMenu();
     }));
     menu.querySelectorAll('.aud').forEach((b) => b.addEventListener('click', () => { [...video.audioTracks].forEach((a, i) => (a.enabled = i === +b.dataset.i)); buildMenu(); }));
     menu.querySelectorAll('.subt').forEach((b) => b.addEventListener('click', () => {
       const i = +b.dataset.i;
       if (i < 0) { subVisible = false; renderSub(); }
-      else { currentSubIdx = i; subVisible = true; setSubtitle(subUrl(i)); }
+      else { currentSubIdx = i; subVisible = true; loadDelay(); setSubtitle(subUrl(i)); }
       buildMenu();
     }));
     const ss = menu.querySelector('#sub-search');
     if (ss) ss.addEventListener('click', () => {
       menu.classList.add('hidden');
-      openSubSearch(ctx.searchKind, current.id, video, () => {
-        current.subtitles = current.subtitles || [];
-        current.subtitles.unshift({ label: 'Downloaded', idx: 0 });
-        currentSubIdx = 0; subVisible = true; setSubtitle(subUrl(0));
-      });
+      openSubSearch(ctx.searchKind, current.id, video, onSubDownloaded);
     });
-    menu.querySelectorAll('.vp-offset button').forEach((b) => b.addEventListener('click', () => { subOffset = Math.round((subOffset + +b.dataset.o) * 100) / 100; renderSub(); buildMenu(); }));
+    menu.querySelectorAll('.vp-offset button').forEach((b) => b.addEventListener('click', () => { subOffset = Math.round((subOffset + +b.dataset.o) * 100) / 100; saveDelay(); renderSub(); buildMenu(); }));
+    paintMenu();
   }
-  gear.addEventListener('click', () => { if (menu.classList.contains('hidden')) { buildMenu(); menu.classList.remove('hidden'); } else menu.classList.add('hidden'); });
-  vp.addEventListener('click', (e) => { if (!menu.contains(e.target) && !gear.contains(e.target)) menu.classList.add('hidden'); });
+  gear.addEventListener('click', () => { if (menu.classList.contains('hidden')) { menuIdx = 0; buildMenu(); menu.classList.remove('hidden'); } else menu.classList.add('hidden'); });
+  // Close on outside click. Buttons inside the menu re-render it, so their
+  // e.target is detached by the time this runs — a detached target must NOT
+  // count as "outside" (that's what made the delay popup close on every press).
+  vp.addEventListener('click', (e) => { if (!e.target.isConnected) return; if (!menu.contains(e.target) && !gear.contains(e.target)) menu.classList.add('hidden'); });
 
   // up next
   function maybeUpNext() {
-    if (!ctx.upNext || upnextShown || !video.duration) return;
-    if (video.duration - video.currentTime <= 22) {
+    if (!ctx.upNext || upnextShown || !dur()) return;
+    if (dur() - cur() <= 22) {
       upnextShown = true;
       upnext.innerHTML = `
         <div class="un-still" style="background-image:url('${ctx.upNext.still || ''}')"></div>
@@ -875,11 +951,16 @@ function openPlayer(ctx) {
   let lastSave = 0;
   function save() {
     fetch(ctx.progressUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ position: video.currentTime, duration: video.duration || null, watched: video.duration && video.currentTime / video.duration > 0.92 ? 1 : null }) });
+      body: JSON.stringify({ position: cur(), duration: dur() || null, watched: dur() && cur() / dur() > 0.92 ? 1 : null }) });
   }
   function throttledSave() { if (Date.now() - lastSave > 5000) { lastSave = Date.now(); save(); } }
   video.addEventListener('pause', save);
-  video.addEventListener('ended', () => { save(); if (ctx.onEnded) ctx.onEnded(); });
+  video.addEventListener('ended', () => {
+    save();
+    // A transcode stream ending mid-film is a hiccup, not the credits.
+    if (play.mode === 'transcode' && dur() && cur() < dur() - 8) return;
+    if (ctx.onEnded) ctx.onEnded();
+  });
 
   // auto-hide chrome
   let hideTimer;
@@ -887,20 +968,46 @@ function openPlayer(ctx) {
   vp.addEventListener('mousemove', showUI);
   showUI();
 
-  // close + keyboard
+  // close + keyboard (remote-friendly: arrows seek / open the menu, Enter is
+  // play-pause, Backspace is the remote's Back button)
   function close() { save(); if (document.fullscreenElement) document.exitFullscreen(); vp.remove(); activePlayer = null; document.body.style.overflow = 'hidden'; }
   vp.querySelector('.vp-back').addEventListener('click', close);
   vp._onKey = (e) => {
-    if (e.key === 'Escape') { if (document.fullscreenElement) return; e.stopPropagation(); close(); }
-    else if (e.key === ' ' || e.key === 'k') { e.preventDefault(); togglePlay(); }
-    else if (e.key === 'ArrowLeft') video.currentTime -= 5;
-    else if (e.key === 'ArrowRight') video.currentTime += 5;
+    const a = document.activeElement;
+    if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA')) return; // typing (subtitle search)
+    const menuOpen = !menu.classList.contains('hidden');
+    const subsOpen = !document.getElementById('subs').classList.contains('hidden');
+    if (e.key === 'Escape' || e.key === 'Backspace') {
+      if (document.fullscreenElement && e.key === 'Escape') return; // browser exits fullscreen first
+      e.preventDefault(); e.stopPropagation();
+      if (subsOpen) document.getElementById('subs').classList.add('hidden');
+      else if (menuOpen) menu.classList.add('hidden');
+      else close();
+      return;
+    }
+    if (subsOpen) return; // the subtitle-results modal handles its own clicks
+    if (menuOpen) {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); menuIdx += e.key === 'ArrowDown' ? 1 : -1; paintMenu(); }
+      else if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); const b = menuBtns()[menuIdx]; if (b) b.click(); }
+      else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        e.preventDefault();
+        const b = menu.querySelector(`.vp-offset button[data-o="${e.key === 'ArrowLeft' ? '-0.25' : '0.25'}"]`);
+        if (b) b.click(); // Left/Right nudge caption delay while the menu is up
+      }
+      return;
+    }
+    if (e.key === ' ' || e.key === 'k' || e.key === 'Enter') { e.preventDefault(); togglePlay(); showUI(); }
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); seekTo(cur() - 10); showUI(); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); seekTo(cur() + 10); showUI(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); menuIdx = 0; buildMenu(); menu.classList.remove('hidden'); showUI(); }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); showUI(); }
     else if (e.key === 'f') vp.querySelector('.vp-fs').click();
     else if (e.key === 'm') mute.click();
+    else if (e.key === 'c') vp.querySelector('.vp-cc').click();
   };
   document.addEventListener('keydown', vp._onKey, true);
   const origRemove = vp.remove.bind(vp);
-  vp.remove = () => { document.removeEventListener('keydown', vp._onKey, true); origRemove(); };
+  vp.remove = () => { clearInterval(subTimer); document.removeEventListener('keydown', vp._onKey, true); origRemove(); };
 }
 
 // ---------- Detail modal open/close ----------
@@ -1018,9 +1125,44 @@ settingsBtn.addEventListener('click', openSettings);
 
 async function openSettings() {
   settingsModal.classList.remove('hidden');
-  loadVersion(); checkForUpdate(); loadSettings();
+  loadVersion(); checkForUpdate(); loadSettings(); loadFfmpeg();
   await renderLibraries();
 }
+
+// ---- Playback engine (ffmpeg) status + one-click install ----
+const ffStatus = document.getElementById('ff-status');
+const ffInstall = document.getElementById('ff-install');
+let ffTimer = null;
+async function loadFfmpeg() {
+  clearTimeout(ffTimer); ffTimer = null;
+  let s;
+  try { s = await (await fetch('/api/ffmpeg')).json(); } catch { ffStatus.textContent = ''; return; }
+  if (s.available) {
+    ffStatus.textContent = `✓ Ready — every file type can play${s.nvenc ? ' (GPU accelerated)' : ''}.`;
+    ffInstall.classList.add('hidden');
+    return;
+  }
+  ffInstall.classList.remove('hidden');
+  if (s.installing) {
+    ffInstall.disabled = true;
+    ffInstall.textContent = 'Installing…';
+    ffStatus.textContent = s.installing.phase === 'downloading'
+      ? `⬇ Downloading FFmpeg… ${s.installing.pct}%`
+      : '⚙ Extracting & setting up…';
+    ffTimer = setTimeout(loadFfmpeg, 1200);
+  } else {
+    ffInstall.disabled = false;
+    ffInstall.textContent = '⬇ Install playback engine';
+    ffStatus.textContent = s.error
+      ? `Install failed: ${s.error} — try again.`
+      : 'Not installed. Lets the server play formats browsers can\'t (MKV, HEVC, AVI, surround audio). One click, ~90 MB download.';
+  }
+}
+ffInstall.addEventListener('click', async () => {
+  ffInstall.disabled = true;
+  try { await fetch('/api/ffmpeg/install', { method: 'POST' }); } catch {}
+  loadFfmpeg();
+});
 
 async function renderLibraries() {
   const libs = await (await fetch('/api/libraries')).json();

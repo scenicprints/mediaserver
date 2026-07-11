@@ -1,6 +1,7 @@
 # Local, machine-specific, and generated — never uploaded
 node_modules/
 data/
+tools/
 config.json
 sample-media/
 sample-tv/

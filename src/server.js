@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import Fastify from 'fastify';
 import fastifyStatic from '@fastify/static';
 import { openDb } from './db.js';
@@ -10,6 +10,7 @@ import { enrichLibrary, enrichShows, enrichEpisodes, movieExtra, showExtra, back
 import { ext, qualityRank } from './parse.js';
 import { listDrives, listDirs } from './fsbrowse.js';
 import { osEnabled, searchSubtitles, downloadSubtitle, clearAuth } from './opensubtitles.js';
+import { detectFfmpeg, status as ffmpegStatus, installFfmpeg, playInfo, transcodeStream } from './ffmpeg.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -250,18 +251,19 @@ function gitInfo() {
 app.get('/api/version', async () => gitInfo());
 
 // Ask GitHub whether newer code exists (fetches, then compares local vs remote).
+// Async git — the fetch can take seconds, and a synchronous call here would
+// freeze the whole event loop (stuttering any video streaming in progress).
+const git = (args) => new Promise((resolve, reject) => {
+  execFile('git', args, { cwd: ROOT, timeout: 15000, windowsHide: true },
+    (err, stdout) => (err ? reject(err) : resolve(String(stdout).trim())));
+});
+
 app.get('/api/check-update', async () => {
   try {
-    execFileSync('git', ['fetch', 'origin', 'main', '--quiet'], { cwd: ROOT, timeout: 15000 });
-    const current = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT }).toString().trim();
-    const latest = execFileSync('git', ['rev-parse', 'origin/main'], { cwd: ROOT }).toString().trim();
-    let behind = 0;
-    try {
-      behind = parseInt(
-        execFileSync('git', ['rev-list', '--count', 'HEAD..origin/main'], { cwd: ROOT }).toString().trim(),
-        10
-      ) || 0;
-    } catch {}
+    await git(['fetch', 'origin', 'main', '--quiet']);
+    const current = await git(['rev-parse', 'HEAD']);
+    const latest = await git(['rev-parse', 'origin/main']);
+    const behind = parseInt(await git(['rev-list', '--count', 'HEAD..origin/main']).catch(() => '0'), 10) || 0;
     return { current: current.slice(0, 7), latest: latest.slice(0, 7), updateAvailable: current !== latest, behind };
   } catch {
     return { updateAvailable: false, error: 'offline or updates not enabled' };
@@ -379,6 +381,55 @@ app.get('/api/stream/episode/:fileId', (req, reply) => {
   const row = db.prepare('SELECT path FROM episode_files WHERE id = ?').get(req.params.fileId);
   if (!row) return reply.code(404).send({ error: 'not found' });
   return streamFile(row.path, req, reply);
+});
+
+// ---- Playback engine (ffmpeg): play decision + transcode streaming ----
+
+function fileRow(kind, fileId) {
+  const table = kind === 'episode' ? 'episode_files' : 'movie_files';
+  return db.prepare(`SELECT path FROM ${table} WHERE id = ?`).get(fileId);
+}
+
+// How should the browser play this file? `direct` = today's range streaming;
+// `transcode` = ffmpeg remux/transcode to fragmented MP4. Also reports the real
+// duration (from ffprobe) so the player has a timeline even when transcoding.
+app.get('/api/play/:kind/:fileId', async (req, reply) => {
+  const { kind, fileId } = req.params;
+  const row = fileRow(kind, fileId);
+  if (!row) return reply.code(404).send({ error: 'not found' });
+  const info = await playInfo(row.path);
+  const directUrl = (kind === 'episode' ? '/api/stream/episode/' : '/api/stream/') + fileId;
+  return {
+    mode: info.mode,
+    duration: info.duration,
+    reason: info.reason || null,
+    url: info.mode === 'transcode' ? `/api/transcode/${kind}/${fileId}` : directUrl
+  };
+});
+
+// Live-transcoded stream. ?start=SECONDS seeks (the client restarts the stream
+// and keeps a virtual timeline). The ffmpeg child is killed when the client
+// disconnects so seeks don't pile up encoder processes.
+app.get('/api/transcode/:kind/:fileId', async (req, reply) => {
+  const { kind, fileId } = req.params;
+  const row = fileRow(kind, fileId);
+  if (!row) return reply.code(404).send({ error: 'not found' });
+  const info = await playInfo(row.path);
+  if (info.mode !== 'transcode') return reply.code(400).send({ error: 'file does not need transcoding' });
+  const start = Math.max(0, parseFloat(req.query.start) || 0);
+  const proc = transcodeStream(row.path, { start, vcopy: info.vcopy, acopy: info.acopy });
+  proc.stderr.on('data', (d) => console.error('[ffmpeg]', String(d).trim()));
+  proc.on('error', (e) => console.error('[ffmpeg] spawn error:', e.message));
+  req.raw.on('close', () => { try { proc.kill('SIGKILL'); } catch {} });
+  reply.header('Content-Type', 'video/mp4');
+  return reply.send(proc.stdout);
+});
+
+// Engine status + one-click install (download a static build into tools/).
+app.get('/api/ffmpeg', async () => ffmpegStatus());
+app.post('/api/ffmpeg/install', async () => {
+  if (!ffmpegStatus().installing) installFfmpeg(ROOT, config); // fire and forget; poll GET /api/ffmpeg
+  return ffmpegStatus();
 });
 
 // ---- Subtitles: .srt sidecars served as WebVTT ----
@@ -515,6 +566,11 @@ async function start() {
   // First run only: seed libraries from config.mediaRoots. After that, the user
   // manages folders in the app and this is a no-op.
   seedLibraries(db, mediaRoots);
+
+  const ff = await detectFfmpeg(ROOT, config);
+  console.log(ff.available
+    ? `FFmpeg playback engine: ready${ff.nvenc ? ' (NVENC hardware encoding)' : ''}.`
+    : 'FFmpeg playback engine: not installed — exotic formats will not transcode (install from ⚙ Settings).');
 
   // Scan on startup so the library is fresh, then kick off enrichment in the
   // background (don't block the server coming up).

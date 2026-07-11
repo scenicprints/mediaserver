@@ -76,6 +76,29 @@ Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed
   New screens (detail, modals) **pre-seat** focus on their primary Play button. Decoupled from
   `app.js` (pure DOM + MutationObservers), so it needed no changes to existing view code.
   In remote mode the top menu also grows slightly to read as a proper 10-ft menu bar.
+- **Playback engine (FFmpeg) + player v3** — the player now plays **every file type**.
+  New `src/ffmpeg.js`: **one-click FFmpeg install from ⚙ Settings** (downloads a static build
+  into git-ignored `tools/`, extracts with Windows' bundled bsdtar, re-detects — no CLI, made
+  for the Dell), ffprobe **probing** (cached), a **direct-vs-transcode decision**
+  (`GET /api/play/:kind/:fileId`, also returns the real duration), and **live transcoding**
+  (`GET /api/transcode/:kind/:fileId?start=s`) to fragmented MP4 — video/audio are **copied
+  when already browser-compatible** (mkv h264+ac3 = cheap remux), re-encoded otherwise;
+  **NVENC** used when *functionally* present (verified with a 1-frame test encode — merely
+  being listed isn't enough, that burned us on a machine without the NVIDIA driver).
+  Player upgrades: **virtual timeline** for transcode streams (seek restarts the stream at an
+  offset; scrub/time/progress/Up-Next all run through `cur()`/`dur()`); **caption-delay popup
+  stays open** for repeated ± presses (an outside-click handler counted re-rendered, detached
+  buttons as "outside" — fixed) and the delay is **remembered per file+track** (`sd:` keys);
+  **per-title version memory** (`verid:m<id>`/`verid:e<id>`, dropdowns reflect it); captions
+  re-render on a 200 ms timer (not just `timeupdate`) with optional-hours timestamp parsing
+  and multi-cue support; **CC with no tracks jumps straight to online search**; playback errors
+  show a real in-player message (and point at Settings when FFmpeg is missing).
+  **Remote-friendly player**: ←/→ seek ±10s, Enter/Space play-pause, ↑ opens the settings menu
+  (↑/↓ move a highlighted option, Enter picks, ←/→ nudge caption delay, Back closes),
+  Backspace = Back everywhere. Fix: `/api/check-update`'s **synchronous git fetch froze the
+  event loop** (stuttered active streams every 30 min) — now async `execFile`.
+  Also fixed: focused (scaled) cards **no longer clip** inside horizontal scrollers
+  (`.dp-hscroll`/`.season-cards` got padding+negative-margin breathing room).
 - **Full cinematic detail page** (movies + shows): full-page takeover with a big backdrop splash
   (distinct from the poster), genres, runtime, a discreet **version dropdown** showing file
   differences (quality · size · codec/source), **Cast & Crew** and **Trailers** and **More
@@ -93,16 +116,17 @@ Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed
    the search box** (deliberately excluded for now so arrows keep navigating); consider a
    left/right **Skip Intro / Up Next** reachable by remote inside the player.
 2. **Embedded subtitles inside media files** (owner asked; `.mkv` often has embedded subs).
-   Browsers can't read them, so it needs **ffprobe** to detect + **ffmpeg** to extract to
-   WebVTT on demand. Same ffmpeg pipeline as #3.
-3. **Audio‑track selection** — needs **ffmpeg** to remux/transcode the chosen embedded audio
-   track (browsers can't switch embedded audio). Player already lists tracks best‑effort.
-4. **Skip Intro accuracy** — upgrade the heuristic with ffprobe chapter markers / per‑show
-   manual ranges.
-5. **Verify the latest commit on the real Dell library (~1592 movies):** genre backfill at
-   scale (background, one lookup/title), Library A–Z performance, multi‑track subtitles, and
-   version memory. Placeholder sample files can't actually play, so real‑media playback checks
-   (seek, subtitle sync/offset, Up Next) happen on the Dell.
+   The ffmpeg pipeline **now exists** (`src/ffmpeg.js`) — use `probe()` to list subtitle
+   streams and an ffmpeg `-map 0:s:N` extract-to-WebVTT endpoint; list them alongside sidecar
+   tracks in the player.
+3. **Audio‑track selection** — same story: pipeline exists; add an `audio=N` param to
+   `/api/transcode` (`-map 0:a:N`) and list probe-detected audio tracks in the player menu.
+4. **Skip Intro accuracy** — upgrade the heuristic with ffprobe chapter markers (probe() is
+   available now) / per‑show manual ranges.
+5. **Verify on the real Dell library (~1592 movies):** install the playback engine from
+   ⚙ Settings (one click; NVENC should light up on the 1050 Ti), then real‑media playback
+   (mkv transcode, seek, subtitle sync/offset with remembered delay, version memory, Up Next),
+   genre backfill at scale, Library A–Z performance.
 
 **Decision still open:** the native Apple TV *app* delivery — cloud‑build → TestFlight ($99/yr)
 vs a Fire TV / Nvidia Shield box. (Separate from #1, which is the *web* UI feeling tvOS‑like.)
