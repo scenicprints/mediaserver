@@ -12,6 +12,7 @@ import { listDrives, listDirs } from './fsbrowse.js';
 import { osEnabled, searchSubtitles, downloadSubtitle, clearAuth } from './opensubtitles.js';
 import { detectFfmpeg, status as ffmpegStatus, installFfmpeg, playInfo, transcodeStream, ffmpegBin } from './ffmpeg.js';
 import { detectWhisper, status as whisperStatus, installWhisper, generate as generateSubs } from './whisper.js';
+import { translateVttFile } from './translate.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -74,7 +75,7 @@ app.get('/api/collections', async () => {
      FROM movies
      WHERE collection_id IS NOT NULL
      GROUP BY collection_id, collection_name
-     HAVING count >= 1
+     HAVING count >= 2
      ORDER BY name COLLATE NOCASE`
   ).all();
   return rows.map((r) => ({ id: r.id, name: r.name, count: r.count, poster: r.poster || r.memberPoster, backdrop: r.backdrop }));
@@ -487,24 +488,60 @@ app.post('/api/whisper/install', async () => {
   return whisperStatus();
 });
 
-// Generate subtitles for a file with whisper: transcribe (language='auto' or a
-// forced code) or translate to English. Returns the refreshed track list + the
-// index of the new one so the player can switch to it.
-app.post('/api/subtitles/generate', async (req, reply) => {
-  const { kind, fileId, language = 'auto', translate = false } = req.body || {};
+// AI subtitle generation runs as a background job (a full movie takes minutes),
+// so the request returns immediately and the player polls for progress. `target`
+// is 'orig' (transcribe spoken language), 'en' (translate to English), or a
+// language code like 'es' (English via whisper, then translated to Spanish).
+const subJobs = new Map(); // key -> { status, pct, phase, error, result }
+const jobKey = (kind, fileId, target) => `${kind}:${fileId}:${target}`;
+
+async function runSubJob(job, kind, fileId, target) {
   const row = fileRow(kind, fileId);
-  if (!row) return reply.code(404).send({ error: 'not found' });
-  const ws = whisperStatus();
-  if (!ws.available) return reply.code(400).send({ error: 'The AI subtitle engine is not installed yet — install it in ⚙ Settings.' });
-  let vttPath;
+  if (!row) { job.status = 'error'; job.error = 'file not found'; return; }
   try {
-    vttPath = await generateSubs(ROOT, ffmpegBin(), row.path, { language, translate });
+    const toEnglish = target === 'en' || (target !== 'orig' && target !== 'auto');
+    const twoPhase = toEnglish && target !== 'en'; // translate to a non-English target
+    job.phase = 'transcribing';
+    const baseVtt = await generateSubs(ROOT, ffmpegBin(), row.path, {
+      language: 'auto', translate: toEnglish,
+      onProgress: (p) => { job.pct = Math.round(p * (twoPhase ? 70 : 100)); }
+    });
+    let vttPath = baseVtt;
+    if (twoPhase) {
+      job.phase = 'translating';
+      const outPath = row.path.replace(/\.[^.]+$/, '') + `.${target}-ai.vtt`;
+      vttPath = await translateVttFile(baseVtt, outPath, target, {
+        config, onProgress: (p) => { job.pct = 70 + Math.round(p * 30); }
+      });
+    }
+    const list = listSubtitles(row.path);
+    const idx = Math.max(0, list.findIndex((s) => s.path === vttPath));
+    job.result = { subtitles: list.map((s, i) => ({ label: s.label, idx: i })), idx };
+    job.pct = 100; job.status = 'done';
   } catch (e) {
-    return reply.code(500).send({ error: 'Generation failed: ' + e.message });
+    job.status = 'error'; job.error = e.message;
   }
-  const list = listSubtitles(row.path);
-  const idx = Math.max(0, list.findIndex((s) => s.path === vttPath));
-  return { ok: true, subtitles: list.map((s, i) => ({ label: s.label, idx: i })), idx };
+}
+
+app.post('/api/subtitles/generate', async (req, reply) => {
+  const { kind, fileId, target = 'orig' } = req.body || {};
+  if (!fileRow(kind, fileId)) return reply.code(404).send({ error: 'not found' });
+  if (!whisperStatus().available) return reply.code(400).send({ error: 'The AI subtitle engine is not installed yet — install it in ⚙ Settings.' });
+  const key = jobKey(kind, fileId, target);
+  let job = subJobs.get(key);
+  if (!job || job.status === 'error') {
+    job = { status: 'running', pct: 0, phase: 'starting', error: null, result: null };
+    subJobs.set(key, job);
+    runSubJob(job, kind, fileId, target); // fire and forget; client polls GET
+  }
+  return { status: job.status, pct: job.pct, phase: job.phase, error: job.error, result: job.result };
+});
+
+app.get('/api/subtitles/generate', async (req) => {
+  const { kind, fileId, target = 'orig' } = req.query;
+  const job = subJobs.get(jobKey(kind, fileId, target));
+  if (!job) return { status: 'none' };
+  return { status: job.status, pct: job.pct, phase: job.phase, error: job.error, result: job.result };
 });
 
 // ---- Subtitles: .srt sidecars served as WebVTT ----

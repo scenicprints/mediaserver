@@ -122,30 +122,37 @@ export async function installWhisper(root, config) {
 }
 
 // Generate a WebVTT for `videoPath`. `translate` → English; otherwise transcribe
-// in `language` ('auto' lets whisper detect). Returns the .vtt path (cached).
-export async function generate(root, ffmpegPath, videoPath, { language = 'auto', translate = false } = {}) {
+// in `language` ('auto' lets whisper detect). `onProgress(0..1)` fires as it runs.
+// Returns the .vtt path (cached so re-requests are instant).
+export async function generate(root, ffmpegPath, videoPath, { language = 'auto', translate = false, onProgress } = {}) {
   if (!binPath || !modelPath) throw new Error('whisper not installed');
   if (!ffmpegPath) throw new Error('ffmpeg required to extract audio');
   const tag = translate ? 'en-ai' : (language === 'auto' ? 'orig-ai' : language + '-ai');
   const vttPath = videoPath.replace(/\.[^.]+$/, '') + `.${tag}.vtt`;
-  if (fs.existsSync(vttPath)) return vttPath;
+  if (fs.existsSync(vttPath)) { if (onProgress) onProgress(1); return vttPath; }
 
   const wav = path.join(root, 'tools', 'whisper', `job-${Date.now()}.wav`);
   await new Promise((resolve, reject) => {
     execFile(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-y', '-i', videoPath, '-vn', '-ac', '1', '-ar', '16000', '-f', 'wav', wav],
-      { windowsHide: true }, (e) => (e ? reject(new Error('audio extract failed')) : resolve()));
+      { windowsHide: true, maxBuffer: 8 * 1024 * 1024 }, (e) => (e ? reject(new Error('audio extract failed')) : resolve()));
   });
 
   const outBase = wav.replace(/\.wav$/, '');
-  const args = ['-m', modelPath, '-f', wav, '-ovtt', '-of', outBase, '-l', language];
+  // -pp prints "progress = NN%" to stderr as it decodes.
+  const args = ['-m', modelPath, '-f', wav, '-ovtt', '-of', outBase, '-l', language, '-pp'];
   if (translate) args.push('--translate');
   await new Promise((resolve, reject) => {
     // Run from the binary's own folder so Windows finds its sibling DLLs
     // (ggml.dll, whisper.dll, …) regardless of the server's working directory.
     const p = spawn(binPath, args, { windowsHide: true, cwd: path.dirname(binPath) });
     let err = '', out = '';
-    p.stderr.on('data', (d) => (err += d));
-    p.stdout.on('data', (d) => (out += d));
+    const scan = (s) => {
+      if (!onProgress) return;
+      const all = String(s).match(/progress\s*=\s*(\d+)/g);
+      if (all) onProgress(Math.min(0.99, parseInt(all[all.length - 1].match(/\d+/)[0], 10) / 100));
+    };
+    p.stderr.on('data', (d) => { err += d; scan(d); });
+    p.stdout.on('data', (d) => { out += d; scan(d); });
     p.on('error', (e) => reject(new Error('could not start whisper: ' + e.message)));
     p.on('close', (code) => {
       if (code === 0) return resolve();
@@ -157,5 +164,6 @@ export async function generate(root, ffmpegPath, videoPath, { language = 'auto',
   try { fs.copyFileSync(outBase + '.vtt', vttPath); } catch (e) { throw new Error('whisper produced no output'); }
   fs.rmSync(wav, { force: true });
   fs.rmSync(outBase + '.vtt', { force: true });
+  if (onProgress) onProgress(1);
   return vttPath;
 }

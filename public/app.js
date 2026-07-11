@@ -320,6 +320,27 @@ function upcoming(chan, atSec, n) {
 }
 const clockTime = (sec) => new Date(sec * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 
+// The guide window: a DirecTV-style grid showing WIN_MIN minutes across.
+const WIN_MIN = 90;
+const LABEL_W = 168; // channel-label column width (must match CSS)
+
+// The programs airing on a channel across [winStart, winEnd] (seconds), each
+// with its true start/end so the grid can size blocks by duration.
+function programsInWindow(chan, winStart, winEnd) {
+  const first = nowOn(chan, winStart);
+  let start = winStart - first.offset;
+  let idx = first.idx;
+  const out = [];
+  let guard = 0;
+  while (start < winEnd && guard++ < 60) {
+    const item = chan.playlist[idx % chan.playlist.length];
+    const dur = ltDuration(item);
+    out.push({ item, start, end: start + dur });
+    start += dur; idx++;
+  }
+  return out;
+}
+
 function renderLiveTv() {
   heroEl.classList.add('hidden');
   rowsEl.style.paddingTop = '0';
@@ -331,22 +352,31 @@ function renderLiveTv() {
 
   rowsEl.innerHTML = `
     <div class="livetv">
-      <div class="lt-screen" id="lt-screen"></div>
-      <div class="lt-guide" id="lt-guide">
-        <div class="lt-guide-head"><span class="lt-live-dot"></span> CHANNEL GUIDE <span class="muted" style="margin-left:auto;font-weight:600">▲▼ surf · Enter to watch</span></div>
-        <div id="lt-rows"></div>
+      <div class="lt-preview" id="lt-preview"></div>
+      <div class="lt-epg">
+        <div class="lt-epg-head">
+          <div class="lt-epg-title"><span class="lt-live-dot"></span> GUIDE</div>
+          <div class="lt-timebar" id="lt-timebar"></div>
+        </div>
+        <div class="lt-epg-rows" id="lt-epg-rows"></div>
+        <div class="lt-hint">▲▼ change channel · Enter to watch · click a show to tune in</div>
       </div>
     </div>`;
-  drawGuide(); drawScreen();
+  // Clear the fixed nav dynamically (it can wrap to 2 rows on narrow screens).
+  const fitNav = () => { const el = rowsEl.querySelector('.livetv'); if (el) el.style.paddingTop = nav.offsetHeight + 'px'; };
+  fitNav();
+  drawPreview(); drawEpg();
 
   ltState.onKey = (e) => {
     if (currentView !== 'livetv' || !document.getElementById('detail').classList.contains('hidden') || document.querySelector('.vp')) return;
-    if (e.key === 'ArrowDown') { e.preventDefault(); ltState.sel = (ltState.sel + 1) % channels.length; drawGuide(); drawScreen(); }
-    else if (e.key === 'ArrowUp') { e.preventDefault(); ltState.sel = (ltState.sel - 1 + channels.length) % channels.length; drawGuide(); drawScreen(); }
+    if (e.key === 'ArrowDown') { e.preventDefault(); ltState.sel = (ltState.sel + 1) % channels.length; drawEpg(); drawPreview(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); ltState.sel = (ltState.sel - 1 + channels.length) % channels.length; drawEpg(); drawPreview(); }
     else if (e.key === 'Enter') { e.preventDefault(); tuneIn(); }
   };
   document.addEventListener('keydown', ltState.onKey, true);
-  ltState.timer = setInterval(() => { drawGuide(); drawScreen(); }, 15000);
+  ltState.onResize = fitNav;
+  window.addEventListener('resize', fitNav);
+  ltState.timer = setInterval(() => { drawEpg(); drawPreview(); }, 30000);
 }
 
 function stopLiveTv() {
@@ -354,11 +384,12 @@ function stopLiveTv() {
   if (!ltState) return;
   clearInterval(ltState.timer);
   if (ltState.onKey) document.removeEventListener('keydown', ltState.onKey, true);
+  if (ltState.onResize) window.removeEventListener('resize', ltState.onResize);
   ltState = null;
 }
 
-function drawScreen() {
-  const s = document.getElementById('lt-screen'); if (!s) return;
+function drawPreview() {
+  const s = document.getElementById('lt-preview'); if (!s) return;
   const chan = ltState.channels[ltState.sel];
   const now = Math.floor(Date.now() / 1000);
   const on = nowOn(chan, now);
@@ -368,44 +399,63 @@ function drawScreen() {
   const up = upcoming(chan, now, 1)[0];
   s.style.backgroundImage = `url('${it.backdrop || it.poster || ''}')`;
   s.innerHTML = `
-    <div class="lt-screen-fade"></div>
-    <div class="lt-screen-body">
+    <div class="lt-preview-fade"></div>
+    <div class="lt-preview-body">
       <div class="lt-chan-badge"><span class="lt-num">${chan.number}</span><span class="lt-name">${escapeHtml(chan.name)}</span><span class="lt-onair"><span class="lt-live-dot"></span>LIVE</span></div>
       <h1 class="lt-title">${escapeHtml(it.title)}</h1>
       <div class="lt-meta">
         ${on.item.kind === 'show' ? '<span class="chip">Series</span>' : (it.year ? `<span class="chip">${it.year}</span>` : '')}
         ${it.rating ? `<span class="chip rating">★ ${it.rating.toFixed(1)}</span>` : ''}
-        <span class="chip">${chan.sub}</span>
+        <span class="chip">${escapeHtml(chan.sub)}</span>
       </div>
       <p class="lt-over">${escapeHtml(it.overview || '')}</p>
       <div class="lt-prog"><div class="lt-prog-fill" style="width:${pct}%"></div></div>
-      <div class="lt-times"><span>▶ ${on.item.kind === 'show' ? 'Now airing' : `${Math.round(on.offset / 60)}m in`}</span>${up ? `<span class="muted">Up next ${clockTime(up.at)} · ${escapeHtml(up.item.ref.title)}</span>` : ''}</div>
+      <div class="lt-times"><span>▶ ${on.item.kind === 'show' ? 'Now airing' : `${Math.round(on.offset / 60)} min in`}</span>${up ? `<span class="muted">Up next ${clockTime(up.at)} · ${escapeHtml(up.item.ref.title)}</span>` : ''}</div>
       <div class="lt-actions"><button class="btn btn-play" id="lt-tune">▶ Tune In</button></div>
     </div>`;
   const t = document.getElementById('lt-tune'); if (t) t.addEventListener('click', tuneIn);
 }
 
-function drawGuide() {
-  const rows = document.getElementById('lt-rows'); if (!rows) return;
+function drawEpg() {
+  const rowsEl2 = document.getElementById('lt-epg-rows'); if (!rowsEl2) return;
   const now = Math.floor(Date.now() / 1000);
-  rows.innerHTML = '';
+  const winStart = Math.floor(now / 1800) * 1800; // floor to :00/:30
+  const winEnd = winStart + WIN_MIN * 60;
+  const span = winEnd - winStart;
+  const pos = (sec) => ((sec - winStart) / span) * 100;
+
+  // time header labels every 30 min
+  const bar = document.getElementById('lt-timebar');
+  if (bar) {
+    let h = '';
+    for (let t = winStart; t < winEnd; t += 1800) h += `<span class="lt-timelbl" style="left:${pos(t)}%">${clockTime(t)}</span>`;
+    bar.innerHTML = h + `<span class="lt-nowline" style="left:${pos(now)}%"></span>`;
+  }
+
+  rowsEl2.innerHTML = '';
   ltState.channels.forEach((chan, i) => {
-    const on = nowOn(chan, now);
-    const up = upcoming(chan, now, 1)[0];
     const row = document.createElement('div');
-    row.className = 'lt-row' + (i === ltState.sel ? ' sel' : '');
+    row.className = 'lt-erow' + (i === ltState.sel ? ' sel' : '');
+    const progs = programsInWindow(chan, winStart, winEnd);
+    const blocks = progs.map((p) => {
+      const left = Math.max(0, pos(p.start));
+      const right = Math.min(100, pos(p.end));
+      const w = Math.max(0, right - left);
+      const live = now >= p.start && now < p.end;
+      return `<div class="lt-block${live ? ' live' : ''}" style="left:${left}%;width:${w}%" title="${escapeHtml(p.item.ref.title)}">
+        <span class="lt-block-t">${escapeHtml(p.item.ref.title)}</span></div>`;
+    }).join('');
     row.innerHTML = `
-      <div class="lt-row-num">${chan.number}</div>
-      <div class="lt-row-body">
-        <div class="lt-row-name">${escapeHtml(chan.name)}</div>
-        <div class="lt-row-now">${escapeHtml(on.item.ref.title)}</div>
-      </div>
-      <div class="lt-row-next">${up ? `${clockTime(up.at)} · ${escapeHtml(up.item.ref.title)}` : ''}</div>`;
-    row.addEventListener('click', () => { ltState.sel = i; drawGuide(); drawScreen(); });
-    row.addEventListener('dblclick', tuneIn);
-    rows.appendChild(row);
+      <div class="lt-echan"><span class="lt-enum">${chan.number}</span><span class="lt-ename">${escapeHtml(chan.name)}</span></div>
+      <div class="lt-etrack"><span class="lt-nowline" style="left:${pos(now)}%"></span>${blocks}</div>`;
+    row.querySelector('.lt-echan').addEventListener('click', () => { ltState.sel = i; drawEpg(); drawPreview(); });
+    row.querySelectorAll('.lt-block').forEach((b, bi) => b.addEventListener('click', () => {
+      ltState.sel = i; drawEpg(); drawPreview();
+      if (progs[bi] && now >= progs[bi].start && now < progs[bi].end) tuneIn();
+    }));
+    rowsEl2.appendChild(row);
   });
-  const sel = rows.children[ltState.sel];
+  const sel = rowsEl2.children[ltState.sel];
   if (sel) sel.scrollIntoView({ block: 'nearest' });
 }
 
@@ -1223,8 +1273,9 @@ function openPlayer(ctx) {
   // count as "outside" (that's what made the delay popup close on every press).
   vp.addEventListener('click', (e) => { if (!e.target.isConnected) return; if (!menu.contains(e.target) && !gear.contains(e.target)) menu.classList.add('hidden'); });
 
-  // AI subtitle generation: pick transcribe vs translate-to-English, POST, wait
-  // (it's slow — minutes), then switch to the new track. Stays inside the menu.
+  // AI subtitle generation: pick a target language, kick off a background job on
+  // the server, and poll its progress. The job keeps running even if you close
+  // the menu and keep watching — the track appears when it's ready.
   async function generateSubsFlow() {
     let ws = {};
     try { ws = await (await fetch('/api/whisper')).json(); } catch {}
@@ -1233,31 +1284,61 @@ function openPlayer(ctx) {
       menu.querySelector('#gen-back').addEventListener('click', buildMenu);
       return;
     }
-    const run = async (opts, label) => {
-      menu.innerHTML = `<h4>Generating…</h4><div class="vp-genmsg"><div class="spinner" style="margin:6px auto 14px"></div>${label}.<br>This can take a few minutes for a full movie — you can keep watching; it'll appear when ready.</div>`;
+    const PHASE = { transcribing: 'Transcribing spoken audio', translating: 'Translating', starting: 'Starting' };
+    let polling = false;
+    const showProgress = (d) => {
+      const pct = d.pct || 0;
+      menu.innerHTML = `<h4>Generating subtitles</h4>
+        <div class="vp-genmsg">
+          <div class="vp-genbar"><i style="width:${pct}%"></i></div>
+          <div style="margin-top:8px">${PHASE[d.phase] || 'Working'}… ${pct}%</div>
+          <div style="margin-top:8px">A full movie takes a few minutes — you can close this and keep watching; the track appears when it's ready.</div>
+        </div>
+        <button class="vp-opt" id="gen-hide">Keep watching</button>`;
+      menu.querySelector('#gen-hide').addEventListener('click', () => { polling = false; menu.classList.add('hidden'); });
+    };
+    const apply = (result) => {
+      if (!result) return;
+      current.subtitles = result.subtitles || current.subtitles;
+      currentSubIdx = result.idx; subVisible = true; loadDelay(); setSubtitle(subUrl(result.idx));
+      if (!menu.classList.contains('hidden')) buildMenu();
+    };
+    const fail = (msg) => {
+      if (menu.classList.contains('hidden')) return;
+      menu.innerHTML = `<h4>Generate with AI</h4><div class="vp-genmsg">Couldn't generate: ${escapeHtml(msg)}</div><button class="vp-opt" id="gen-back">‹ Back</button>`;
+      menu.querySelector('#gen-back').addEventListener('click', buildMenu);
+    };
+    const start = async (target) => {
+      polling = true;
+      let d = {};
       try {
         const r = await fetch('/api/subtitles/generate', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ kind: ctx.searchKind, fileId: current.id, language: opts.language || 'auto', translate: !!opts.translate })
+          body: JSON.stringify({ kind: ctx.searchKind, fileId: current.id, target })
         });
-        const d = await r.json();
+        d = await r.json();
         if (!r.ok) throw new Error(d.error || 'failed');
-        current.subtitles = d.subtitles || current.subtitles;
-        currentSubIdx = d.idx; subVisible = true; loadDelay(); setSubtitle(subUrl(d.idx));
-        buildMenu();
-      } catch (e) {
-        menu.innerHTML = `<h4>Generate with AI</h4><div class="vp-genmsg">Couldn't generate: ${escapeHtml(e.message)}</div><button class="vp-opt" id="gen-back">‹ Back</button>`;
-        menu.querySelector('#gen-back').addEventListener('click', buildMenu);
-      }
+      } catch (e) { fail(e.message); return; }
+      showProgress(d);
+      const poll = async () => {
+        if (!polling || !document.body.contains(vp)) return;
+        let s = {};
+        try { s = await (await fetch(`/api/subtitles/generate?kind=${ctx.searchKind}&fileId=${current.id}&target=${target}`)).json(); } catch {}
+        if (s.status === 'done') { polling = false; apply(s.result); return; }
+        if (s.status === 'error') { polling = false; fail(s.error || 'failed'); return; }
+        if (!menu.classList.contains('hidden')) showProgress(s);
+        setTimeout(poll, 1500);
+      };
+      setTimeout(poll, 1500);
     };
     menu.innerHTML = `
       <h4>Generate with AI</h4>
-      <button class="vp-opt" id="gen-transcribe">Transcribe spoken audio<span class="tick">›</span></button>
-      <button class="vp-opt" id="gen-translate">Translate to English<span class="tick">›</span></button>
-      <div class="vp-genmsg">Runs locally on the server. Great when no subtitles exist, or to get an English track for a foreign film.</div>
+      <button class="vp-opt" data-t="orig">Transcribe spoken audio<span class="tick">›</span></button>
+      <button class="vp-opt" data-t="en">Subtitles in English<span class="tick">›</span></button>
+      <button class="vp-opt" data-t="es">Subtitles in Spanish<span class="tick">›</span></button>
+      <div class="vp-genmsg">Runs on the server. Great when no subtitles exist, or to translate a film. English &amp; Spanish are translated automatically.</div>
       <button class="vp-opt" id="gen-back">‹ Back</button>`;
-    menu.querySelector('#gen-transcribe').addEventListener('click', () => run({ language: 'auto', translate: false }, 'Transcribing the spoken audio'));
-    menu.querySelector('#gen-translate').addEventListener('click', () => run({ translate: true }, 'Translating to English'));
+    menu.querySelectorAll('[data-t]').forEach((b) => b.addEventListener('click', () => start(b.dataset.t)));
     menu.querySelector('#gen-back').addEventListener('click', buildMenu);
   }
 

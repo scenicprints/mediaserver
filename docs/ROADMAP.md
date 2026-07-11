@@ -76,6 +76,25 @@ Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed
   New screens (detail, modals) **pre-seat** focus on their primary Play button. Decoupled from
   `app.js` (pure DOM + MutationObservers), so it needed no changes to existing view code.
   In remote mode the top menu also grows slightly to read as a proper 10-ft menu bar.
+- **Feedback pass: DirecTV-style guide, stricter Collections, Whisper as a background job + Spanish.**
+  - **Live TV → proper EPG guide.** Replaced the sidebar list with a DirecTV-style grid: a
+    now-playing **preview pane** on top, then a scrolling **guide** — channel column on the left,
+    a **time axis** (30-min columns) across the top, **program blocks sized by duration**, the
+    current show highlighted, and a red **now-line**. ▲▼ change channel, Enter/click a live block
+    tunes in. Fixed the **nav overlap** (the guide now clears the fixed nav, measured dynamically
+    since the nav can wrap to two rows).
+  - **Collections are pickier.** Only franchises where you own **2+ films** show up (was ≥1, so
+    single-movie "collections" cluttered it).
+  - **Whisper is now a background job with a progress bar**, so a full movie no longer hangs the
+    UI on a dead spinner — the request returns immediately, the player polls and shows
+    "Transcribing… NN%", and you can close it and keep watching; the track appears when ready
+    (whisper `-pp` progress parsed from its output). **Spanish (and any language) subtitles** work
+    via a new `src/translate.js`: Whisper makes the English track, then cues are translated
+    (LibreTranslate if `config.translateUrl` is set, else a zero-config Google fallback). Player
+    menu now offers **Transcribe / English / Spanish**. Verified end-to-end: real job with live
+    progress produced both "EN (AI)" and "ES (AI)" tracks (¡"(música lúgubre)"!).
+    *Speed follow-up:* on the Dell, transcription is CPU-bound (slow for long films) — switching to
+    the whisper cuBLAS build for the 1050 Ti via `whisperBinUrl` would make it much faster.
 - **Collections tab + Live TV + AI subtitles (Whisper)** — three pipeline features in one batch:
   - **Collections tab** (nav, beside Library): owned movies grouped by TMDB franchise. A new
     background `backfillMovieDetails()` fetches each movie's details **once** (`col_checked`
@@ -176,15 +195,16 @@ vs a Fire TV / Nvidia Shield box. (Separate from #1, which is the *web* UI feeli
 **Items 1–3 SHIPPED** (see "Collections tab + Live TV + AI subtitles" under Done). Remaining
 follow-ups + the still-gated item 4:
 
-- **AI subtitles — translate to arbitrary languages** (the owner's Spanish example). Whisper only
-  translates *to English*; transcription (original language) and English translation both ship.
-  Real English→Spanish (etc.) needs a translation step: an offline translator (argos-translate)
-  or a configurable LibreTranslate URL, applied to the generated cues, then saved as `<file>.es-ai.vtt`.
-  Add a language picker to the "Generate with AI" menu once a translator is wired.
-- **Live TV polish**: real EPG grid (time columns), per-show episode-length durations in the
-  schedule (currently a 30-min block per series airing), channel numbers/logos, "jump to live"
-  when a tuned movie drifts, and letting a tuned **show** drop into the live episode+offset.
+- **AI subtitles speed (Whisper on GPU).** Transcription is CPU-bound and slow for full movies.
+  Ship an easy switch to the whisper **cuBLAS** build for the Dell's 1050 Ti (auto-detect NVIDIA
+  via `nvcuda.dll` and pick the GPU build on install, with a CPU fallback if it won't load).
+  DONE this pass: background job + progress + Spanish/any-language translation.
+- **Live TV polish**: per-show episode-length durations in the schedule (currently a 30-min block
+  per series airing), horizontal time-scroll in the guide, channel logos, and letting a tuned
+  **show** drop into the live episode+offset (movies already drop in at the live offset).
+  DONE this pass: DirecTV-style EPG grid, nav-overlap fix.
 - **Collections**: a Home "Your Collections" row; group TV franchises where TMDB has them.
+  DONE this pass: only surface franchises with 2+ owned films.
 
 4. **Requests window → Sonarr/Radarr.** STILL GATED — **do not build until the owner greenlights.**
    (Then: a Requests view + `requests` table; Radarr/Sonarr APIs with keys in `config.json`.)
