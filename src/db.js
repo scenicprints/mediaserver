@@ -148,6 +148,13 @@ export function openDb(dbPath) {
   // "meta-collections" (Marvel, Disney, Star Wars, Pixar…).
   if (!movieCols.has('companies')) db.exec('ALTER TABLE movies ADD COLUMN companies TEXT');
 
+  // Per-episode intro range (theme song), from audio-fingerprint detection at
+  // import; `intro_checked` guards the (slow) analysis so it runs once.
+  const epCols = new Set(db.prepare('PRAGMA table_info(episodes)').all().map((c) => c.name));
+  if (!epCols.has('intro_start')) db.exec('ALTER TABLE episodes ADD COLUMN intro_start REAL');
+  if (!epCols.has('intro_end')) db.exec('ALTER TABLE episodes ADD COLUMN intro_end REAL');
+  if (!epCols.has('intro_checked')) db.exec('ALTER TABLE episodes ADD COLUMN intro_checked INTEGER DEFAULT 0');
+
   // Small key-value store for playback preferences that must survive across
   // browsers/devices (preferred version per title, caption delay per file+track,
   // last quality picked). The web client mirrors this in memory.

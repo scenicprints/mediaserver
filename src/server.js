@@ -14,6 +14,7 @@ import { detectFfmpeg, status as ffmpegStatus, installFfmpeg, playInfo, transcod
 import { detectWhisper, status as whisperStatus, installWhisper, generate as generateSubs } from './whisper.js';
 import { translateVttFile } from './translate.js';
 import { radarrEnabled, sonarrEnabled, testConn, radarrSearch, radarrAdd, sonarrSearch, sonarrAdd, getProfiles, radarrQueue, sonarrQueue } from './arr.js';
+import { runIntroDetection, introForFile } from './introdetect.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -502,6 +503,7 @@ app.get('/api/play/:kind/:fileId', async (req, reply) => {
     duration: info.duration,
     reason: info.reason || null,
     chapters: info.chapters || [],
+    intro: kind === 'episode' ? introForFile(db, fileId) : null, // fingerprinted theme-song range
     url: info.mode === 'transcode' ? `/api/transcode/${kind}/${fileId}` : directUrl
   };
 });
@@ -862,6 +864,13 @@ async function start() {
       await backfillCompanies(db, config.tmdbApiKey, { log: (x) => console.log(x) });
     })().catch((e) => console.error('Enrichment error:', e.message));
   }
+
+  // Intro (theme-song) detection + episode-duration probing — its own background
+  // job (needs ffmpeg/fpcalc, not TMDB). Slow on a big first import; runs once
+  // per episode (intro_checked guards it) and picks up new episodes on rescan.
+  (async () => {
+    await runIntroDetection(db, ROOT, config, { log: (x) => console.log(x) });
+  })().catch((e) => console.error('Intro detection error:', e.message));
 
   await app.listen({ port: config.port, host: config.host });
   console.log(`\n  Media server running at http://localhost:${config.port}\n`);

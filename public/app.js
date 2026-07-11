@@ -1523,7 +1523,9 @@ function openPlayer(ctx) {
     // Chapter-based Skip Intro / Skip Credits (precise when the file has named
     // chapters — common in .mkv rips).
     const chaps = (info && info.chapters) || [];
-    introCh = chaps.find((c) => /\b(intro|opening|op|main title|titles?)\b/i.test(c.title)) || null;
+    // Chapters win when present; otherwise use the fingerprinted intro range.
+    introCh = chaps.find((c) => /\b(intro|opening|op|main title|titles?)\b/i.test(c.title))
+      || (info && info.intro && info.intro.end > info.intro.start ? info.intro : null);
     creditsCh = chaps.find((c) => /\b(credits?|ending|outro|ed|end ?card)\b/i.test(c.title)) || null;
     base = 0;
     if (play.mode === 'transcode') {

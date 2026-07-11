@@ -51,6 +51,7 @@ node C:\Users\jkevi\mediaserver\src\server.js
 | `src/ffmpeg.js` | Playback engine: FFmpeg detect + one-click install (→ `tools/`, git-ignored), ffprobe probing, direct-vs-transcode decision, live fMP4 transcode |
 | `src/whisper.js` | AI subtitles: whisper.cpp detect + one-click install (→ `tools/whisper/`), ffmpeg audio extract → transcribe/translate → WebVTT sidecar |
 | `src/arr.js` | Requests: Radarr (movies) + Sonarr (TV) v3 API — search/lookup, add + trigger search, fetch quality profile/root folder |
+| `src/introdetect.js` | Skip Intro: Chromaprint `fpcalc` (auto-install → `tools/fpcalc/`), per-season audio-fingerprint theme detection → `intro_start/end` + episode duration; background job on boot |
 | `src/translate.js` | Subtitle translation (LibreTranslate if `config.translateUrl`, else Google) for non-English AI subs |
 | `src/fsbrowse.js` | Server-side folder browser for the in-app picker |
 | `src/scan-cli.js`, `src/enrich-cli.js` | Standalone CLI helpers (`npm run scan` / `enrich`) |
@@ -89,7 +90,8 @@ node C:\Users\jkevi\mediaserver\src\server.js
   localStorage — it's per-browser and the owner watches from multiple devices.**
 - **Self-update:** `GET /version`, `GET /check-update`, `POST /update` (exits 42 → `run.bat` pulls & restarts)
 - **Collections:** `GET /collections` (owned movies grouped by TMDB franchise), `GET /collections/:id`
-- **Playback engine:** `GET /play/:kind/:fileId` (direct vs transcode + duration), `GET /transcode/:kind/:fileId?start=`, `GET/POST /ffmpeg[/install]`
+- **Playback engine:** `GET /play/:kind/:fileId` (direct vs transcode + duration + chapters + fingerprinted `intro` for episodes), `GET /transcode/:kind/:fileId?start=`, `GET/POST /ffmpeg[/install]`
+- **Live TV:** `GET /livetv/episodes` (flat playable episodes with show art/genres + duration, for the broadcast schedule)
 - **AI subtitles:** `GET/POST /whisper[/install]`, `POST /subtitles/generate` `{kind,fileId,language,translate}`
 - **Requests (Radarr/Sonarr):** `GET /requests/status`, `GET /requests/search?q=`, `POST /requests/add` `{type,tmdbId|tvdbId}`, `POST /settings/arr` `{radarr,sonarr:{url,apiKey}}`. Keys → git-ignored `config.json` (`config.radarr`/`config.sonarr`). **Never commit config.json.**
 

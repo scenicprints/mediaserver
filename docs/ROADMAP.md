@@ -98,6 +98,20 @@ Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed
     `.mkv`), Skip Intro/**Skip Credits** are **precise** and work for anything — they appear only
     inside the Intro/Credits chapters, which correctly handles a **cold open before the intro**.
     Skip Credits jumps to the next episode (or the end).
+- **Skip Intro via audio fingerprinting (real theme-song detection) + episode-duration probing.**
+  New `src/introdetect.js`: at import, per **season**, fingerprint the first 8 min of each episode's
+  audio with **Chromaprint `fpcalc`** (auto-installed to `tools/fpcalc/` on first run, ~2 MB) and
+  find the **longest recurring segment across episodes** — the theme. Stores a precise
+  `intro_start`/`intro_end` per episode (+ the episode's real **duration**, which fpcalc reports —
+  this also fixes Live TV's episode lengths). Matching is by **content, not position**, so it
+  handles **cold opens** (theme found wherever it sits) and per-season intro changes; the matcher
+  aligns two fingerprints (bit-error ≤ 8/32), finds the longest run, and pads the end by 2 s.
+  Background job on boot, guarded by `intro_checked` (runs once per episode; new episodes on
+  rescan). `/api/play` returns `intro` for episodes; the player uses it for a **precise Skip Intro**
+  (chapters still win when present, heuristic only if neither). Verified end-to-end on generated
+  episodes sharing a theme at different cold-open offsets: detected within ~1–2 s, Skip Intro shows
+  exactly over the theme and jumps to its end. Compute-heavy — first import of a big library churns
+  in the background; **expect threshold tuning on the real library** (BIT_THRESH / MIN_INTRO_SEC).
 - **Live TV airs real episodes (fixes "tune in → starts from the beginning").** Show channels used
   to treat each show as one generic 30-min block and play the "next unwatched episode from 0," so
   the guide and playback disagreed. Now channels air **individual episodes** with their real
@@ -253,14 +267,13 @@ Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed
 ---
 
 ## 🔜 Next (start here — priority order)
-0. **Skip Intro via audio fingerprinting (agreed; the current heuristic/chapters aren't enough).**
-   At scan time, per **season**, decode the first ~10 min of each episode's audio, fingerprint it
-   (Chromaprint `fpcalc` installed one-click like ffmpeg/whisper, or a homegrown fingerprint),
-   cross-match episodes to find the **longest recurring segment** = the theme/intro, and store a
-   precise **intro start/end per episode** (new columns, background job after scan). Player uses
-   the stored range (chapters still win when present). Handles cold opens (match found wherever
-   the theme sits) and per-season intro changes. Biggest piece; expect real-library tuning via the
-   Dell's Claude. Optional later: same technique on end-credits for a precise Skip Credits.
+0. **Skip Intro via audio fingerprinting — DONE (see above).** Follow-ups: **tune the thresholds on
+   the real library** via the Dell's Claude (check a few shows; adjust `BIT_THRESH`/`MIN_INTRO_SEC`
+   in `src/introdetect.js` if intros are mis-bounded); consider a **manual re-run trigger** /
+   progress indicator in Settings; and the **same technique on end-credits** for a precise Skip
+   Credits. Note: the scanner leaves **stale file rows** when a file is deleted/replaced on disk
+   (surfaced during testing) — a small cleanup worth doing (prune episode_files/movie_files whose
+   path no longer exists on rescan).
 0b. **Whisper "auto-generate subtitles for files that have none" (opt-in toggle).** Owner asked
     whether to pre-generate like intros — decided NO for the whole library (too expensive, rarely
     needed), but a targeted background job for files with **zero** existing subtitle tracks is
