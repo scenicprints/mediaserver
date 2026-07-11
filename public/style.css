@@ -407,7 +407,7 @@ button { font-family: inherit; }
 .vp video { position: absolute; inset: 0; width: 100%; height: 100%; background: #000; }
 .vp ::cue { background: rgba(0,0,0,0.55); color: #fff; font-size: 1.05em; line-height: 1.35; }
 .vp-fade { transition: opacity 0.25s ease; }
-.vp.hide-ui .vp-top, .vp.hide-ui .vp-bottom, .vp.hide-ui .vp-center { opacity: 0; pointer-events: none; }
+.vp.hide-ui .vp-top, .vp.hide-ui .vp-bottom { opacity: 0; pointer-events: none; }
 .vp-top {
   top: 0; padding: 22px 34px; display: flex; align-items: center; gap: 16px; z-index: 4;
   position: absolute; left: 0; right: 0; transition: opacity 0.25s ease;
@@ -416,32 +416,43 @@ button { font-family: inherit; }
 .vp-back { background: none; border: none; color: #fff; font-size: 16px; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 6px; }
 .vp-titles .vp-t { font-size: 18px; font-weight: 700; }
 .vp-titles .vp-st { font-size: 13px; color: #c7ccda; }
-.vp-center {
-  position: absolute; inset: 0; z-index: 3; display: flex; align-items: center; justify-content: center; gap: 60px;
-  transition: opacity 0.25s ease; pointer-events: none;
+/* paused badge — a single, calm center indicator instead of the old floating
+   button cluster (the video itself and the bottom bar are the controls) */
+.vp-pausedbadge {
+  position: absolute; inset: 0; margin: auto; width: 110px; height: 110px; z-index: 3;
+  display: flex; align-items: center; justify-content: center; border-radius: 50%;
+  background: rgba(8, 9, 13, 0.55); backdrop-filter: blur(4px); pointer-events: none;
+  opacity: 0; transform: scale(0.85); transition: opacity 0.18s ease, transform 0.18s ease;
 }
-.vp-center button { pointer-events: auto; background: rgba(0,0,0,0.35); border: none; color: #fff; border-radius: 50%; cursor: pointer; }
-.vp-bigplay { width: 84px; height: 84px; font-size: 34px; }
-.vp-skip { width: 58px; height: 58px; font-size: 13px; font-weight: 700; }
-.vp-skip:hover, .vp-center .vp-bigplay:hover { background: rgba(0,0,0,0.55); }
+.vp.vp-ispaused .vp-pausedbadge { opacity: 1; transform: scale(1); }
+.vp-pausedbadge svg { width: 52px; height: 52px; color: #fff; }
 .vp-bottom {
-  position: absolute; left: 0; right: 0; bottom: 0; z-index: 8; padding: 0 34px 22px; transition: opacity 0.25s ease;
-  background: linear-gradient(0deg, rgba(0,0,0,0.75), rgba(0,0,0,0));
+  position: absolute; left: 0; right: 0; bottom: 0; z-index: 8; padding: 0 44px 24px; transition: opacity 0.25s ease;
+  background: linear-gradient(0deg, rgba(0,0,0,0.88) 0%, rgba(0,0,0,0.45) 55%, rgba(0,0,0,0) 100%);
 }
-.vp-scrub { position: relative; height: 20px; display: flex; align-items: center; margin-bottom: 6px; cursor: pointer; }
-.vp-track { position: absolute; left: 0; right: 0; height: 5px; border-radius: 3px; background: rgba(255,255,255,0.25); }
-.vp-buffered { position: absolute; left: 0; height: 5px; border-radius: 3px; background: rgba(255,255,255,0.4); width: 0; }
-.vp-played { position: absolute; left: 0; height: 5px; border-radius: 3px; background: var(--grad); width: 0; }
-.vp-seek { position: absolute; left: 0; right: 0; width: 100%; margin: 0; height: 20px; opacity: 0; cursor: pointer; }
-.vp-ctrls { display: flex; align-items: center; gap: 16px; }
-.vp-ctrls button { background: none; border: none; color: #fff; font-size: 18px; cursor: pointer; padding: 4px; }
-.vp-ctrls button:hover { color: var(--accent-2); }
-.vp-time { font-size: 13px; color: #dfe3ee; font-variant-numeric: tabular-nums; }
+.vp-scrub { position: relative; height: 30px; display: flex; align-items: center; margin-bottom: 8px; cursor: pointer; }
+.vp-track { position: absolute; left: 0; right: 0; height: 6px; border-radius: 4px; background: rgba(255,255,255,0.22); transition: height 0.12s ease, box-shadow 0.12s ease; }
+.vp-buffered { position: absolute; left: 0; height: 6px; border-radius: 4px; background: rgba(255,255,255,0.38); width: 0; transition: height 0.12s ease; }
+.vp-played { position: absolute; left: 0; height: 6px; border-radius: 4px; background: var(--grad); width: 0; transition: height 0.12s ease; }
+.vp-seek { position: absolute; left: 0; right: 0; width: 100%; margin: 0; height: 30px; opacity: 0; cursor: pointer; }
+/* focused bar (remote mode): thicker, ringed, thumb glowing */
+.vp-scrub.pfocus .vp-track { height: 9px; box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.3), 0 0 18px rgba(108, 92, 255, 0.55); }
+.vp-scrub.pfocus .vp-buffered, .vp-scrub.pfocus .vp-played { height: 9px; }
+.vp-scrub.pfocus .vp-played::after { opacity: 1; width: 17px; height: 17px; box-shadow: 0 0 0 3px var(--accent), 0 0 16px rgba(108, 92, 255, 0.9); }
+/* seek-preview bubble */
+.vp-bubble {
+  position: absolute; bottom: 30px; transform: translateX(-50%); z-index: 9;
+  background: rgba(14, 16, 24, 0.96); border: 1px solid rgba(255, 255, 255, 0.28); border-radius: 8px;
+  padding: 5px 12px; font-size: 14.5px; font-weight: 700; font-variant-numeric: tabular-nums;
+  pointer-events: none; white-space: nowrap; box-shadow: var(--shadow-card);
+}
+.vp-ctrls { display: flex; align-items: center; gap: 10px; }
+.vp-time { font-size: 14.5px; color: #eef1f8; font-variant-numeric: tabular-nums; margin: 0 6px; }
 .vp-spacer { flex: 1; }
 .vp-volbar { width: 84px; accent-color: var(--accent); }
 
 .vp-menu {
-  position: absolute; right: 34px; bottom: 82px; z-index: 6; width: 300px; max-height: 60vh; overflow-y: auto;
+  position: absolute; right: 44px; bottom: 100px; z-index: 6; width: 300px; max-height: 60vh; overflow-y: auto;
   background: rgba(16, 18, 26, 0.97); border: 1px solid var(--line); border-radius: 12px; padding: 12px; box-shadow: var(--shadow-pop);
 }
 .vp-menu h4 { margin: 10px 8px 6px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); }
@@ -468,14 +479,14 @@ button { font-family: inherit; }
 .vp-error span { color: var(--muted); max-width: 54ch; font-size: 14.5px; }
 
 .vp-skipintro {
-  position: absolute; right: 34px; bottom: 96px; z-index: 5;
+  position: absolute; right: 44px; bottom: 112px; z-index: 5;
   background: rgba(20, 22, 30, 0.9); color: #fff; border: 1px solid rgba(255,255,255,0.35);
   padding: 11px 20px; border-radius: 8px; font-weight: 700; cursor: pointer; font-size: 14px;
 }
 .vp-skipintro:hover { background: #fff; color: #0b0c10; }
 
 .vp-upnext {
-  position: absolute; right: 34px; bottom: 96px; z-index: 6; width: 340px;
+  position: absolute; right: 44px; bottom: 112px; z-index: 6; width: 340px;
   background: rgba(16, 18, 26, 0.96); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; box-shadow: var(--shadow-pop);
 }
 .vp-upnext .un-still { aspect-ratio: 16/9; background-size: cover; background-position: center; background-color: #0d0f15; }
@@ -484,16 +495,24 @@ button { font-family: inherit; }
 .vp-upnext .un-title { font-weight: 700; margin: 3px 0 10px; }
 .vp-upnext .un-actions { display: flex; gap: 8px; }
 
-/* player polish */
-.vp-ctrls { gap: 14px; }
-.vp-ctrls button { display: inline-flex; align-items: center; justify-content: center; padding: 7px; border-radius: 9px; color: #eef1f8; }
-.vp-ctrls button:hover { background: rgba(255, 255, 255, 0.13); color: #fff; }
-.vp-ctrls button svg { width: 24px; height: 24px; display: block; }
-.vp-cc { font-weight: 800 !important; font-size: 13px !important; letter-spacing: 0.5px; border: 1.5px solid currentColor !important; border-radius: 5px !important; padding: 2px 5px !important; }
-.vp-bigplay svg { width: 42px; height: 42px; }
+/* player buttons — big, round, 10-ft friendly, with a visible focus ring */
+.vp-ctrls button {
+  display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
+  width: 46px; height: 46px; border-radius: 50%; border: none; background: none; color: #eef1f8;
+  transition: background 0.12s ease, box-shadow 0.12s ease, transform 0.12s ease;
+}
+.vp-ctrls button:hover { background: rgba(255, 255, 255, 0.14); color: #fff; }
+.vp-ctrls button svg { width: 26px; height: 26px; display: block; }
+.vp-play { background: rgba(255, 255, 255, 0.1); }
+.vp-cc { font-weight: 800; font-size: 13.5px; letter-spacing: 0.5px; }
 .vp-skip { position: relative; }
 .vp-skip svg { width: 30px; height: 30px; }
 .vp-skip b { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 800; padding-top: 3px; }
+/* the remote's focus ring on buttons — same language as the library cards */
+.vp-ctrls button.pfocus {
+  background: rgba(255, 255, 255, 0.18); color: #fff; transform: scale(1.12);
+  box-shadow: 0 0 0 3px #fff, 0 0 0 6px var(--accent), 0 0 24px rgba(108, 92, 255, 0.65);
+}
 .vp-played { position: relative; }
 .vp-played::after { content: ''; position: absolute; right: -6px; top: 50%; transform: translateY(-50%); width: 13px; height: 13px; border-radius: 50%; background: #fff; opacity: 0; transition: opacity 0.12s ease; box-shadow: 0 1px 4px rgba(0,0,0,0.5); }
 .vp-scrub:hover .vp-played::after { opacity: 1; }

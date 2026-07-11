@@ -80,6 +80,10 @@ node C:\Users\jkevi\mediaserver\src\server.js
 - **Subtitles:** `GET /subtitle/:fileId` & `/subtitle/episode/:fileId` (serves a sidecar `.srt` as WebVTT); `GET /subtitles/search`, `POST /subtitles/download` (OpenSubtitles)
 - **Libraries/setup:** `GET/POST/DELETE /libraries`, `GET /fs` (folder browser), `POST /scan`, `POST /enrich`
 - **Settings:** `GET /settings`, `POST /settings/opensubtitles`
+- **Prefs (cross-device playback memory):** `GET /prefs` (all), `POST /prefs` `{key, value}`
+  (null/empty value deletes). Keys: `verid:m<id>`/`verid:e<id>` preferred file per title,
+  `sd:<fileId>:<trackIdx>` caption delay, `pq` last quality. **Never store these in
+  localStorage — it's per-browser and the owner watches from multiple devices.**
 - **Self-update:** `GET /version`, `GET /check-update`, `POST /update` (exits 42 → `run.bat` pulls & restarts)
 
 ## Deploy & update workflow — IMPORTANT

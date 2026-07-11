@@ -25,11 +25,34 @@ const isNew = (it) => it.added_at && Date.now() - it.added_at < NEW_MS;
 const byRecent = (a, b) => (b.added_at || 0) - (a.added_at || 0);
 const byRating = (a, b) => (b.rating || 0) - (a.rating || 0);
 
+// ---- Playback prefs (server-backed so they follow you to every device) ----
+let prefs = {};
+async function loadPrefs() {
+  try { prefs = await (await fetch('/api/prefs')).json(); } catch {}
+  // One-time migration: push any prefs this browser stored locally (old
+  // versions used localStorage) up to the server, then stop using them.
+  const mine = Object.keys(localStorage).filter((k) => k === 'pq' || k.startsWith('verid:') || k.startsWith('sd:'));
+  for (const k of mine) {
+    if (!(k in prefs)) setPref(k, localStorage.getItem(k));
+    localStorage.removeItem(k);
+  }
+}
+const getPref = (k) => prefs[k];
+function setPref(key, value) {
+  if (value === null || value === undefined || value === '') delete prefs[key];
+  else prefs[key] = String(value);
+  fetch('/api/prefs', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key, value: value === undefined ? null : value })
+  }).catch(() => {});
+}
+
 async function loadAll() {
   const [mv, sh, cont] = await Promise.all([
     fetch('/api/movies').then((r) => r.json()),
     fetch('/api/shows').then((r) => r.json()),
-    fetch('/api/continue').then((r) => r.json())
+    fetch('/api/continue').then((r) => r.json()),
+    loadPrefs()
   ]);
   movies = mv; shows = sh; continueItems = cont;
 }
@@ -330,20 +353,21 @@ function versionLabel(f, i) {
   const tags = fileTags(f.filename); if (tags.length) parts.push(tags.join(' · '));
   return parts.join('   ·   ');
 }
-// Version memory: this title's last-played version first (verid:m12 / verid:e34
-// → file id), then the last quality picked anywhere (pq), then the first file.
+// Version memory (server-backed): this title's last-played version first
+// (verid:m12 / verid:e34 → file id), then the last quality picked anywhere
+// (pq), then the first file.
 function preferredFile(files, key) {
   if (key) {
-    const f = files.find((x) => x.id === +localStorage.getItem('verid:' + key));
+    const f = files.find((x) => x.id === +getPref('verid:' + key));
     if (f) return f;
   }
-  const pq = localStorage.getItem('pq');
+  const pq = getPref('pq');
   return (pq && files.find((f) => f.quality === pq)) || files[0] || null;
 }
 function rememberVersion(key, f) {
   if (!f) return;
-  if (key) localStorage.setItem('verid:' + key, f.id);
-  if (f.quality) localStorage.setItem('pq', f.quality);
+  if (key) setPref('verid:' + key, f.id);
+  if (f.quality) setPref('pq', f.quality);
 }
 function playTrailer(key) {
   const ov = document.createElement('div');
@@ -706,10 +730,11 @@ function openPlayer(ctx) {
   let currentSubIdx = -1;
   let upnextShown = false;
   const subUrl = (idx) => `${ctx.subtitleBase}${current.id}?idx=${idx}`;
-  // Caption delay is remembered per file+track and restored next time.
+  // Caption delay is remembered per file+track (server-side) and restored
+  // next time — on any device.
   const delayKey = () => `sd:${current.id}:${currentSubIdx}`;
-  const loadDelay = () => { subOffset = parseFloat(localStorage.getItem(delayKey())) || 0; };
-  const saveDelay = () => { if (subOffset) localStorage.setItem(delayKey(), subOffset); else localStorage.removeItem(delayKey()); };
+  const loadDelay = () => { subOffset = parseFloat(getPref(delayKey())) || 0; };
+  const saveDelay = () => { setPref(delayKey(), subOffset || null); };
 
   // Playback mode: `direct` (native range streaming, seekable) or `transcode`
   // (ffmpeg fragmented-MP4 pipe for formats the browser can't play). Transcode
@@ -734,21 +759,23 @@ function openPlayer(ctx) {
       <button class="vp-back">‹ Back</button>
       <div class="vp-titles"><div class="vp-t">${escapeHtml(ctx.title)}</div>${ctx.subtitle ? `<div class="vp-st">${escapeHtml(ctx.subtitle)}</div>` : ''}</div>
     </div>
-    <div class="vp-center vp-fade">
-      <button class="vp-skip" data-d="-10">${ICONS.back}<b>10</b></button>
-      <button class="vp-bigplay">${ICONS.pause}</button>
-      <button class="vp-skip" data-d="10">${ICONS.fwd}<b>10</b></button>
-    </div>
+    <div class="vp-pausedbadge">${ICONS.play}</div>
     <div class="vp-bottom vp-fade">
-      <div class="vp-scrub"><div class="vp-track"></div><div class="vp-buffered"></div><div class="vp-played"></div><input class="vp-seek" type="range" min="0" max="1000" value="0"></div>
+      <div class="vp-scrub" data-pf>
+        <div class="vp-track"></div><div class="vp-buffered"></div><div class="vp-played"></div>
+        <div class="vp-bubble hidden">0:00</div>
+        <input class="vp-seek" type="range" min="0" max="1000" value="0">
+      </div>
       <div class="vp-ctrls">
-        <button class="vp-play">${ICONS.pause}</button>
-        <button class="vp-mute">${ICONS.volHigh}</button><input class="vp-volbar" type="range" min="0" max="1" step="0.05" value="1">
+        <button class="vp-skip" data-pf data-d="-10" title="Back 10 seconds">${ICONS.back}<b>10</b></button>
+        <button class="vp-play" data-pf title="Play / Pause">${ICONS.pause}</button>
+        <button class="vp-skip" data-pf data-d="10" title="Forward 10 seconds">${ICONS.fwd}<b>10</b></button>
+        <button class="vp-mute" data-pf title="Mute">${ICONS.volHigh}</button><input class="vp-volbar" type="range" min="0" max="1" step="0.05" value="1">
         <span class="vp-time">0:00 / 0:00</span>
         <div class="vp-spacer"></div>
-        <button class="vp-cc" title="Subtitles">CC</button>
-        <button class="vp-gear" title="Settings">${ICONS.gear}</button>
-        <button class="vp-fs" title="Fullscreen">${ICONS.fullscreen}</button>
+        <button class="vp-cc" data-pf title="Subtitles">CC</button>
+        <button class="vp-gear" data-pf title="Settings">${ICONS.gear}</button>
+        <button class="vp-fs" data-pf title="Fullscreen">${ICONS.fullscreen}</button>
       </div>
     </div>
     <button class="vp-skipintro hidden">Skip Intro ⏭</button>
@@ -766,7 +793,8 @@ function openPlayer(ctx) {
   const bufferedBar = vp.querySelector('.vp-buffered');
   const seek = vp.querySelector('.vp-seek');
   const timeEl = vp.querySelector('.vp-time');
-  const playBtns = [vp.querySelector('.vp-play'), vp.querySelector('.vp-bigplay')];
+  const playBtns = [vp.querySelector('.vp-play')];
+  const bubble = vp.querySelector('.vp-bubble');
   const skipIntro = vp.querySelector('.vp-skipintro');
   skipIntro.addEventListener('click', () => { seekTo(cur() + 80); skipIntro.classList.add('hidden'); });
   const errEl = vp.querySelector('.vp-error');
@@ -836,12 +864,17 @@ function openPlayer(ctx) {
   }
   loadFile(current, ctx.startAt || 0);
 
-  function setPlayIcons() { const i = video.paused ? ICONS.play : ICONS.pause; playBtns.forEach((b) => (b.innerHTML = i)); }
+  function setPlayIcons() {
+    const i = video.paused ? ICONS.play : ICONS.pause;
+    playBtns.forEach((b) => (b.innerHTML = i));
+    vp.classList.toggle('vp-ispaused', video.paused);
+  }
   function togglePlay() { video.paused ? video.play() : video.pause(); }
   playBtns.forEach((b) => b.addEventListener('click', togglePlay));
   video.addEventListener('click', togglePlay);
   video.addEventListener('play', setPlayIcons);
   video.addEventListener('pause', setPlayIcons);
+  setPlayIcons();
   vp.querySelectorAll('.vp-skip').forEach((b) => b.addEventListener('click', () => { seekTo(cur() + +b.dataset.d); }));
 
   // scrub + time (all through cur()/dur() so transcode's virtual timeline works)
@@ -859,8 +892,15 @@ function openPlayer(ctx) {
     maybeUpNext();
     throttledSave();
   });
-  seek.addEventListener('input', () => { seeking = true; if (dur()) playedBar.style.width = (seek.value / 10) + '%'; });
-  seek.addEventListener('change', () => { if (dur()) seekTo((seek.value / 1000) * dur()); seeking = false; });
+  seek.addEventListener('input', () => {
+    seeking = true;
+    if (!dur()) return;
+    playedBar.style.width = (seek.value / 10) + '%';
+    bubble.textContent = fmtTime((seek.value / 1000) * dur());
+    bubble.style.left = (seek.value / 10) + '%';
+    bubble.classList.remove('hidden');
+  });
+  seek.addEventListener('change', () => { if (dur()) seekTo((seek.value / 1000) * dur()); seeking = false; bubble.classList.add('hidden'); });
 
   // volume
   const mute = vp.querySelector('.vp-mute'), volbar = vp.querySelector('.vp-volbar');
@@ -964,9 +1004,43 @@ function openPlayer(ctx) {
 
   // auto-hide chrome
   let hideTimer;
-  function showUI() { vp.classList.remove('hide-ui'); clearTimeout(hideTimer); hideTimer = setTimeout(() => { if (!video.paused && menu.classList.contains('hidden')) vp.classList.add('hide-ui'); }, 3000); }
-  vp.addEventListener('mousemove', showUI);
+  function showUI() { vp.classList.remove('hide-ui'); clearTimeout(hideTimer); hideTimer = setTimeout(() => { if (!video.paused && menu.classList.contains('hidden')) vp.classList.add('hide-ui'); }, 3500); }
+  vp.addEventListener('mousemove', () => { vp.classList.remove('vp-keys'); paintPf(); showUI(); });
   showUI();
+
+  // ---- Visible key/remote focus over the player controls ----
+  // Arrow keys move a glowing focus ring across the scrub bar and buttons, so
+  // you can always see where you are. The scrub bar is the home position:
+  // Left/Right there seek (repeated presses accumulate into one jump, with a
+  // time bubble previewing the target), Down drops to the buttons, Enter is
+  // play/pause. On buttons, Left/Right move, Enter presses, Up returns to the
+  // bar. Mouse use hides the ring; the next key brings it back.
+  const pfEls = () => [...vp.querySelectorAll('[data-pf]')];
+  let pfIdx = 0; // 0 = the scrub bar
+  function paintPf() {
+    const keys = vp.classList.contains('vp-keys');
+    pfEls().forEach((el, i) => el.classList.toggle('pfocus', keys && i === pfIdx));
+  }
+  function pfSet(i) { pfIdx = Math.max(0, Math.min(i, pfEls().length - 1)); paintPf(); }
+
+  // Debounced key-seek: presses accumulate, the bubble previews the target,
+  // and the actual seek fires shortly after the last press.
+  let pendingSeek = null, keySeekTimer = null;
+  function keySeek(delta) {
+    const from = pendingSeek !== null ? pendingSeek : cur();
+    const target = Math.max(0, dur() ? Math.min(from + delta, dur() - 0.3) : Math.max(0, from + delta));
+    pendingSeek = target;
+    seeking = true;
+    if (dur()) { const p = (target / dur()) * 100; playedBar.style.width = p + '%'; seek.value = p * 10; bubble.style.left = p + '%'; }
+    bubble.textContent = fmtTime(target);
+    bubble.classList.remove('hidden');
+    clearTimeout(keySeekTimer);
+    keySeekTimer = setTimeout(() => {
+      const t = pendingSeek; pendingSeek = null; seeking = false;
+      bubble.classList.add('hidden');
+      seekTo(t);
+    }, 550);
+  }
 
   // close + keyboard (remote-friendly: arrows seek / open the menu, Enter is
   // play-pause, Backspace is the remote's Back button)
@@ -996,14 +1070,31 @@ function openPlayer(ctx) {
       }
       return;
     }
-    if (e.key === ' ' || e.key === 'k' || e.key === 'Enter') { e.preventDefault(); togglePlay(); showUI(); }
-    else if (e.key === 'ArrowLeft') { e.preventDefault(); seekTo(cur() - 10); showUI(); }
-    else if (e.key === 'ArrowRight') { e.preventDefault(); seekTo(cur() + 10); showUI(); }
-    else if (e.key === 'ArrowUp') { e.preventDefault(); menuIdx = 0; buildMenu(); menu.classList.remove('hidden'); showUI(); }
-    else if (e.key === 'ArrowDown') { e.preventDefault(); showUI(); }
+    const nav = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Enter'].includes(e.key);
+    if (nav) {
+      e.preventDefault();
+      vp.classList.add('vp-keys');
+      // Controls hidden? The first press only reveals them, focused on the bar.
+      if (vp.classList.contains('hide-ui')) { showUI(); pfSet(0); return; }
+      showUI();
+      const els = pfEls();
+      const el = els[pfIdx] || els[0];
+      const onBar = el && el.classList.contains('vp-scrub');
+      if (e.key === 'Enter') { if (onBar) togglePlay(); else el.click(); }
+      else if (e.key === 'ArrowUp') pfSet(0);
+      else if (e.key === 'ArrowDown') { if (onBar) pfSet(els.findIndex((x) => x.classList.contains('vp-play'))); }
+      else { // Left / Right
+        const d = e.key === 'ArrowRight' ? 1 : -1;
+        if (onBar) keySeek(d * 10);
+        else pfSet(Math.max(1, pfIdx + d));
+      }
+      return;
+    }
+    if (e.key === ' ' || e.key === 'k') { e.preventDefault(); togglePlay(); showUI(); }
     else if (e.key === 'f') vp.querySelector('.vp-fs').click();
     else if (e.key === 'm') mute.click();
     else if (e.key === 'c') vp.querySelector('.vp-cc').click();
+    else if (e.key === 's') { menuIdx = 0; buildMenu(); menu.classList.remove('hidden'); showUI(); }
   };
   document.addEventListener('keydown', vp._onKey, true);
   const origRemove = vp.remove.bind(vp);

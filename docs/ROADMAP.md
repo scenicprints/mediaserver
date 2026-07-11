@@ -76,6 +76,24 @@ Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed
   New screens (detail, modals) **pre-seat** focus on their primary Play button. Decoupled from
   `app.js` (pure DOM + MutationObservers), so it needed no changes to existing view code.
   In remote mode the top menu also grows slightly to read as a proper 10-ft menu bar.
+- **Server-side playback prefs + player v4 (visible remote focus, cleaner theater UI)** —
+  fixes the owner's top complaints for real this time:
+  - **Version & caption-delay memory moved server-side** (new `prefs` key-value table in
+    SQLite + `GET/POST /api/prefs`). localStorage was per-browser, so choices made on the PC
+    never followed to the TV — that's why "remember my version" kept failing. The client keeps
+    an in-memory mirror, writes through on change, and **auto-migrates any old localStorage
+    prefs to the server on first load**. Watch state was already server-side (DB).
+  - **Visible focus in the player.** Arrow keys move a **glowing focus ring** across the
+    scrub bar and buttons (same visual language as the library cards) so you can always see
+    where you are. Bar = home position: ←/→ **seek with a time-bubble preview** (repeated
+    presses accumulate, commit ~0.5 s after the last press), Enter = play/pause, ↓ drops to
+    the buttons (←/→ move, Enter presses, ↑ returns). First press with hidden controls only
+    reveals them. Gear+Enter opens the settings menu (which already had its own highlight).
+    Mouse use hides the ring; the next key press brings it back.
+  - **Cleaner theater UI**: removed the floating center button cluster (video click and the
+    bottom bar are the controls; a calm **paused badge** appears when paused); taller
+    scrub bar with a hover/drag time bubble; bigger round buttons (46 px, 10-ft friendly);
+    stronger bottom gradient; skip-intro/up-next/menu raised above the taller bar.
 - **Playback engine (FFmpeg) + player v3** — the player now plays **every file type**.
   New `src/ffmpeg.js`: **one-click FFmpeg install from ⚙ Settings** (downloads a static build
   into git-ignored `tools/`, extracts with Windows' bundled bsdtar, re-detects — no CLI, made

@@ -136,5 +136,15 @@ export function openDb(dbPath) {
   const showCols = new Set(db.prepare('PRAGMA table_info(shows)').all().map((c) => c.name));
   if (!showCols.has('genres')) db.exec('ALTER TABLE shows ADD COLUMN genres TEXT');
 
+  // Small key-value store for playback preferences that must survive across
+  // browsers/devices (preferred version per title, caption delay per file+track,
+  // last quality picked). The web client mirrors this in memory.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS prefs (
+      key   TEXT PRIMARY KEY,
+      value TEXT
+    );
+  `);
+
   return db;
 }

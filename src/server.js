@@ -425,6 +425,24 @@ app.get('/api/transcode/:kind/:fileId', async (req, reply) => {
   return reply.send(proc.stdout);
 });
 
+// ---- Playback prefs (server-side so they follow the user across devices) ----
+// Version choices and caption delays used to live in localStorage, which is
+// per-browser — pick a version on the PC and the TV knows nothing about it.
+app.get('/api/prefs', async () => {
+  return Object.fromEntries(db.prepare('SELECT key, value FROM prefs').all().map((r) => [r.key, r.value]));
+});
+app.post('/api/prefs', async (req, reply) => {
+  const { key, value } = req.body || {};
+  if (!key || typeof key !== 'string') return reply.code(400).send({ error: 'key required' });
+  if (value === null || value === undefined || value === '') {
+    db.prepare('DELETE FROM prefs WHERE key = ?').run(key);
+  } else {
+    db.prepare('INSERT INTO prefs (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+      .run(key, String(value));
+  }
+  return { ok: true };
+});
+
 // Engine status + one-click install (download a static build into tools/).
 app.get('/api/ffmpeg', async () => ffmpegStatus());
 app.post('/api/ffmpeg/install', async () => {
