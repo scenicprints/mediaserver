@@ -869,8 +869,23 @@ function mixedRecent(n) {
 }
 
 // ---------- Hero ----------
+// A deterministic weekly shuffle: the featured set stays the same all week,
+// then rotates to a fresh set the next week (same for every device, since it's
+// seeded by the week number — not re-randomized on each load).
+function weeklyPick(items, n) {
+  const pool = (items || []).slice();
+  if (pool.length <= n) return pool;
+  let s = (Math.floor(Date.now() / 604800000) * 2654435761) >>> 0; // seed = weeks since epoch
+  const rand = () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  for (let i = pool.length - 1; i > 0; i--) { // seeded Fisher–Yates
+    const j = Math.floor(rand() * (i + 1));
+    [pool[i], pool[j]] = [pool[j], pool[i]];
+  }
+  return pool.slice(0, n);
+}
+
 function setHero(items) {
-  heroItems = (items || []).slice(0, 6);
+  heroItems = weeklyPick(items, 6);
   heroIdx = 0;
   if (heroTimer) clearInterval(heroTimer);
   if (!heroItems.length) { heroEl.classList.add('hidden'); return; }

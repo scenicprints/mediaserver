@@ -1086,13 +1086,20 @@ async function start() {
   const ws = await detectWhisper(ROOT, config);
   console.log(ws.available ? 'AI subtitle engine (whisper): ready.' : 'AI subtitle engine (whisper): not installed (optional; install from ⚙ Settings).');
 
-  // Scan on startup so the library is fresh, then kick off enrichment in the
-  // background (don't block the server coming up).
-  const scan = scanLibraries(db);
-  console.log(`Scan complete: ${scan.added} new file(s), ${scan.seen} video file(s) seen${scan.removed ? `, ${scan.removed} stale file(s) pruned` : ''}.`);
+  // Bring the server up FIRST — the library is already in the DB from the last
+  // run, so a restart is instant even on a big library. A fresh disk rescan
+  // (walking 1000s of files off HDDs) and TMDB enrichment then run in the
+  // background instead of holding the port closed. This fixes "the server takes
+  // forever to come back after an update."
+  await app.listen({ port: config.port, host: config.host });
+  console.log(`\n  Media server running at http://localhost:${config.port}\n`);
 
-  if (config.tmdbApiKey) {
-    (async () => {
+  (async () => {
+    await new Promise((r) => setTimeout(r, 500)); // let the first page load paint before the scan
+    const scan = scanLibraries(db);
+    console.log(`Scan complete: ${scan.added} new file(s), ${scan.seen} video file(s) seen${scan.removed ? `, ${scan.removed} stale file(s) pruned` : ''}.`);
+
+    if (config.tmdbApiKey) {
       const m = await enrichLibrary(db, config.tmdbApiKey, { log: (x) => console.log(x) });
       console.log(`TMDB enrichment: ${m} movie(s) updated.`);
       const s = await enrichShows(db, config.tmdbApiKey, { log: (x) => console.log(x) });
@@ -1102,8 +1109,8 @@ async function start() {
       await backfillGenres(db, config.tmdbApiKey, { log: (x) => console.log(x) });
       await backfillMovieDetails(db, config.tmdbApiKey, { log: (x) => console.log(x) });
       await backfillCompanies(db, config.tmdbApiKey, { log: (x) => console.log(x) });
-    })().catch((e) => console.error('Enrichment error:', e.message));
-  }
+    }
+  })().catch((e) => console.error('Startup scan/enrich error:', e.message));
 
   // Intro (theme-song) detection + episode-duration probing — TEMPORARILY OFF
   // (pulled pending a rebuild). Set `"introDetection": true` in config.json to
@@ -1114,9 +1121,6 @@ async function start() {
       await runIntroDetection(db, ROOT, config, { log: (x) => console.log(x) });
     })().catch((e) => console.error('Intro detection error:', e.message));
   }
-
-  await app.listen({ port: config.port, host: config.host });
-  console.log(`\n  Media server running at http://localhost:${config.port}\n`);
 }
 
 start().catch((e) => {
