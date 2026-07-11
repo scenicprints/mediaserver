@@ -243,9 +243,12 @@ follow-ups + the still-gated item 4:
    a search** so the downloader grabs it. `src/arr.js` talks to the v3 APIs (`X-Api-Key`), fetching
    each instance's quality profile / root folder / language profile so nothing's hardcoded. Connect
    in ⚙ Settings (Radarr/Sonarr URL + API key → saved in git-ignored `config.json`). Owned titles
-   show "Already in library." Verified end-to-end against a mock Radarr/Sonarr; **needs a real
-   test on the Dell's Radarr/Sonarr** (coordinate via the Dell's Claude).
-   Possible next: a status/queue view (Radarr/Sonarr `queue`), a quality-profile picker in the UI.
+   show "Already in library." **Verified end-to-end on the Dell against real Radarr 6.2.1.10461 +
+   Sonarr 4.0.18.2978 (2026-07-11):** status connected, search returns movies+shows with in-library
+   flags, adds land in both apps monitored with a search triggered (movie picked HD-1080p profile;
+   Sonarr v4 language-profile handling clean). No API-compat issues.
+   Possible next: a status/queue view (Radarr/Sonarr `queue`), a quality-profile picker in the UI,
+   and a "my requests" list.
 
 <details><summary>Original detailed notes for items 1–3 (kept for reference)</summary>
 
