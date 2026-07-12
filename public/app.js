@@ -33,6 +33,23 @@ if (TV_MODE) {
   document.body.classList.add('tv-mode');
 }
 
+// ---------- Session persistence for the LG webOS TV app ONLY ----------
+// The LG webOS app runtime doesn't persist the server's HttpOnly login cookie
+// across relaunches, so a normal login loops back to the sign-in screen. The fix
+// below is gated entirely behind `?app=webos` — a flag ONLY the LG webOS app
+// launches with. Web browsers, phones, and the Android TV (TCL) app never send
+// it, so for them `persistToken` is a no-op and nothing changes. For the LG app,
+// we mirror the session token into a readable `mstoken` cookie the server also
+// accepts (tokenFromReq reads Bearer/cookie/query), and honor a token baked into
+// the launch URL (?token=…) for zero-typing sign-in.
+const IS_WEBOS_APP = new URLSearchParams(location.search).get('app') === 'webos';
+function persistToken(t) {
+  if (!IS_WEBOS_APP || !t) return; // does nothing outside the LG webOS app
+  const secure = location.protocol === 'https:' ? '; Secure' : '';
+  document.cookie = 'mstoken=' + encodeURIComponent(t) + '; Path=/; Max-Age=31536000; SameSite=Lax' + secure;
+}
+persistToken(new URLSearchParams(location.search).get('token'));
+
 function setupAuth() {
   const form = document.getElementById('auth-form');
   const sub = document.getElementById('auth-sub');
@@ -71,7 +88,8 @@ function setupAuth() {
       d = await r.json();
     } catch (_e) { err.textContent = 'Could not reach the server.'; applyMode(); return; }
     if (!r.ok) { err.textContent = (d && d.error) || 'Something went wrong.'; applyMode(); return; }
-    location.reload(); // reload fully authenticated
+    persistToken(d && d.token); // mirror into a readable cookie so TV apps that
+    location.reload();          // drop the HttpOnly cookie still stay signed in
   });
 }
 
