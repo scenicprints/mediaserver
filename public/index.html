@@ -176,6 +176,34 @@
     </form>
   </div>
 
+  <!-- Old-WebView safety net (e.g. Android 7.1 projectors): polyfill padStart
+       and surface any script error on screen instead of a silent blank page. -->
+  <script>
+    if (!String.prototype.padStart) {
+      String.prototype.padStart = function (targetLength, padString) {
+        targetLength = targetLength >> 0;
+        padString = String(typeof padString !== 'undefined' ? padString : ' ');
+        var str = String(this);
+        if (str.length >= targetLength || !padString.length) return str;
+        var pad = '';
+        while (pad.length < targetLength - str.length) pad += padString;
+        return pad.slice(0, targetLength - str.length) + str;
+      };
+    }
+    window.addEventListener('error', function (e) {
+      try {
+        var d = document.getElementById('__jserr');
+        if (!d) {
+          d = document.createElement('div');
+          d.id = '__jserr';
+          d.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:2147483647;background:rgba(70,0,0,.95);color:#fff;font:13px/1.5 monospace;padding:10px;white-space:pre-wrap;max-height:45%;overflow:auto';
+          (document.body || document.documentElement).appendChild(d);
+        }
+        d.textContent += 'JS error: ' + (e.message || e.type || '?') + '\n  at ' + (e.filename || '') + ':' + (e.lineno || '') + ':' + (e.colno || '') + '\n';
+      } catch (x) {}
+    });
+  </script>
+
   <script src="/app.js"></script>
   <script src="/focus.js"></script>
 </body>

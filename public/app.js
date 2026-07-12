@@ -69,7 +69,7 @@ function setupAuth() {
     try {
       r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       d = await r.json();
-    } catch { err.textContent = 'Could not reach the server.'; applyMode(); return; }
+    } catch (_e) { err.textContent = 'Could not reach the server.'; applyMode(); return; }
     if (!r.ok) { err.textContent = (d && d.error) || 'Something went wrong.'; applyMode(); return; }
     location.reload(); // reload fully authenticated
   });
@@ -106,7 +106,7 @@ const byRating = (a, b) => (b.rating || 0) - (a.rating || 0);
 // ---- Playback prefs (server-backed so they follow you to every device) ----
 let prefs = {};
 async function loadPrefs() {
-  try { prefs = await (await fetch('/api/prefs')).json(); } catch {}
+  try { prefs = await (await fetch('/api/prefs')).json(); } catch (_e) {}
   // One-time migration: push any prefs this browser stored locally (old
   // versions used localStorage) up to the server, then stop using them.
   const mine = Object.keys(localStorage).filter((k) => k === 'pq' || k.startsWith('verid:') || k.startsWith('sd:'));
@@ -150,7 +150,7 @@ function setView(view) {
 
 window.addEventListener('scroll', () => nav.classList.toggle('scrolled', window.scrollY > 40));
 
-function genresOf(m) { try { return JSON.parse(m.genres || '[]'); } catch { return []; } }
+function genresOf(m) { try { return JSON.parse(m.genres || '[]'); } catch (_e) { return []; } }
 function allGenres(list) { const s = new Set(); list.forEach((m) => genresOf(m).forEach((g) => s.add(g))); return [...s].sort(); }
 function decadesOf(list) { return [...new Set(list.map((m) => (m.year ? Math.floor(m.year / 10) * 10 : null)).filter(Boolean))].sort((a, b) => b - a); }
 
@@ -286,7 +286,7 @@ function renderLibrary() {
     scroll.appendChild(sec);
   }
   wrap.querySelectorAll('.tab').forEach((b) => b.addEventListener('click', () => { libraryKind = b.dataset.k; renderLibrary(); }));
-  wrap.querySelectorAll('.az').forEach((b) => b.addEventListener('click', () => document.getElementById('L-' + b.dataset.l)?.scrollIntoView({ behavior: 'smooth', block: 'start' })));
+  wrap.querySelectorAll('.az').forEach((b) => b.addEventListener('click', () => { const t = document.getElementById('L-' + b.dataset.l); if (t) t.scrollIntoView({ behavior: 'smooth', block: 'start' }); }));
 }
 
 // ---------- Collections tab ----------
@@ -315,7 +315,7 @@ async function renderCollections() {
     return;
   }
   let cols = [];
-  try { cols = await (await fetch('/api/collections')).json(); } catch {}
+  try { cols = await (await fetch('/api/collections')).json(); } catch (_e) {}
   document.getElementById('col-count').textContent = cols.length ? `${cols.length} collection${cols.length === 1 ? '' : 's'}` : '';
   if (!cols.length) {
     grid.innerHTML = `<div class="lib-empty" style="padding:40px 2px">No franchises found yet. Collections appear once TMDB details finish loading for your movies (they backfill in the background after a scan).</div>`;
@@ -335,7 +335,7 @@ async function renderCollections() {
 
 async function openCollection(id) {
   let data;
-  try { data = await (await fetch('/api/collections/' + encodeURIComponent(id))).json(); } catch { return; }
+  try { data = await (await fetch('/api/collections/' + encodeURIComponent(id))).json(); } catch (_e) { return; }
   const items = data.items || [];
   detailInner.innerHTML = `
     <div class="dp-splash" style="background-image:url('${data.backdrop || data.poster || (items[0] && items[0].backdrop) || ''}')">
@@ -383,7 +383,7 @@ async function renderRequests() {
   const results = document.getElementById('req-results');
 
   let status;
-  try { status = await (await fetch('/api/requests/status')).json(); } catch { status = {}; }
+  try { status = await (await fetch('/api/requests/status')).json(); } catch (_e) { status = {}; }
   const radarrOk = status.radarr && status.radarr.ok;
   const sonarrOk = status.sonarr && status.sonarr.ok;
   if (!radarrOk && !sonarrOk) {
@@ -403,7 +403,7 @@ async function renderRequests() {
     `Connected to ${[radarrOk && 'Radarr (movies)', sonarrOk && 'Sonarr (TV)'].filter(Boolean).join(' and ')}. Search below.`;
 
   // Quality picker (one select per configured service).
-  try { reqProfiles = await (await fetch('/api/requests/profiles')).json(); } catch {}
+  try { reqProfiles = await (await fetch('/api/requests/profiles')).json(); } catch (_e) {}
   renderQualityPicker(radarrOk, sonarrOk);
 
   // On a TV, don't auto-focus (it traps the remote in the field). Focus the box
@@ -449,7 +449,7 @@ function renderQualityPicker(radarrOk, sonarrOk) {
 async function loadQueue() {
   const box = document.getElementById('req-queue'); if (!box) return;
   let q;
-  try { q = await (await fetch('/api/requests/queue')).json(); } catch { return; }
+  try { q = await (await fetch('/api/requests/queue')).json(); } catch (_e) { return; }
   if (!q.length) { box.innerHTML = ''; return; }
   box.innerHTML = `<h3 class="req-qhead">Downloading now <span class="row-count">${q.length}</span></h3>` +
     q.map((d) => {
@@ -474,7 +474,7 @@ async function doRequestSearch(q, results) {
     const r = await fetch('/api/requests/search?q=' + encodeURIComponent(q));
     if (!r.ok) { results.innerHTML = `<div class="req-empty muted">${escapeHtml((await r.json()).error || 'Search failed.')}</div>`; return; }
     list = await r.json();
-  } catch { results.innerHTML = '<div class="req-empty muted">Search failed.</div>'; return; }
+  } catch (_e) { results.innerHTML = '<div class="req-empty muted">Search failed.</div>'; return; }
   if (!list.length) { results.innerHTML = '<div class="req-empty muted">No matches found.</div>'; return; }
   results.innerHTML = '';
   for (const it of list) results.appendChild(requestCard(it));
@@ -507,7 +507,7 @@ function requestCard(it) {
       const d = await r.json();
       if (r.ok) { btn.textContent = d.already ? '✓ Already requested' : '✓ Requested — searching'; btn.classList.remove('primary'); btn.classList.add('req-done'); loadQueue(); }
       else { btn.textContent = '⚠ ' + (d.error || 'Failed'); btn.disabled = false; }
-    } catch { btn.textContent = '⚠ Failed'; btn.disabled = false; }
+    } catch (_e) { btn.textContent = '⚠ Failed'; btn.disabled = false; }
   });
   return card;
 }
@@ -631,7 +631,7 @@ function buildChannels() {
   return channels.map((c, i) => {
     const playlist = seededShuffle(c.items, hashStr(c.name));
     const total = playlist.reduce((s, it) => s + ltDuration(it), 0);
-    return { ...c, number: i + 2, playlist, total };
+    return Object.assign({}, c, { number: i + 2, playlist, total });
   });
 }
 
@@ -680,7 +680,7 @@ async function renderLiveTv() {
   // Pull the flat episode list once so channels can air individual episodes.
   if (!ltEpisodes.length) {
     rowsEl.innerHTML = '<div class="lib-empty" style="padding:100px var(--edge)">Tuning in…</div>';
-    try { ltEpisodes = await (await fetch('/api/livetv/episodes')).json(); } catch {}
+    try { ltEpisodes = await (await fetch('/api/livetv/episodes')).json(); } catch (_e) {}
     if (currentView !== 'livetv') return; // user navigated away while loading
   }
   const channels = buildChannels();
@@ -831,7 +831,7 @@ async function tuneIn() {
 // show so we have the episode's files (with subtitle tracks) to play.
 async function tuneEpisode(epRef, offset) {
   let show;
-  try { show = await (await fetch('/api/shows/' + epRef.show_id)).json(); } catch { return; }
+  try { show = await (await fetch('/api/shows/' + epRef.show_id)).json(); } catch (_e) { return; }
   let ep = null;
   (show.seasons || []).forEach((s) => s.episodes.forEach((e) => { if (e.id === epRef.epId) ep = e; }));
   if (!ep) return;
@@ -1398,7 +1398,7 @@ async function openShow(id, autoEpId, autoplay = true) {
         e.stopPropagation();
         const next = ep.watched ? 0 : 1;
         await fetch(`/api/episodes/${ep.id}/watched`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ watched: next }) });
-        ep.watched = next; if (next) { ep.resume_position = 0; row.querySelector('.eprog')?.remove(); }
+        ep.watched = next; if (next) { ep.resume_position = 0; const _pr = row.querySelector('.eprog'); if (_pr) _pr.remove(); }
         e.target.textContent = next ? '✓' : '○'; e.target.classList.toggle('on', !!next);
       });
       epList.appendChild(row);
@@ -1578,7 +1578,7 @@ function openPlayer(ctx) {
   async function setSubtitle(url) {
     cues = []; renderSub();
     if (!url) return;
-    try { const r = await fetch(url); if (r.ok) cues = parseVtt(await r.text()); } catch {}
+    try { const r = await fetch(url); if (r.ok) cues = parseVtt(await r.text()); } catch (_e) {}
     renderSub();
   }
   function renderSub() {
@@ -1609,7 +1609,7 @@ function openPlayer(ctx) {
     // Ask the server how to play this file (direct vs ffmpeg transcode) and
     // for its real duration. Falls back to direct if the endpoint fails.
     let info = null;
-    try { info = await (await fetch(`/api/play/${ctx.searchKind}/${f.id}`)).json(); } catch {}
+    try { info = await (await fetch(`/api/play/${ctx.searchKind}/${f.id}`)).json(); } catch (_e) {}
     play = info && info.mode === 'transcode'
       ? { mode: 'transcode', duration: info.duration || null, url: info.url, reason: null }
       : { mode: 'direct', duration: (info && info.duration) || null, url: ctx.streamBase + f.id, reason: (info && info.reason) || null };
@@ -1699,7 +1699,7 @@ function openPlayer(ctx) {
   video.addEventListener('volumechange', () => { mute.innerHTML = video.muted ? ICONS.volMute : ICONS.volHigh; });
 
   // fullscreen
-  vp.querySelector('.vp-fs').addEventListener('click', () => { if (document.fullscreenElement) document.exitFullscreen(); else vp.requestFullscreen?.(); });
+  vp.querySelector('.vp-fs').addEventListener('click', () => { if (document.fullscreenElement) document.exitFullscreen(); else if (vp.requestFullscreen) vp.requestFullscreen(); });
 
   // subtitles quick toggle (no tracks at all -> jump straight to online search)
   function onSubDownloaded() {
@@ -1770,7 +1770,7 @@ function openPlayer(ctx) {
   // the menu and keep watching — the track appears when it's ready.
   async function generateSubsFlow() {
     let ws = {};
-    try { ws = await (await fetch('/api/whisper')).json(); } catch {}
+    try { ws = await (await fetch('/api/whisper')).json(); } catch (_e) {}
     if (!ws.available) {
       menu.innerHTML = `<h4>Generate with AI</h4><div class="vp-genmsg">The AI subtitle engine isn't installed yet. Open <b>⚙ Settings → AI subtitles</b> on the server to install it (one click), then try again.</div><button class="vp-opt" id="gen-back">‹ Back</button>`;
       menu.querySelector('#gen-back').addEventListener('click', buildMenu);
@@ -1815,7 +1815,7 @@ function openPlayer(ctx) {
       const poll = async () => {
         if (!polling || !document.body.contains(vp)) return;
         let s = {};
-        try { s = await (await fetch(`/api/subtitles/generate?kind=${ctx.searchKind}&fileId=${current.id}&target=${target}`)).json(); } catch {}
+        try { s = await (await fetch(`/api/subtitles/generate?kind=${ctx.searchKind}&fileId=${current.id}&target=${target}`)).json(); } catch (_e) {}
         if (s.status === 'done') { polling = false; apply(s.result); return; }
         if (s.status === 'error') { polling = false; fail(s.error || 'failed'); return; }
         if (!menu.classList.contains('hidden')) showProgress(s);
@@ -2016,7 +2016,7 @@ async function openSubSearch(kind, fileId, player, onApplied) {
       return;
     }
     results = await r.json();
-  } catch { subsStatus.textContent = 'Search failed.'; return; }
+  } catch (_e) { subsStatus.textContent = 'Search failed.'; return; }
   if (!results.length) { subsStatus.textContent = 'No subtitles found for this title.'; return; }
   subsStatus.textContent = `${results.length} result${results.length === 1 ? '' : 's'} — pick one to download:`;
   for (const s of results) {
@@ -2029,7 +2029,7 @@ async function openSubSearch(kind, fileId, player, onApplied) {
       e.target.textContent = 'Downloading…'; e.target.disabled = true;
       let dr;
       try { dr = await fetch('/api/subtitles/download', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind, fileId, file_id: s.file_id }) }); }
-      catch { e.target.textContent = 'Failed'; e.target.disabled = false; return; }
+      catch (_e) { e.target.textContent = 'Failed'; e.target.disabled = false; return; }
       if (dr.ok) {
         e.target.textContent = '✓ Added';
         subsStatus.textContent = 'Subtitle added.';
@@ -2104,7 +2104,7 @@ async function loadArr() {
       const st = await (await fetch('/api/requests/status')).json();
       arrStatus.textContent = arrStatusText(st);
     }
-  } catch {}
+  } catch (_e) {}
 }
 arrSave.addEventListener('click', async () => {
   arrSave.textContent = 'Testing…'; arrSave.disabled = true;
@@ -2115,7 +2115,7 @@ arrSave.addEventListener('click', async () => {
   try {
     const st = await (await fetch('/api/settings/arr', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })).json();
     arrStatus.textContent = arrStatusText(st);
-  } catch { arrStatus.textContent = 'Could not save.'; }
+  } catch (_e) { arrStatus.textContent = 'Could not save.'; }
   arrSave.textContent = 'Save & test connection'; arrSave.disabled = false;
   radarrKey.value = ''; sonarrKey.value = ''; // don't keep secrets in the field
 });
@@ -2127,7 +2127,7 @@ let wsTimer = null;
 async function loadWhisper() {
   clearTimeout(wsTimer); wsTimer = null;
   let s;
-  try { s = await (await fetch('/api/whisper')).json(); } catch { wsStatus.textContent = ''; return; }
+  try { s = await (await fetch('/api/whisper')).json(); } catch (_e) { wsStatus.textContent = ''; return; }
   if (s.installing) {
     wsInstall.classList.remove('hidden'); wsInstall.disabled = true; wsInstall.textContent = 'Installing…';
     const p = s.installing;
@@ -2154,7 +2154,7 @@ async function loadWhisper() {
 wsInstall.addEventListener('click', async () => {
   const force = wsInstall.dataset.force === '1';
   wsInstall.disabled = true;
-  try { await fetch('/api/whisper/install', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ force }) }); } catch {}
+  try { await fetch('/api/whisper/install', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ force }) }); } catch (_e) {}
   loadWhisper();
 });
 
@@ -2165,7 +2165,7 @@ let ffTimer = null;
 async function loadFfmpeg() {
   clearTimeout(ffTimer); ffTimer = null;
   let s;
-  try { s = await (await fetch('/api/ffmpeg')).json(); } catch { ffStatus.textContent = ''; return; }
+  try { s = await (await fetch('/api/ffmpeg')).json(); } catch (_e) { ffStatus.textContent = ''; return; }
   if (s.available) {
     ffStatus.textContent = `✓ Ready — every file type can play${s.nvenc ? ' (GPU accelerated)' : ''}.`;
     ffInstall.classList.add('hidden');
@@ -2189,7 +2189,7 @@ async function loadFfmpeg() {
 }
 ffInstall.addEventListener('click', async () => {
   ffInstall.disabled = true;
-  try { await fetch('/api/ffmpeg/install', { method: 'POST' }); } catch {}
+  try { await fetch('/api/ffmpeg/install', { method: 'POST' }); } catch (_e) {}
   loadFfmpeg();
 });
 
@@ -2248,7 +2248,7 @@ async function loadVersion() {
     const r = await fetch('/api/version', { cache: 'no-store' });
     const v = await r.json();
     versionEl.textContent = v.sha && v.sha !== 'unknown' ? `version ${v.sha}${v.date ? ' · ' + v.date : ''}` : 'updates not enabled yet';
-  } catch { versionEl.textContent = 'version unavailable'; }
+  } catch (_e) { versionEl.textContent = 'version unavailable'; }
 }
 async function loadSettings() {
   try {
@@ -2259,14 +2259,14 @@ async function loadSettings() {
     }
     if (s.openSubtitles.configured) { osStatus.textContent = '✓ Subtitle search is on' + (s.openSubtitles.username ? ' (' + s.openSubtitles.username + ')' : '') + '.'; osUser.value = s.openSubtitles.username || ''; }
     else osStatus.textContent = 'Add your free OpenSubtitles account to enable subtitle search.';
-  } catch { osStatus.textContent = ''; }
+  } catch (_e) { osStatus.textContent = ''; }
   if (currentUser && currentUser.role === 'admin') loadUsers();
 }
 
 // ---- Account: logout + (admin) user management ----
 const logoutBtn = document.getElementById('logout-btn');
 if (logoutBtn) logoutBtn.addEventListener('click', async () => {
-  try { await fetch('/api/logout', { method: 'POST' }); } catch {}
+  try { await fetch('/api/logout', { method: 'POST' }); } catch (_e) {}
   location.reload();
 });
 
@@ -2274,7 +2274,7 @@ async function loadUsers() {
   const list = document.getElementById('users-list');
   if (!list) return;
   let users = [];
-  try { users = await (await fetch('/api/users')).json(); } catch { return; }
+  try { users = await (await fetch('/api/users')).json(); } catch (_e) { return; }
   if (!Array.isArray(users)) return;
   list.innerHTML = '';
   for (const u of users) {
@@ -2314,7 +2314,7 @@ if (nuAdd) nuAdd.addEventListener('click', async () => {
 osSave.addEventListener('click', async () => {
   osSave.textContent = 'Saving…'; osSave.disabled = true;
   let d = {};
-  try { d = await (await fetch('/api/settings/opensubtitles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ apiKey: osKey.value.trim(), username: osUser.value.trim(), password: osPass.value }) })).json(); } catch {}
+  try { d = await (await fetch('/api/settings/opensubtitles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ apiKey: osKey.value.trim(), username: osUser.value.trim(), password: osPass.value }) })).json(); } catch (_e) {}
   osSave.textContent = 'Save subtitle account'; osSave.disabled = false;
   osStatus.textContent = d.configured ? '✓ Saved — subtitle search is on.' : 'Saved.';
   osKey.value = ''; osPass.value = '';
@@ -2331,7 +2331,7 @@ async function checkForUpdate() {
     updateBtn.textContent = r.updateAvailable ? '⟳ Update available' : '⟳ Up to date';
     if (r.updateAvailable && getPref('skipUpdate') !== r.latest) showUpdateSplash(r);
     else if (!r.updateAvailable) updateSplash.classList.add('hidden');
-  } catch {}
+  } catch (_e) {}
 }
 const updateOverlay = document.getElementById('update-overlay');
 const updateStage = document.getElementById('update-stage');
@@ -2344,11 +2344,11 @@ async function runUpdate(skipConfirm) {
   Object.values(uSteps).forEach((el) => el.classList.remove('active', 'done'));
   updateOverlay.classList.remove('hidden');
   setStage('Starting update…', 'Asking the server to fetch the latest code'); markStep('fetch', []);
-  try { await fetch('/api/update', { method: 'POST' }); } catch {}
+  try { await fetch('/api/update', { method: 'POST' }); } catch (_e) {}
   setStage('Applying update…', 'Pulling changes and restarting the server'); markStep('restart', ['fetch']);
   const start = Date.now();
   const poll = async () => {
-    try { const r = await fetch('/api/version', { cache: 'no-store' }); if (r.ok) { const v = await r.json(); markStep('reload', ['fetch', 'restart']); setStage('Updated! 🎉', `Now on ${v.sha || ''} — reloading…`); setTimeout(() => location.reload(), 1400); return; } } catch {}
+    try { const r = await fetch('/api/version', { cache: 'no-store' }); if (r.ok) { const v = await r.json(); markStep('reload', ['fetch', 'restart']); setStage('Updated! 🎉', `Now on ${v.sha || ''} — reloading…`); setTimeout(() => location.reload(), 1400); return; } } catch (_e) {}
     if (Date.now() - start < 90000) { setStage('Restarting server…', 'Waiting for it to come back online'); setTimeout(poll, 1500); }
     else setStage('This is taking a while', 'The server may need a manual restart on the Dell.');
   };
@@ -2376,7 +2376,7 @@ function showUpdateSplash(r) {
 }
 
 function escapeHtml(s) {
-  return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
 // ---------- Boot ----------
