@@ -1,0 +1,13 @@
+{
+  "id": "com.scenicprints.marquee",
+  "version": "1.0.0",
+  "vendor": "scenicprints",
+  "type": "web",
+  "main": "index.html",
+  "title": "Marquee",
+  "icon": "icon.png",
+  "largeIcon": "largeIcon.png",
+  "bgColor": "#0b0c10",
+  "iconColor": "#6c5cff",
+  "disableBackHistoryAPI": true
+}

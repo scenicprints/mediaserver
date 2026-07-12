@@ -1,0 +1,28 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Marquee</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #0b0c10; }
+    /* This LG app is D-pad / 5-way only — suppress the Magic Remote pointer.
+       Scoped to this app; does not affect the TCL app or web users. */
+    * { cursor: none !important; }
+  </style>
+</head>
+<body>
+  <!-- Thin webOS shell: it just opens the media server's web UI, which serves
+       the whole app (login, focus engine, player). So server updates reach the
+       TV with no re-packaging/re-install. `?tv=1` selects the shared TV mode
+       (cursor hidden, focus.js D-pad engine on) — the SAME mode the TCL app
+       already uses. `app=webos` is a flag UNIQUE to this LG app: the front-end
+       uses it to keep the session in a readable cookie (the webOS runtime drops
+       the HttpOnly one). Nothing else sends app=webos, so TCL and web are
+       unaffected. A token can be appended (&token=…) for zero-typing sign-in. -->
+  <script>
+    try { if (window.webOSSystem && typeof webOSSystem.hideCursor === 'function') webOSSystem.hideCursor(); } catch (e) {}
+    window.location.replace('https://marqu33.duckdns.org/?tv=1&app=webos');
+  </script>
+</body>
+</html>
