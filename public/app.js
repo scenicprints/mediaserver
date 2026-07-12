@@ -10,8 +10,29 @@
 let currentUser = null;
 let authMode = 'login'; // 'login' | 'register'
 
+// ---------- LG webOS TV app auth (token instead of cookie) ----------
+// The LG webOS app runtime doesn't keep the login cookie at all, so we carry the
+// session token in the launch URL (?app=webos&token=…) and attach it to every
+// request ourselves — Bearer header for fetch(), ?token= for media elements
+// (<video> can't set headers). Gated behind ?app=webos, so web, phone and the
+// Android TV (TCL) app are untouched: WEBOS_TOKEN is null and both helpers below
+// become no-ops.
+const IS_WEBOS_APP = new URLSearchParams(location.search).get('app') === 'webos';
+const WEBOS_TOKEN = IS_WEBOS_APP ? new URLSearchParams(location.search).get('token') : null;
+function withToken(url) {
+  if (!WEBOS_TOKEN || !url || !(url.startsWith('/') || url.startsWith(location.origin))) return url;
+  return url + (url.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(WEBOS_TOKEN);
+}
+
 const _fetch = window.fetch.bind(window);
 window.fetch = async (...args) => {
+  // webOS app: attach the token as a Bearer header on same-origin API calls.
+  if (WEBOS_TOKEN && typeof args[0] === 'string' && (args[0].startsWith('/') || args[0].startsWith(location.origin))) {
+    const init = (args[1] = args[1] || {});
+    const h = new Headers(init.headers || {});
+    if (!h.has('Authorization')) h.set('Authorization', 'Bearer ' + WEBOS_TOKEN);
+    init.headers = h;
+  }
   const res = await _fetch(...args);
   const url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';
   if (res.status === 401 && url.includes('/api/') && !/\/api\/(login|register|auth\/status)/.test(url)) {
@@ -42,7 +63,6 @@ if (TV_MODE) {
 // we mirror the session token into a readable `mstoken` cookie the server also
 // accepts (tokenFromReq reads Bearer/cookie/query), and honor a token baked into
 // the launch URL (?token=…) for zero-typing sign-in.
-const IS_WEBOS_APP = new URLSearchParams(location.search).get('app') === 'webos';
 function persistToken(t) {
   if (!IS_WEBOS_APP || !t) return; // does nothing outside the LG webOS app
   const secure = location.protocol === 'https:' ? '; Secure' : '';
@@ -1490,7 +1510,7 @@ function openPlayer(ctx) {
   let subVisible = true;
   let currentSubIdx = -1;
   let upnextShown = false;
-  const subUrl = (idx) => `${ctx.subtitleBase}${current.id}?idx=${idx}`;
+  const subUrl = (idx) => withToken(`${ctx.subtitleBase}${current.id}?idx=${idx}`);
   // Caption delay is remembered per file+track (server-side) and restored
   // next time — on any device.
   const delayKey = () => `sd:${current.id}:${currentSubIdx}`;
@@ -1507,7 +1527,7 @@ function openPlayer(ctx) {
   const dur = () => play.duration || video.duration || 0;
   function seekTo(t) {
     t = Math.max(0, dur() ? Math.min(t, dur() - 0.3) : t);
-    if (play.mode === 'transcode') { base = t; video.src = play.url + '?start=' + t.toFixed(2); video.play(); }
+    if (play.mode === 'transcode') { base = t; video.src = withToken(play.url + '?start=' + t.toFixed(2)); video.play(); }
     else video.currentTime = t;
   }
 
@@ -1641,10 +1661,10 @@ function openPlayer(ctx) {
     base = 0;
     if (play.mode === 'transcode') {
       base = at || 0;
-      video.src = play.url + '?start=' + (at || 0);
+      video.src = withToken(play.url + '?start=' + (at || 0));
       video.addEventListener('loadedmetadata', () => attemptPlay(), { once: true });
     } else {
-      video.src = play.url;
+      video.src = withToken(play.url);
       video.addEventListener('loadedmetadata', () => { if (at) video.currentTime = at; attemptPlay(); }, { once: true });
     }
     const subs = current.subtitles || [];
