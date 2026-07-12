@@ -731,6 +731,15 @@ function fileRow(kind, fileId) {
   return db.prepare(`SELECT path FROM ${table} WHERE id = ?`).get(fileId);
 }
 
+// The user's "Audio output" pref. Default = stereo (fold surround down on the
+// server, correctly, with a dialogue boost) since these are two-speaker TVs and
+// their own downmix drops the center/dialogue channel. Only an explicit
+// 'surround' opts back into shipping the original multichannel track.
+function forceStereoFor(req) {
+  const row = db.prepare('SELECT value FROM user_prefs WHERE user_id = ? AND key = ?').get(req.user.id, 'audioMode');
+  return !row || row.value !== 'surround';
+}
+
 // How should the browser play this file? `direct` = today's range streaming;
 // `transcode` = ffmpeg remux/transcode to fragmented MP4. Also reports the real
 // duration (from ffprobe) so the player has a timeline even when transcoding.
@@ -738,7 +747,7 @@ app.get('/api/play/:kind/:fileId', async (req, reply) => {
   const { kind, fileId } = req.params;
   const row = fileRow(kind, fileId);
   if (!row) return reply.code(404).send({ error: 'not found' });
-  const info = await playInfo(row.path);
+  const info = await playInfo(row.path, { forceStereo: forceStereoFor(req) });
   const directUrl = (kind === 'episode' ? '/api/stream/episode/' : '/api/stream/') + fileId;
   return {
     mode: info.mode,
@@ -757,10 +766,10 @@ app.get('/api/transcode/:kind/:fileId', async (req, reply) => {
   const { kind, fileId } = req.params;
   const row = fileRow(kind, fileId);
   if (!row) return reply.code(404).send({ error: 'not found' });
-  const info = await playInfo(row.path);
+  const info = await playInfo(row.path, { forceStereo: forceStereoFor(req) });
   if (info.mode !== 'transcode') return reply.code(400).send({ error: 'file does not need transcoding' });
   const start = Math.max(0, parseFloat(req.query.start) || 0);
-  const proc = transcodeStream(row.path, { start, vcopy: info.vcopy, acopy: info.acopy });
+  const proc = transcodeStream(row.path, { start, vcopy: info.vcopy, acopy: info.acopy, downmix: info.downmix });
   proc.stderr.on('data', (d) => console.error('[ffmpeg]', String(d).trim()));
   proc.on('error', (e) => console.error('[ffmpeg] spawn error:', e.message));
   req.raw.on('close', () => { try { proc.kill('SIGKILL'); } catch {} });

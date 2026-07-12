@@ -156,7 +156,11 @@ function chaptersOf(p) {
   })).filter((c) => c.end > c.start);
 }
 
-export async function playInfo(filePath) {
+// `forceStereo` (the user's "Audio output → Stereo" pref) means: never ship a
+// surround track to a two-speaker TV. Multichannel audio is folded down to a
+// dialogue-boosted stereo mix on the server instead — which requires re-encoding
+// the audio (so the file can no longer direct-play or audio-copy).
+export async function playInfo(filePath, { forceStereo = false } = {}) {
   const ext = path.extname(filePath).toLowerCase();
   if (!ffmpegPath || !ffprobePath) {
     return { mode: 'direct', duration: null, reason: 'no-ffmpeg', chapters: [] };
@@ -169,14 +173,24 @@ export async function playInfo(filePath) {
   const chapters = chaptersOf(p);
   const vOK = !!v && VIDEO_OK.has(v.codec_name);
   const aOK = !a || AUDIO_OK.has(a.codec_name);
-  if (DIRECT_EXT.has(ext) && vOK && aOK) return { mode: 'direct', duration, chapters };
-  return { mode: 'transcode', duration, vcopy: vOK, acopy: aOK, chapters };
+  const multichannel = !!a && (+a.channels || 0) > 2;
+  const downmix = forceStereo && multichannel; // fold 5.1/7.1 → stereo, server-side
+  if (DIRECT_EXT.has(ext) && vOK && aOK && !downmix) return { mode: 'direct', duration, chapters };
+  return { mode: 'transcode', duration, vcopy: vOK, acopy: aOK && !downmix, downmix, chapters };
 }
 
 // ---- Transcode stream ----
 // Fragmented MP4 to stdout. `start` = seek offset in seconds (client restarts
 // the stream to seek and keeps a virtual timeline).
-export function transcodeStream(filePath, { start = 0, vcopy = false, acopy = false } = {}) {
+// Dialogue-forward 5.1→stereo downmix. A TV's own fold buries the center
+// channel (where on-screen dialogue lives); this keeps the center at full level
+// and pulls the surrounds back, so dialogue stays out front. `aformat` first
+// normalizes any surround layout (5.0/6.1/7.1, side- vs back-channel naming) to
+// canonical 5.1 so the pan matrix always has the channels it references.
+const DIALOGUE_DOWNMIX =
+  'aformat=channel_layouts=5.1,pan=stereo|FL=FC+0.30*FL+0.30*BL|FR=FC+0.30*FR+0.30*BR';
+
+export function transcodeStream(filePath, { start = 0, vcopy = false, acopy = false, downmix = false } = {}) {
   const args = ['-hide_banner', '-loglevel', 'error'];
   if (start > 0) args.push('-ss', String(start));
   args.push('-i', filePath, '-map', '0:v:0', '-map', '0:a:0?', '-sn', '-dn');
@@ -184,6 +198,7 @@ export function transcodeStream(filePath, { start = 0, vcopy = false, acopy = fa
   else if (hasNvenc) args.push('-c:v', 'h264_nvenc', '-preset', 'p4', '-cq', '23', '-pix_fmt', 'yuv420p');
   else args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21', '-pix_fmt', 'yuv420p');
   if (acopy) args.push('-c:a', 'copy');
+  else if (downmix) args.push('-af', DIALOGUE_DOWNMIX, '-c:a', 'aac', '-b:a', '192k');
   else args.push('-c:a', 'aac', '-ac', '2', '-b:a', '192k');
   args.push('-movflags', '+frag_keyframe+empty_moov+default_base_moof', '-f', 'mp4', 'pipe:1');
   return spawn(ffmpegPath, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });

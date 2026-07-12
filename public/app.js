@@ -2118,9 +2118,24 @@ settingsBtn.addEventListener('click', openSettings);
 
 async function openSettings() {
   settingsModal.classList.remove('hidden');
+  paintAudioMode();
   loadVersion(); checkForUpdate(); loadSettings(); loadFfmpeg(); loadWhisper(); loadArr();
   await renderLibraries();
 }
+
+// ---- Audio output: server-side dialogue-boosted stereo downmix vs. surround
+// passthrough. Stored as the per-user `audioMode` pref so it follows the user to
+// every TV; the /api/play + /api/transcode routes read it and downmix on the
+// server (a TV's own 5.1→stereo fold drops the center/dialogue channel).
+const audioBtns = [...document.querySelectorAll('#audio-stereo, #audio-surround')];
+function paintAudioMode() {
+  const mode = getPref('audioMode') === 'surround' ? 'surround' : 'stereo';
+  audioBtns.forEach((b) => b.classList.toggle('primary', b.dataset.audio === mode));
+}
+audioBtns.forEach((b) => b.addEventListener('click', () => {
+  setPref('audioMode', b.dataset.audio);
+  paintAudioMode();
+}));
 
 // ---- Requests: Radarr/Sonarr connection settings ----
 const arrStatus = document.getElementById('arr-status');

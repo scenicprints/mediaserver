@@ -31,6 +31,37 @@ function gpuAvailable(config = {}) {
 }
 function whisperThreads() { return Math.max(4, Math.min(8, Math.floor(os.cpus().length / 2))); }
 
+// Dialogue only: strip the non-speech cues Whisper emits — sound effects and
+// music descriptions in brackets/parens ([Music], (applause), [BLANK_AUDIO]) and
+// music-note runs (♪ … ♪). We remove those spans inline and drop any cue left
+// with no spoken text, so only real dialogue survives. The WEBVTT header, NOTE
+// blocks and the timing of surviving cues are preserved untouched.
+function dialogueOnly(vtt) {
+  const isTiming = (l) => l.includes('-->');
+  const isCueId = (l) => /^\d+$/.test(l.trim()); // optional numeric cue identifier
+  const blocks = vtt.replace(/\r\n/g, '\n').split(/\n{2,}/);
+  const out = [];
+  for (const block of blocks) {
+    if (!block.trim()) continue;
+    if (!block.includes('-->')) { out.push(block); continue; } // header / NOTE
+    const kept = [];
+    for (const line of block.split('\n')) {
+      if (isTiming(line) || isCueId(line)) { kept.push(line); continue; }
+      const text = line
+        .replace(/\[[^\]]*\]/g, ' ')   // [Music], [BLANK_AUDIO]
+        .replace(/\([^)]*\)/g, ' ')    // (applause), (sighs)
+        .replace(/♪[^♪]*♪?/g, ' ')     // ♪ lyrics ♪
+        .replace(/[♪♫]/g, ' ')
+        .replace(/\s{2,}/g, ' ')
+        .trim();
+      if (text) kept.push(text);
+    }
+    // Keep the cue only if a timing line still has spoken text under it.
+    if (kept.some(isTiming) && kept.some((l) => !isTiming(l) && !isCueId(l))) out.push(kept.join('\n'));
+  }
+  return out.join('\n\n').trim() + '\n';
+}
+
 function tryRun(cmd, args) {
   return new Promise((resolve) => {
     if (!cmd) return resolve(null);
@@ -239,7 +270,9 @@ export async function generate(root, ffmpegPath, videoPath, { language = 'auto',
     });
   });
 
-  try { fs.copyFileSync(outBase + '.vtt', vttPath); } catch (e) { throw new Error('whisper produced no output'); }
+  // Filter to dialogue only (drop [Music]/(sfx)/♪ cues) as we cache the result.
+  try { fs.writeFileSync(vttPath, dialogueOnly(fs.readFileSync(outBase + '.vtt', 'utf8')), 'utf8'); }
+  catch (e) { throw new Error('whisper produced no output'); }
   fs.rmSync(wav, { force: true });
   fs.rmSync(outBase + '.vtt', { force: true });
   prog(1, 'transcribing');
