@@ -15,7 +15,8 @@
     '.card', '.coll-card', '.req-card', '.nav-link', '.hero-dot', '.see-all', '.season-card',
     '.episode', '.rec', '.trailer-card', '.tab', '.az', '.frow',
     '.btn', '.close', '.detail-close', '.icon-btn', '.rm', '#update-pill',
-    '.nav-search', '.req-input', '.dp-select', '.req-qsel select'
+    '.nav-search', '.req-input', '.dp-select', '.req-qsel select',
+    '.auth-input', '.auth-toggle'
   ].join(',');
 
   let current = null;   // the focused element
@@ -35,6 +36,9 @@
   function scope() {
     if (document.querySelector('.vp')) return null;
     if (!document.getElementById('update-overlay').classList.contains('hidden')) return null;
+    // The login overlay traps focus inside itself (its fields, not the nav behind it).
+    const auth = document.getElementById('auth');
+    if (auth && !auth.classList.contains('hidden')) return auth;
     const modal = [...document.querySelectorAll('.modal')].find((m) => !m.classList.contains('hidden'));
     if (modal) return modal;
     const detail = document.getElementById('detail');
@@ -171,6 +175,9 @@
   // Backspace = the remote's Menu/Back button. Layers close top-down; in the
   // main browse it lifts focus up to the ribbon (the TV way back to the menu).
   function back() {
+    // On the login screen there's nowhere to go back to — don't leak to the nav.
+    const auth = document.getElementById('auth');
+    if (auth && !auth.classList.contains('hidden')) return;
     const modal = [...document.querySelectorAll('.modal')].find((m) => !m.classList.contains('hidden'));
     if (modal) { modal.classList.add('hidden'); return; }
     const detail = document.getElementById('detail');

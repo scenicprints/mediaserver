@@ -573,6 +573,12 @@ function gitInfo() {
 
 app.get('/api/version', async () => gitInfo());
 
+// Short, easy-to-type link for sideloading the Android TV app onto a new TV
+// (typing the full GitHub release URL on a remote is painful). Public on purpose.
+app.get('/tv', async (req, reply) =>
+  reply.redirect('https://github.com/scenicprints/mediaserver/releases/download/marquee-tv-latest/app-release.apk')
+);
+
 // Ask GitHub whether newer code exists (fetches, then compares local vs remote).
 // Async git — the fetch can take seconds, and a synchronous call here would
 // freeze the whole event loop (stuttering any video streaming in progress).
