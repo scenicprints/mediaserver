@@ -514,10 +514,10 @@ button { font-family: inherit; }
 .frow:hover { background: var(--panel-2); }
 .picker-actions { display: flex; align-items: center; gap: 10px; }
 .settings-tabs { display: flex; gap: 4px; margin: 18px 0 0; border-bottom: 1px solid var(--line); }
-.stab { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 15px; font-weight: 600;
+.settings-tabs .tab { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 15px; font-weight: 600;
   padding: 10px 18px; border-bottom: 2px solid transparent; margin-bottom: -1px; }
-.stab:hover { color: var(--text); }
-.stab.active { color: var(--text); border-bottom-color: var(--accent); }
+.settings-tabs .tab:hover { color: var(--text); }
+.settings-tabs .tab.active { color: var(--text); border-bottom-color: var(--accent); }
 .tab-panel { display: none; }
 .tab-panel.active { display: block; }
 .seg { flex-wrap: wrap; }

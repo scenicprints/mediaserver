@@ -2150,8 +2150,10 @@ for (const [key, attr] of AUDIO_GROUPS)
   document.querySelectorAll('[data-' + attr + ']').forEach((b) => b.addEventListener('click', () => { localStorage.setItem(key, b.dataset[attr]); paintAudio(); }));
 
 // Settings tabs (General / Audio): show the matching panel, highlight the tab.
-document.querySelectorAll('#settings .stab').forEach((t) => t.addEventListener('click', () => {
-  document.querySelectorAll('#settings .stab').forEach((x) => x.classList.toggle('active', x === t));
+// Uses the app's `.tabs > .tab` convention so the remote focus engine can land
+// on them (they're in its SELECTOR / HGROUP) — not a mouse-only control.
+document.querySelectorAll('#settings .settings-tabs .tab').forEach((t) => t.addEventListener('click', () => {
+  document.querySelectorAll('#settings .settings-tabs .tab').forEach((x) => x.classList.toggle('active', x === t));
   document.querySelectorAll('#settings .tab-panel').forEach((p) => p.classList.toggle('active', p.dataset.panel === t.dataset.tab));
 }));
 
