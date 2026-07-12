@@ -48,63 +48,102 @@
         <button class="btn" id="logout-btn">Log out</button>
       </div>
 
-      <div class="sub-account">
-        <h3>Audio output</h3>
-        <p class="muted">If dialogue sometimes goes silent while music and effects keep playing, choose <b>Stereo</b> — TVs have two speakers, so the server folds surround (5.1) sound down to stereo correctly and keeps dialogue out front. <b>Surround</b> sends the original track untouched. Takes effect the next time you start something.</p>
-        <div class="add-row">
-          <button class="btn" id="audio-stereo" data-audio="stereo">🔉 Stereo (recommended)</button>
-          <button class="btn" id="audio-surround" data-audio="surround">🔊 Surround (original)</button>
+      <div class="settings-tabs">
+        <button class="stab active" data-tab="general">General</button>
+        <button class="stab" data-tab="audio">Audio</button>
+      </div>
+
+      <div class="tab-panel active" data-panel="general">
+        <div class="admin-only">
+          <h2>Library folders</h2>
+          <p class="muted">Add the folders your media lives in. Sub-folders are included automatically.</p>
+          <div class="add-row">
+            <button class="btn primary" data-add="movie">＋ Add Movies folder</button>
+            <button class="btn primary" data-add="tv">＋ Add TV Shows folder</button>
+          </div>
+          <div id="lib-list" class="lib-list"></div>
+        </div>
+
+        <div class="sub-account">
+          <h3>Your subtitle account (OpenSubtitles)</h3>
+          <p class="muted" id="os-status">Add your free OpenSubtitles account to enable subtitle search.</p>
+          <input id="os-key" class="sa-input" placeholder="API key" autocomplete="off" />
+          <input id="os-user" class="sa-input" placeholder="Username" autocomplete="off" />
+          <input id="os-pass" class="sa-input" type="password" placeholder="Password" autocomplete="off" />
+          <button class="btn primary" id="os-save">Save subtitle account</button>
+        </div>
+
+        <div class="sub-account admin-only">
+          <h3>Playback engine (FFmpeg)</h3>
+          <p class="muted" id="ff-status">Checking…</p>
+          <button class="btn primary hidden" id="ff-install">⬇ Install playback engine</button>
+        </div>
+
+        <div class="sub-account admin-only">
+          <h3>AI subtitles (Whisper)</h3>
+          <p class="muted" id="ws-status">Checking…</p>
+          <button class="btn primary hidden" id="ws-install">⬇ Install AI subtitle engine</button>
+        </div>
+
+        <div class="sub-account admin-only">
+          <h3>Requests (Radarr &amp; Sonarr)</h3>
+          <p class="muted" id="arr-status">Connect Radarr (movies) and Sonarr (TV) so you can request titles from the Requests tab.</p>
+          <div class="arr-row"><input id="radarr-url" class="sa-input" placeholder="Radarr URL — e.g. http://localhost:7878" /><input id="radarr-key" class="sa-input" placeholder="Radarr API key" autocomplete="off" /></div>
+          <div class="arr-row"><input id="sonarr-url" class="sa-input" placeholder="Sonarr URL — e.g. http://localhost:8989" /><input id="sonarr-key" class="sa-input" placeholder="Sonarr API key" autocomplete="off" /></div>
+          <button class="btn primary" id="arr-save">Save &amp; test connection</button>
+        </div>
+
+        <div class="sub-account admin-only">
+          <h3>Accounts</h3>
+          <p class="muted">Share the app + your invite code and people self-register, or add them here. Everyone gets their own watch history and settings.</p>
+          <div id="users-list" class="lib-list"></div>
+          <div class="arr-row">
+            <input id="nu-user" class="sa-input" placeholder="Username" autocomplete="off" />
+            <input id="nu-pass" class="sa-input" type="password" placeholder="Password" autocomplete="new-password" />
+          </div>
+          <button class="btn primary" id="nu-add">＋ Add user</button>
         </div>
       </div>
 
-      <div class="admin-only">
-        <h2>Library folders</h2>
-        <p class="muted">Add the folders your media lives in. Sub-folders are included automatically.</p>
-        <div class="add-row">
-          <button class="btn primary" data-add="movie">＋ Add Movies folder</button>
-          <button class="btn primary" data-add="tv">＋ Add TV Shows folder</button>
+      <div class="tab-panel" data-panel="audio">
+        <p class="muted" style="margin-top:0">These settings are saved for <b>this device</b> (they depend on this screen's speakers) and take effect the next time you start something.</p>
+
+        <div class="sub-account">
+          <h3>Audio output</h3>
+          <p class="muted">If dialogue sometimes goes silent while music and effects keep playing, choose <b>Stereo</b> — TVs have two speakers, so the server folds surround (5.1) down to stereo correctly and keeps dialogue out front. <b>Surround</b> sends the original track untouched, for a real surround system.</p>
+          <div class="add-row seg">
+            <button class="btn" data-audio="stereo">🔉 Stereo (recommended)</button>
+            <button class="btn" data-audio="surround">🔊 Surround (original)</button>
+          </div>
         </div>
-        <div id="lib-list" class="lib-list"></div>
-      </div>
 
-      <div class="sub-account">
-        <h3>Your subtitle account (OpenSubtitles)</h3>
-        <p class="muted" id="os-status">Add your free OpenSubtitles account to enable subtitle search.</p>
-        <input id="os-key" class="sa-input" placeholder="API key" autocomplete="off" />
-        <input id="os-user" class="sa-input" placeholder="Username" autocomplete="off" />
-        <input id="os-pass" class="sa-input" type="password" placeholder="Password" autocomplete="off" />
-        <button class="btn primary" id="os-save">Save subtitle account</button>
-      </div>
-
-      <div class="sub-account admin-only">
-        <h3>Playback engine (FFmpeg)</h3>
-        <p class="muted" id="ff-status">Checking…</p>
-        <button class="btn primary hidden" id="ff-install">⬇ Install playback engine</button>
-      </div>
-
-      <div class="sub-account admin-only">
-        <h3>AI subtitles (Whisper)</h3>
-        <p class="muted" id="ws-status">Checking…</p>
-        <button class="btn primary hidden" id="ws-install">⬇ Install AI subtitle engine</button>
-      </div>
-
-      <div class="sub-account admin-only">
-        <h3>Requests (Radarr &amp; Sonarr)</h3>
-        <p class="muted" id="arr-status">Connect Radarr (movies) and Sonarr (TV) so you can request titles from the Requests tab.</p>
-        <div class="arr-row"><input id="radarr-url" class="sa-input" placeholder="Radarr URL — e.g. http://localhost:7878" /><input id="radarr-key" class="sa-input" placeholder="Radarr API key" autocomplete="off" /></div>
-        <div class="arr-row"><input id="sonarr-url" class="sa-input" placeholder="Sonarr URL — e.g. http://localhost:8989" /><input id="sonarr-key" class="sa-input" placeholder="Sonarr API key" autocomplete="off" /></div>
-        <button class="btn primary" id="arr-save">Save &amp; test connection</button>
-      </div>
-
-      <div class="sub-account admin-only">
-        <h3>Accounts</h3>
-        <p class="muted">Share the app + your invite code and people self-register, or add them here. Everyone gets their own watch history and settings.</p>
-        <div id="users-list" class="lib-list"></div>
-        <div class="arr-row">
-          <input id="nu-user" class="sa-input" placeholder="Username" autocomplete="off" />
-          <input id="nu-pass" class="sa-input" type="password" placeholder="Password" autocomplete="new-password" />
+        <div class="sub-account">
+          <h3>Dialogue boost</h3>
+          <p class="muted">How far to push spoken dialogue forward while folding surround down. <b>Strong</b> is best if voices are still hard to hear. Only affects surround (5.1) sources played in Stereo.</p>
+          <div class="add-row seg">
+            <button class="btn" data-dboost="off">Off</button>
+            <button class="btn" data-dboost="normal">Normal</button>
+            <button class="btn" data-dboost="strong">Strong</button>
+          </div>
         </div>
-        <button class="btn primary" id="nu-add">＋ Add user</button>
+
+        <div class="sub-account">
+          <h3>Night mode</h3>
+          <p class="muted">Evens out loud and quiet parts so explosions don't blow out dialogue at low volume — good for late-night watching.</p>
+          <div class="add-row seg">
+            <button class="btn" data-night="0">Off</button>
+            <button class="btn" data-night="1">On</button>
+          </div>
+        </div>
+
+        <div class="sub-account">
+          <h3>Loudness normalization</h3>
+          <p class="muted">Keeps the overall volume consistent from one title to the next, so you're not reaching for the remote between films.</p>
+          <div class="add-row seg">
+            <button class="btn" data-norm="0">Off</button>
+            <button class="btn" data-norm="1">On</button>
+          </div>
+        </div>
       </div>
 
       <div class="settings-footer">

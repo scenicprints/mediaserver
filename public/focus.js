@@ -123,7 +123,11 @@
     if (current) current.classList.remove('tv-focus');
     current = el;
     current.classList.add('tv-focus');
-    if (!noScroll(el)) el.scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'smooth' });
+    // Center the focused item vertically on screen. `nearest` only scrolled the
+    // row until its edge touched the viewport, so moving down left rows flush
+    // against the bottom (then clipped by TV overscan) and never comfortably in
+    // view; `center` keeps the active row in the middle of the screen.
+    if (!noScroll(el)) el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
   }
 
   // Pick a sensible landing spot when focus is (re)initialized on a screen:

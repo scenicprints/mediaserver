@@ -1527,7 +1527,7 @@ function openPlayer(ctx) {
   const dur = () => play.duration || video.duration || 0;
   function seekTo(t) {
     t = Math.max(0, dur() ? Math.min(t, dur() - 0.3) : t);
-    if (play.mode === 'transcode') { base = t; video.src = withToken(play.url + '?start=' + t.toFixed(2)); video.play(); }
+    if (play.mode === 'transcode') { base = t; video.src = withToken(play.url + '?start=' + t.toFixed(2) + '&' + audioQuery()); video.play(); }
     else video.currentTime = t;
   }
 
@@ -1647,7 +1647,7 @@ function openPlayer(ctx) {
     // Ask the server how to play this file (direct vs ffmpeg transcode) and
     // for its real duration. Falls back to direct if the endpoint fails.
     let info = null;
-    try { info = await (await fetch(`/api/play/${ctx.searchKind}/${f.id}`)).json(); } catch (_e) {}
+    try { info = await (await fetch(`/api/play/${ctx.searchKind}/${f.id}?${audioQuery()}`)).json(); } catch (_e) {}
     play = info && info.mode === 'transcode'
       ? { mode: 'transcode', duration: info.duration || null, url: info.url, reason: null }
       : { mode: 'direct', duration: (info && info.duration) || null, url: ctx.streamBase + f.id, reason: (info && info.reason) || null };
@@ -1661,7 +1661,7 @@ function openPlayer(ctx) {
     base = 0;
     if (play.mode === 'transcode') {
       base = at || 0;
-      video.src = withToken(play.url + '?start=' + (at || 0));
+      video.src = withToken(play.url + '?start=' + (at || 0) + '&' + audioQuery());
       video.addEventListener('loadedmetadata', () => attemptPlay(), { once: true });
     } else {
       video.src = withToken(play.url);
@@ -2118,23 +2118,41 @@ settingsBtn.addEventListener('click', openSettings);
 
 async function openSettings() {
   settingsModal.classList.remove('hidden');
-  paintAudioMode();
+  paintAudio();
   loadVersion(); checkForUpdate(); loadSettings(); loadFfmpeg(); loadWhisper(); loadArr();
   await renderLibraries();
 }
 
-// ---- Audio output: server-side dialogue-boosted stereo downmix vs. surround
-// passthrough. Stored as the per-user `audioMode` pref so it follows the user to
-// every TV; the /api/play + /api/transcode routes read it and downmix on the
-// server (a TV's own 5.1→stereo fold drops the center/dialogue channel).
-const audioBtns = [...document.querySelectorAll('#audio-stereo, #audio-surround')];
-function paintAudioMode() {
-  const mode = getPref('audioMode') === 'surround' ? 'surround' : 'stereo';
-  audioBtns.forEach((b) => b.classList.toggle('primary', b.dataset.audio === mode));
+// ---- Audio (per-DEVICE, localStorage): these depend on the screen's speakers,
+// not the person, so — unlike every other pref — they live in localStorage and
+// ride along on each play request as query params. The /api/play + /api/transcode
+// routes apply the fold/filters server-side (a TV's own 5.1→stereo fold drops the
+// center/dialogue channel). Keys: audioMode (stereo|surround), dboost (off|
+// normal|strong), night (0|1), norm (0|1).
+const AUDIO_DEFAULTS = { audioMode: 'stereo', dboost: 'normal', night: '0', norm: '0' };
+const audioGet = (k) => localStorage.getItem(k) || AUDIO_DEFAULTS[k];
+function audioQuery() {
+  const p = new URLSearchParams();
+  p.set('audio', audioGet('audioMode') === 'surround' ? 'surround' : 'stereo');
+  if (audioGet('dboost') !== 'normal') p.set('dboost', audioGet('dboost'));
+  if (audioGet('night') === '1') p.set('night', '1');
+  if (audioGet('norm') === '1') p.set('norm', '1');
+  return p.toString();
 }
-audioBtns.forEach((b) => b.addEventListener('click', () => {
-  setPref('audioMode', b.dataset.audio);
-  paintAudioMode();
+// Segmented controls: [localStorage key, data-* attribute] per group. Clicking a
+// button stores its value and repaints the group (selected = the `primary` look).
+const AUDIO_GROUPS = [['audioMode', 'audio'], ['dboost', 'dboost'], ['night', 'night'], ['norm', 'norm']];
+function paintAudio() {
+  for (const [key, attr] of AUDIO_GROUPS)
+    document.querySelectorAll('[data-' + attr + ']').forEach((b) => b.classList.toggle('primary', b.dataset[attr] === audioGet(key)));
+}
+for (const [key, attr] of AUDIO_GROUPS)
+  document.querySelectorAll('[data-' + attr + ']').forEach((b) => b.addEventListener('click', () => { localStorage.setItem(key, b.dataset[attr]); paintAudio(); }));
+
+// Settings tabs (General / Audio): show the matching panel, highlight the tab.
+document.querySelectorAll('#settings .stab').forEach((t) => t.addEventListener('click', () => {
+  document.querySelectorAll('#settings .stab').forEach((x) => x.classList.toggle('active', x === t));
+  document.querySelectorAll('#settings .tab-panel').forEach((p) => p.classList.toggle('active', p.dataset.panel === t.dataset.tab));
 }));
 
 // ---- Requests: Radarr/Sonarr connection settings ----
