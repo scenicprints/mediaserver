@@ -1,0 +1,32 @@
+# XcodeGen spec — CI runs `xcodegen` to produce MarqueeTV.xcodeproj, so we never
+# hand-maintain a .pbxproj. Versions are injected by CI (MARKETING_VERSION /
+# CURRENT_PROJECT_VERSION) and the team id comes from a build setting.
+name: MarqueeTV
+options:
+  bundleIdPrefix: com.scenicprints
+  deploymentTarget:
+    tvOS: "17.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+
+targets:
+  MarqueeTV:
+    type: application
+    platform: tvOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: Sources
+      - path: Resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.scenicprints.marqueetv
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Resources/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: "App Icon & Top Shelf Image"
+        TARGETED_DEVICE_FAMILY: "3"
+        SWIFT_VERSION: "5.0"
+        CODE_SIGN_STYLE: Automatic

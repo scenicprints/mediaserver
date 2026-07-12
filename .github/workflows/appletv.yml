@@ -1,0 +1,79 @@
+name: Apple TV app
+
+# Builds the MarqueeTV tvOS app on a cloud macOS runner and uploads it to
+# TestFlight, signed with an App Store Connect API key (no Mac needed locally).
+# Requires these repo secrets (added after Apple Developer approval):
+#   APPLE_TEAM_ID        - 10-char team id (App Store Connect > Membership)
+#   ASC_KEY_ID           - App Store Connect API key id
+#   ASC_ISSUER_ID        - App Store Connect API issuer id
+#   ASC_KEY_P8_BASE64    - the AuthKey_XXXX.p8 file, base64-encoded
+# NOTE: signing/upload always needs a shakeout on the first real run.
+# Manual-only until the secrets above are added (so it doesn't auto-fail);
+# switch to a push trigger once TestFlight uploads are working.
+on:
+  workflow_dispatch:
+
+jobs:
+  testflight:
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: appletv
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Write App Store Connect API key
+        run: |
+          KEYDIR="$HOME/.appstoreconnect/private_keys"
+          mkdir -p "$KEYDIR"
+          echo "${{ secrets.ASC_KEY_P8_BASE64 }}" | base64 --decode > "$KEYDIR/AuthKey_${{ secrets.ASC_KEY_ID }}.p8"
+
+      - name: Archive
+        run: |
+          xcodebuild \
+            -project MarqueeTV.xcodeproj \
+            -scheme MarqueeTV \
+            -sdk appletvos \
+            -configuration Release \
+            -archivePath "$PWD/build/MarqueeTV.xcarchive" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$HOME/.appstoreconnect/private_keys/AuthKey_${{ secrets.ASC_KEY_ID }}.p8" \
+            -authenticationKeyID "${{ secrets.ASC_KEY_ID }}" \
+            -authenticationKeyIssuerID "${{ secrets.ASC_ISSUER_ID }}" \
+            DEVELOPMENT_TEAM="${{ secrets.APPLE_TEAM_ID }}" \
+            CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
+            archive
+
+      - name: Export .ipa
+        run: |
+          cat > ExportOptions.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>app-store</string>
+            <key>teamID</key><string>${{ secrets.APPLE_TEAM_ID }}</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>uploadSymbols</key><true/>
+          </dict></plist>
+          EOF
+          xcodebuild -exportArchive \
+            -archivePath "$PWD/build/MarqueeTV.xcarchive" \
+            -exportPath "$PWD/build/export" \
+            -exportOptionsPlist ExportOptions.plist \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$HOME/.appstoreconnect/private_keys/AuthKey_${{ secrets.ASC_KEY_ID }}.p8" \
+            -authenticationKeyID "${{ secrets.ASC_KEY_ID }}" \
+            -authenticationKeyIssuerID "${{ secrets.ASC_ISSUER_ID }}"
+
+      - name: Upload to TestFlight
+        run: |
+          xcrun altool --upload-app -t tvos \
+            -f "$PWD/build/export/MarqueeTV.ipa" \
+            --apiKey "${{ secrets.ASC_KEY_ID }}" \
+            --apiIssuer "${{ secrets.ASC_ISSUER_ID }}"
