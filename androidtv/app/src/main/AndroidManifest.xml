@@ -5,8 +5,9 @@
     <!-- For the future in-app self-updater (install a downloaded APK). -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
-    <!-- Android TV app: no touchscreen, shows on the leanback home screen. -->
-    <uses-feature android:name="android.software.leanback" android:required="true" />
+    <!-- Runs on Android TV / Google TV AND plain-Android devices (e.g. VAVA 4K
+         projector, Android 7.1). leanback is optional so non-TV Android installs. -->
+    <uses-feature android:name="android.software.leanback" android:required="false" />
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
 
     <application
@@ -24,7 +25,10 @@
             android:configChanges="orientation|screenSize|keyboardHidden|keyboard">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-                <!-- LEANBACK_LAUNCHER puts it on the Android TV / Google TV home. -->
+                <!-- LAUNCHER = plain-Android home screens (VAVA projector, etc.);
+                     LEANBACK_LAUNCHER = Android TV / Google TV home. Both so the
+                     icon appears on TV launchers and regular Android launchers. -->
+                <category android:name="android.intent.category.LAUNCHER" />
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
         </activity>
