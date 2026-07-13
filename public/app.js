@@ -923,7 +923,9 @@ function weeklyPick(items, n) {
 }
 
 function setHero(items) {
-  heroItems = weeklyPick(items, 6);
+  // The hero has a local Play button, so never feature deep-link-only streaming
+  // titles there — they live in the rows/grids with a provider badge instead.
+  heroItems = weeklyPick(items.filter((x) => x.source !== 'stream'), 6);
   heroIdx = 0;
   if (heroTimer) clearInterval(heroTimer);
   if (!heroItems.length) { heroEl.classList.add('hidden'); return; }
@@ -984,7 +986,34 @@ function drawRows(rows) {
 
 function mediaCards(list, kind) { return list.map((it) => buildMediaCard(it, kind)); }
 
+// Streaming services we can badge + deep-link to (mirrors src/streaming.js).
+const STREAM_PROVIDERS = {
+  netflix: { name: 'Netflix', color: '#e50914' }, prime: { name: 'Prime Video', color: '#1399ff' },
+  disney: { name: 'Disney+', color: '#0a63e6' }, hulu: { name: 'Hulu', color: '#1ce783' },
+  max: { name: 'Max', color: '#a05cff' }, appletv: { name: 'Apple TV+', color: '#7d7d7d' },
+  paramount: { name: 'Paramount+', color: '#0064ff' }, peacock: { name: 'Peacock', color: '#00b7eb' }
+};
+
+// A streaming (not-owned) title: shows a provider badge and, instead of playing
+// locally, deep-links out to the service (DRM means we can't proxy the video).
+function streamCard(it) {
+  const provs = it.providers || [];
+  const p = STREAM_PROVIDERS[provs[0]] || { name: provs[0] || 'Streaming', color: '#555' };
+  const badge = `<div class="badge stream" style="background:${p.color}">${escapeHtml(p.name)}${provs.length > 1 ? ` +${provs.length - 1}` : ''}</div>`;
+  return cardEl({ poster: it.poster, title: it.title, sub: it.year || '', badge, pct: 0, stream: p.name,
+    onOpen: () => openStream(it), onPlay: () => openStream(it) });
+}
+
+// Open the service to this exact title (server resolves the deep-link via TMDB).
+async function openStream(it) {
+  const type = String(it.id).split(':')[1] === 'tv' ? 'tv' : 'movie';
+  let link = null;
+  try { link = (await (await fetch(`/api/watch-link?kind=${type}&tmdbId=${it.tmdb_id}`)).json()).link; } catch (_e) {}
+  if (link) window.open(link, '_blank', 'noopener');
+}
+
 function buildMediaCard(it, kind) {
+  if (it.source === 'stream') return streamCard(it);
   const pct = it.duration && it.resume_position ? Math.min(100, (it.resume_position / it.duration) * 100) : 0;
   let badge = '';
   if (kind === 'show' && it.unwatched > 0) badge = `<div class="badge new">${it.unwatched} new</div>`;
@@ -2119,8 +2148,30 @@ settingsBtn.addEventListener('click', openSettings);
 async function openSettings() {
   settingsModal.classList.remove('hidden');
   paintAudio();
-  loadVersion(); checkForUpdate(); loadSettings(); loadFfmpeg(); loadWhisper(); loadArr();
+  loadVersion(); checkForUpdate(); loadSettings(); loadFfmpeg(); loadWhisper(); loadArr(); loadSources();
   await renderLibraries();
+}
+
+// ---- Streaming services (admin preview): which sources merge into browse.
+// Per-user server-side (follows the account), but the API is admin-gated for now.
+async function loadSources() {
+  const box = document.getElementById('sources-list');
+  if (!box) return;
+  let d;
+  try { d = await (await fetch('/api/providers')).json(); } catch (_e) { return; }
+  if (!d || !d.providers) return; // non-admin (403) — nothing to show
+  const enabled = new Set(d.enabled || []);
+  const chip = (id, name, color, on) =>
+    `<button class="src-chip${on ? ' on' : ''}" data-src="${id}" style="--chip:${color}">${escapeHtml(name)}</button>`;
+  box.innerHTML = chip('local', '📁 Local library', 'var(--accent)', d.local !== false)
+    + d.providers.map((p) => chip(p.id, p.name, p.color, enabled.has(p.id))).join('');
+  box.querySelectorAll('.src-chip').forEach((b) => b.addEventListener('click', async () => {
+    b.classList.toggle('on');
+    const on = [...box.querySelectorAll('.src-chip.on')].map((x) => x.dataset.src);
+    const body = { local: on.includes('local'), enabled: on.filter((x) => x !== 'local') };
+    try { await fetch('/api/providers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); } catch (_e) {}
+    await loadAll(); renderView(); // re-merge and repaint browse with the new sources
+  }));
 }
 
 // ---- Audio (per-DEVICE, localStorage): these depend on the screen's speakers,

@@ -16,6 +16,7 @@ import { translateVttFile } from './translate.js';
 import { radarrEnabled, sonarrEnabled, testConn, radarrSearch, radarrAdd, sonarrSearch, sonarrAdd, getProfiles, radarrQueue, sonarrQueue } from './arr.js';
 import { runIntroDetection, introForFile } from './introdetect.js';
 import { hashPassword, verifyPassword, newToken, tokenFromReq, cookieHeader } from './auth.js';
+import { PROVIDERS, providersList, refreshCatalog, catalogFor, watchLink, status as streamingStatus } from './streaming.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -261,9 +262,48 @@ app.delete('/api/users/:id', async (req, reply) => {
   return { ok: true };
 });
 
+// ---- Streaming sources (admin-only for now) --------------------------------
+// A per-user preference, but gated to admin while the owner tests it. Non-admins
+// always get local-only. Default for admin: local on, no services enabled.
+function userSources(req) {
+  if (!req.user || req.user.role !== 'admin') return { local: true, enabled: [] };
+  const row = db.prepare('SELECT value FROM user_prefs WHERE user_id = ? AND key = ?').get(req.user.id, 'sources');
+  let s = null; try { s = JSON.parse(row && row.value); } catch {}
+  const valid = new Set(PROVIDERS.map((p) => p.id));
+  return {
+    local: s ? s.local !== false : true,
+    enabled: s && Array.isArray(s.enabled) ? s.enabled.filter((x) => valid.has(x)) : []
+  };
+}
+
+// Shape a streaming catalog title like a local movie/show card, tagged so the
+// client shows a provider badge and deep-links out instead of playing locally.
+function streamItem(t) {
+  return {
+    id: 'stream:' + t.kind + ':' + t.tmdb_id, tmdb_id: t.tmdb_id,
+    source: 'stream', providers: t.providers,
+    title: t.title, year: t.year, poster: t.poster, backdrop: t.backdrop,
+    overview: t.overview, rating: t.rating, genres: JSON.stringify(t.genres || []),
+    watched: 0, favorite: 0, resume_position: 0, duration: null, runtime: null,
+    added_at: null, last_played_at: null, versions: 0, qualities: null,
+    episodes: 0, unwatched: 0
+  };
+}
+
+// Append enabled streaming titles to a local list, dropping any already owned
+// locally (dedupe by tmdb_id).
+function withStreaming(req, kind, local) {
+  const src = userSources(req);
+  const base = src.local ? local : [];
+  if (!src.enabled.length) return base;
+  const owned = new Set(local.map((x) => x.tmdb_id).filter(Boolean));
+  const extra = catalogFor(kind, src.enabled).filter((t) => !owned.has(t.tmdb_id)).map(streamItem);
+  return [...base, ...extra];
+}
+
 app.get('/api/movies', async (req) => {
-  return db.prepare(
-    `SELECT m.id, m.title, m.year, m.poster, m.backdrop, m.overview, m.rating, m.genres,
+  const local = db.prepare(
+    `SELECT m.id, m.tmdb_id, m.title, m.year, m.poster, m.backdrop, m.overview, m.rating, m.genres,
             COALESCE(w.watched, 0) AS watched, COALESCE(w.favorite, 0) AS favorite,
             COALESCE(w.resume_position, 0) AS resume_position, m.duration, m.runtime,
             m.added_at, w.last_played_at,
@@ -275,6 +315,7 @@ app.get('/api/movies', async (req) => {
      GROUP BY m.id
      ORDER BY m.title COLLATE NOCASE`
   ).all(req.user.id);
+  return withStreaming(req, 'movie', local);
 });
 
 // Broad "meta-collections" — studios/franchises that aren't a single TMDB
@@ -444,8 +485,8 @@ app.get('/api/continue', async (req) => {
 // ---- TV shows ----
 
 app.get('/api/shows', async (req) => {
-  return db.prepare(
-    `SELECT s.id, s.title, s.year, s.poster, s.backdrop, s.overview, s.rating, s.genres, s.added_at,
+  const local = db.prepare(
+    `SELECT s.id, s.tmdb_id, s.title, s.year, s.poster, s.backdrop, s.overview, s.rating, s.genres, s.added_at,
             COUNT(e.id) AS episodes,
             SUM(CASE WHEN COALESCE(w.watched, 0) = 0 THEN 1 ELSE 0 END) AS unwatched,
             MAX(w.last_played_at) AS last_played_at
@@ -455,6 +496,7 @@ app.get('/api/shows', async (req) => {
      GROUP BY s.id
      ORDER BY s.title COLLATE NOCASE`
   ).all(req.user.id);
+  return withStreaming(req, 'tv', local);
 });
 
 // Flat list of playable episodes (with the show's art/genres) so Live TV can
@@ -807,6 +849,31 @@ app.post('/api/prefs', async (req, reply) => {
   return { ok: true };
 });
 
+// ---- Streaming services (admin-only for now) --------------------------------
+// Which sources (local + streaming services) merge into Movies/TV for this user.
+app.get('/api/providers', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const src = userSources(req);
+  return { providers: providersList(), enabled: src.enabled, local: src.local, status: streamingStatus() };
+});
+app.post('/api/providers', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const valid = new Set(PROVIDERS.map((p) => p.id));
+  const body = req.body || {};
+  const enabled = Array.isArray(body.enabled) ? body.enabled.filter((x) => valid.has(x)) : [];
+  const local = body.local !== false;
+  db.prepare('INSERT INTO user_prefs (user_id, key, value) VALUES (?, ?, ?) ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value')
+    .run(req.user.id, 'sources', JSON.stringify({ enabled, local }));
+  return { ok: true, enabled, local };
+});
+// Deep-link for a streaming title — opens the service to that exact title.
+app.get('/api/watch-link', async (req) => {
+  const kind = req.query.kind === 'tv' ? 'tv' : 'movie';
+  const tmdbId = parseInt(req.query.tmdbId, 10);
+  if (!tmdbId) return { link: null };
+  return { link: await watchLink(config.tmdbApiKey, kind, tmdbId, config.region || 'US') };
+});
+
 // Engine status + one-click install (download a static build into tools/).
 app.get('/api/ffmpeg', async () => ffmpegStatus());
 app.post('/api/ffmpeg/install', async (req, reply) => {
@@ -1145,6 +1212,19 @@ async function start() {
       await backfillCompanies(db, config.tmdbApiKey, { log: (x) => console.log(x) });
     }
   })().catch((e) => console.error('Startup scan/enrich error:', e.message));
+
+  // Streaming services (admin-only feature): pull each service's popular catalog
+  // from TMDB so it can merge into browse, then refresh every 12h. Fully async —
+  // never blocks the port or playback.
+  if (config.tmdbApiKey) {
+    const region = config.region || 'US';
+    refreshCatalog(config.tmdbApiKey, { region, log: (x) => console.log(x) })
+      .catch((e) => console.error('Streaming catalog error:', e.message));
+    setInterval(() => {
+      refreshCatalog(config.tmdbApiKey, { region, log: (x) => console.log(x) })
+        .catch((e) => console.error('Streaming catalog refresh error:', e.message));
+    }, 12 * 3600 * 1000);
+  }
 
   // Intro (theme-song) detection + episode-duration probing — TEMPORARILY OFF
   // (pulled pending a rebuild). Set `"introDetection": true` in config.json to
