@@ -1600,7 +1600,7 @@ function openPlayer(ctx) {
       <button class="vp-back">‹ Back</button>
       <div class="vp-titles"><div class="vp-t">${escapeHtml(ctx.title)}</div>${ctx.subtitle ? `<div class="vp-st">${escapeHtml(ctx.subtitle)}</div>` : ''}</div>
     </div>
-    <div class="vp-engine vp-fade hidden"></div>
+    <div class="vp-engine hidden"></div>
     <div class="vp-pausedbadge">${ICONS.play}</div>
     <div class="vp-bottom vp-fade">
       <div class="vp-scrub" data-pf>
@@ -1718,6 +1718,42 @@ function openPlayer(ctx) {
       ? `▶ Direct play · ${escapeHtml(vTxt)} · ${escapeHtml(aTxt)}${offTxt}`
       : `⚙ Transcoding · V ${escapeHtml(vTxt)} → ${escapeHtml(eng.videoAction)} · A ${escapeHtml(aTxt)} → ${escapeHtml(eng.audioAction)}${offTxt}`;
     el.classList.remove('hidden');
+    el.title = 'Click to diagnose A/V sync';
+  }
+  // Click the admin badge to run the deep A/V-sync diagnosis on this exact file.
+  vp.querySelector('.vp-engine')?.addEventListener('click', runDiagnose);
+  async function runDiagnose() {
+    if (!document.body.classList.contains('is-admin')) return;
+    const el = vp.querySelector('.vp-engine'); const orig = el.innerHTML;
+    el.innerHTML = '⏳ Diagnosing…';
+    let d = null;
+    try { d = await (await fetch(`/api/diagnose/${ctx.searchKind}/${current.id}`)).json(); } catch (_e) {}
+    el.innerHTML = orig;
+    if (d) showDiagnoseOverlay(d); else alert('Diagnose failed');
+  }
+  function showDiagnoseOverlay(d) {
+    const sv = (d.source && d.source.video) || {}, sa = (d.source && d.source.audio) || {}, sm = d.sample;
+    const pk = (arr) => (arr || []).map((p) => `pts ${p.pts} / dts ${p.dts}`).join('   ') || '—';
+    const off = sm && !sm.error ? sm.offsetMs : null;
+    const text = [
+      `ENGINE: ${d.engine ? d.engine.mode : '?'}   V→${(d.engine && d.engine.videoAction) || ''}   A→${(d.engine && d.engine.audioAction) || ''}`,
+      ``,
+      `SOURCE video: ${sv.codec}  B-frames=${sv.hasBFrames}  fps=${sv.rFrameRate} (avg ${sv.avgFrameRate})  start=${sv.startTime}`,
+      `  first video packets: ${pk(sv.firstPackets)}`,
+      `SOURCE audio: ${sa.codec} ${sa.channels}ch  start=${sa.startTime}`,
+      `  first audio packets: ${pk(sa.firstPackets)}`,
+      ``,
+      !sm ? 'SAMPLE: direct play (no transcode)' : sm.error ? `SAMPLE error: ${sm.error}`
+        : `SAMPLE (3s transcode) → video ${sm.video.startTime}s / audio ${sm.audio.startTime}s  ⇒  A/V offset ${off} ms  ${Math.abs(off) > 15 ? '⚠ audio ' + (off > 0 ? 'AHEAD' : 'BEHIND') : '(synced)'}`
+    ].join('\n');
+    const ov = document.createElement('div');
+    ov.className = 'diag-overlay';
+    ov.innerHTML = `<div class="diag-box"><pre></pre><div class="diag-actions"><button class="btn primary" id="diag-copy">Copy for Claude</button><button class="btn" id="diag-close">Close</button></div></div>`;
+    ov.querySelector('pre').textContent = text;
+    vp.appendChild(ov);
+    ov.querySelector('#diag-copy').addEventListener('click', () => { navigator.clipboard.writeText(JSON.stringify(d, null, 2)).catch(() => {}); ov.querySelector('#diag-copy').textContent = 'Copied ✓'; });
+    ov.querySelector('#diag-close').addEventListener('click', () => ov.remove());
+    ov.addEventListener('click', (e) => { if (e.target === ov) ov.remove(); });
   }
 
   async function loadFile(f, at) {

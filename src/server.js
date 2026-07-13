@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile, execFileSync } from 'node:child_process';
@@ -10,7 +11,7 @@ import { enrichLibrary, enrichShows, enrichEpisodes, movieExtra, showExtra, back
 import { ext, qualityRank } from './parse.js';
 import { listDrives, listDirs } from './fsbrowse.js';
 import { osEnabled, searchSubtitles, downloadSubtitle, clearAuth } from './opensubtitles.js';
-import { detectFfmpeg, status as ffmpegStatus, installFfmpeg, playInfo, transcodeStream, ffmpegBin } from './ffmpeg.js';
+import { detectFfmpeg, status as ffmpegStatus, installFfmpeg, playInfo, transcodeStream, ffmpegBin, sourceTiming, probe } from './ffmpeg.js';
 import { detectWhisper, status as whisperStatus, installWhisper, generate as generateSubs } from './whisper.js';
 import { translateVttFile } from './translate.js';
 import { radarrEnabled, sonarrEnabled, testConn, radarrSearch, radarrAdd, sonarrSearch, sonarrAdd, getProfiles, radarrQueue, sonarrQueue } from './arr.js';
@@ -844,6 +845,47 @@ app.get('/api/transcode/:kind/:fileId', async (req, reply) => {
   req.raw.on('close', () => { try { proc.kill('SIGKILL'); } catch {} });
   reply.header('Content-Type', 'video/mp4');
   return reply.send(proc.stdout);
+});
+
+// Admin diagnostics: deep source timing + the A/V alignment of a real 3-second
+// transcoded sample. Tells us whether a lip-sync lag is baked into our transcode
+// (sample offset != 0) or is happening in the live-stream delivery (sample synced,
+// yet playback lags → the fragmented-MP4 pipe, i.e. an HLS-style fix is needed).
+app.get('/api/diagnose/:kind/:fileId', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const { kind, fileId } = req.params;
+  const row = fileRow(kind, fileId);
+  if (!row) return reply.code(404).send({ error: 'not found' });
+  const opts = audioOpts(req);
+  const info = await playInfo(row.path, opts);
+  const source = await sourceTiming(row.path);
+  let sample = null;
+  if (info.mode === 'transcode') {
+    const tmp = path.join(os.tmpdir(), `marquee-diag-${Date.now()}.mp4`);
+    try {
+      await new Promise((res, rej) => {
+        const proc = transcodeStream(row.path, {
+          start: 0, vcopy: info.vcopy, acopy: info.acopy, downmix: info.downmix, scaleH: info.scaleH,
+          forceStereo: opts.forceStereo, dboost: opts.dboost, night: opts.night, norm: opts.norm, duration: 3
+        });
+        const out = fs.createWriteStream(tmp);
+        proc.on('error', rej);
+        proc.stdout.pipe(out);
+        out.on('finish', res); out.on('error', rej);
+      });
+      const p = await probe(tmp);
+      const v = ((p && p.streams) || []).find((s) => s.codec_type === 'video') || {};
+      const a = ((p && p.streams) || []).find((s) => s.codec_type === 'audio') || {};
+      sample = {
+        video: { startTime: +v.start_time || 0, duration: +v.duration || 0 },
+        audio: { startTime: +a.start_time || 0, duration: +a.duration || 0 },
+        // video−audio: positive = video starts later = audio AHEAD (the reported symptom).
+        offsetMs: Math.round(((+v.start_time || 0) - (+a.start_time || 0)) * 1000)
+      };
+    } catch (e) { sample = { error: e.message }; }
+    try { fs.unlinkSync(tmp); } catch {}
+  }
+  return { engine: info.engine, source, sample };
 });
 
 // ---- Pre-roll: a video that plays before every MOVIE (not TV, not Live TV) ----

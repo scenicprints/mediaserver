@@ -209,6 +209,30 @@ export async function playInfo(filePath, { forceStereo = false, night = false, n
   };
 }
 
+// ---- Diagnostics: deep source timing (admin bug-hunting) ----
+// The container start_time (shown in the badge) is 0/0 even for laggy files, so
+// this digs into the actual first packet PTS/DTS, B-frames, and frame-rate mode —
+// the things that differ between a synthetic clip and a real problem file.
+export async function sourceTiming(filePath) {
+  if (!ffprobePath) return null;
+  const j = async (args) => { try { return JSON.parse(await tryRun(ffprobePath, args) || '{}'); } catch { return {}; } };
+  const firstPkts = async (sel) =>
+    ((await j(['-v', 'error', '-select_streams', sel, '-read_intervals', '%+#4',
+      '-show_entries', 'packet=pts_time,dts_time', '-of', 'json', filePath])).packets || [])
+      .map((p) => ({ pts: p.pts_time === undefined ? null : +p.pts_time, dts: p.dts_time === undefined ? null : +p.dts_time }));
+  const streams = (await j(['-v', 'error', '-show_entries',
+    'stream=codec_type,codec_name,start_time,has_b_frames,r_frame_rate,avg_frame_rate,channels,time_base,codec_tag_string',
+    '-of', 'json', filePath])).streams || [];
+  const v = streams.find((s) => s.codec_type === 'video') || {};
+  const a = streams.find((s) => s.codec_type === 'audio') || {};
+  return {
+    video: { codec: v.codec_name, startTime: +v.start_time || 0, hasBFrames: v.has_b_frames,
+      rFrameRate: v.r_frame_rate, avgFrameRate: v.avg_frame_rate, firstPackets: await firstPkts('v:0') },
+    audio: { codec: a.codec_name, startTime: +a.start_time || 0, channels: +a.channels || 0,
+      firstPackets: await firstPkts('a:0') }
+  };
+}
+
 // ---- Transcode stream ----
 // Fragmented MP4 to stdout. `start` = seek offset in seconds (client restarts
 // the stream to seek and keeps a virtual timeline).
@@ -230,7 +254,7 @@ function downmixFilter(level) {
 const NIGHT_FILTER = 'acompressor=threshold=-24dB:ratio=4:attack=20:release=250,alimiter=limit=0.95';
 const NORM_FILTER = 'loudnorm=I=-16:TP=-1.5:LRA=11';
 
-export function transcodeStream(filePath, { start = 0, vcopy = false, acopy = false, downmix = false, forceStereo = false, dboost = 'normal', night = false, norm = false, scaleH = 0 } = {}) {
+export function transcodeStream(filePath, { start = 0, vcopy = false, acopy = false, downmix = false, forceStereo = false, dboost = 'normal', night = false, norm = false, scaleH = 0, duration = 0 } = {}) {
   // First line of defense against A/V drift (applied regardless of resolution):
   // `+genpts` regenerates missing timestamps up front, and `aresample=async=1`
   // (below) keeps audio locked to the video timeline.
@@ -241,6 +265,7 @@ export function transcodeStream(filePath, { start = 0, vcopy = false, acopy = fa
   if (hasNvenc) args.push('-hwaccel', 'auto');
   if (start > 0) args.push('-ss', String(start));
   args.push('-i', filePath, '-map', '0:v:0', '-map', '0:a:0?', '-sn', '-dn');
+  if (duration > 0) args.push('-t', String(duration)); // used by the admin diagnostics sample
   if (vcopy) {
     args.push('-c:v', 'copy');
   } else {
@@ -258,11 +283,8 @@ export function transcodeStream(filePath, { start = 0, vcopy = false, acopy = fa
     if (downmix) af.push(downmixFilter(dboost));
     if (night) af.push(NIGHT_FILTER);
     if (norm) af.push(NORM_FILTER);
-    // aresample async pads/stretches audio to stay locked to the (re-encoded)
-    // video timeline; `first_pts=0` pins the first sample to t=0 and a stronger
-    // async budget lets it correct a real offset instead of only a tiny drift —
-    // aimed at the constant audio-ahead lip-sync gap on some transcoded files.
-    af.push('aresample=async=1000:first_pts=0');
+    // Keep audio locked to the (now also re-encoded) video timeline.
+    af.push('aresample=async=1');
     args.push('-af', af.join(','));
     args.push('-c:a', 'aac', '-b:a', '192k');
     // A pan-based downmix already emits stereo; otherwise force stereo when the

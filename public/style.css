@@ -572,11 +572,17 @@ button { font-family: inherit; }
 .vp.vp-prerolling .vp-pausedbadge, .vp.vp-prerolling .vp-skipbtn { display: none !important; }
 .vp ::cue { background: rgba(0,0,0,0.55); color: #fff; font-size: 1.05em; line-height: 1.35; }
 .vp-fade { transition: opacity 0.25s ease; }
-.vp.hide-ui .vp-top, .vp.hide-ui .vp-bottom, .vp.hide-ui .vp-engine { opacity: 0; pointer-events: none; }
+.vp.hide-ui .vp-top, .vp.hide-ui .vp-bottom { opacity: 0; pointer-events: none; }
+/* The admin badge stays visible (doesn't fade with the controls) so it's easy to
+   find and click for diagnostics. It's admin-only, so regular viewers never see it. */
 /* Admin-only diagnostic badge: direct-play vs transcode + what's being converted. */
 .vp-engine { position: absolute; top: 18px; right: 20px; z-index: 6;
   background: rgba(8, 9, 13, 0.72); border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 8px;
-  color: #cfe3ff; font-size: 12px; font-weight: 600; padding: 6px 11px; max-width: 72vw; line-height: 1.4; }
+  color: #cfe3ff; font-size: 12px; font-weight: 600; padding: 6px 11px; max-width: 72vw; line-height: 1.4; cursor: pointer; }
+.diag-overlay { position: absolute; inset: 0; z-index: 20; background: rgba(0, 0, 0, 0.6); display: flex; align-items: center; justify-content: center; }
+.diag-box { background: var(--bg-2); border: 1px solid var(--line); border-radius: 12px; padding: 20px; max-width: min(92vw, 760px); }
+.diag-box pre { white-space: pre-wrap; word-break: break-word; font-size: 12.5px; line-height: 1.5; color: var(--text); margin: 0 0 14px; max-height: 60vh; overflow: auto; }
+.diag-actions { display: flex; gap: 10px; }
 .vp-top {
   top: 0; padding: 22px 34px; display: flex; align-items: center; gap: 16px; z-index: 4;
   position: absolute; left: 0; right: 0; transition: opacity 0.25s ease;
