@@ -987,15 +987,23 @@ function drawRows(rows) {
 function mediaCards(list, kind) { return list.map((it) => buildMediaCard(it, kind)); }
 
 // Streaming services we can badge + deep-link to (mirrors src/streaming.js).
+// `search(q)` opens the service itself to that title — the badge already says
+// where it is, so we go straight to the service, not an info page. (True exact-
+// title / native-app launch needs each service's own content id, which no public
+// data gives us, so we open the service's title search — lands you in the app.)
 const STREAM_PROVIDERS = {
-  netflix: { name: 'Netflix', color: '#e50914' }, prime: { name: 'Prime Video', color: '#1399ff' },
-  disney: { name: 'Disney+', color: '#0a63e6' }, hulu: { name: 'Hulu', color: '#1ce783' },
-  max: { name: 'Max', color: '#a05cff' }, appletv: { name: 'Apple TV+', color: '#7d7d7d' },
-  paramount: { name: 'Paramount+', color: '#0064ff' }, peacock: { name: 'Peacock', color: '#00b7eb' }
+  netflix:   { name: 'Netflix',     color: '#e50914', search: (q) => `https://www.netflix.com/search?q=${q}` },
+  prime:     { name: 'Prime Video', color: '#1399ff', search: (q) => `https://www.primevideo.com/search/?phrase=${q}` },
+  disney:    { name: 'Disney+',     color: '#0a63e6', search: (q) => `https://www.disneyplus.com/search?q=${q}` },
+  hulu:      { name: 'Hulu',        color: '#1ce783', search: (q) => `https://www.hulu.com/search?q=${q}` },
+  max:       { name: 'Max',         color: '#a05cff', search: (q) => `https://play.max.com/search?q=${q}` },
+  appletv:   { name: 'Apple TV+',   color: '#7d7d7d', search: (q) => `https://tv.apple.com/search?term=${q}` },
+  paramount: { name: 'Paramount+',  color: '#0064ff', search: (q) => `https://www.paramountplus.com/search/?query=${q}` },
+  peacock:   { name: 'Peacock',     color: '#00b7eb', search: (q) => `https://www.peacocktv.com/search?q=${q}` }
 };
 
 // A streaming (not-owned) title: shows a provider badge and, instead of playing
-// locally, deep-links out to the service (DRM means we can't proxy the video).
+// locally, opens the service (DRM means we can't proxy the video).
 function streamCard(it) {
   const provs = it.providers || [];
   const p = STREAM_PROVIDERS[provs[0]] || { name: provs[0] || 'Streaming', color: '#555' };
@@ -1004,12 +1012,11 @@ function streamCard(it) {
     onOpen: () => openStream(it), onPlay: () => openStream(it) });
 }
 
-// Open the service to this exact title (server resolves the deep-link via TMDB).
-async function openStream(it) {
-  const type = String(it.id).split(':')[1] === 'tv' ? 'tv' : 'movie';
-  let link = null;
-  try { link = (await (await fetch(`/api/watch-link?kind=${type}&tmdbId=${it.tmdb_id}`)).json()).link; } catch (_e) {}
-  if (link) window.open(link, '_blank', 'noopener');
+// Open the badge's service directly to this title (its search), not a TMDB page.
+function openStream(it) {
+  const p = STREAM_PROVIDERS[(it.providers || [])[0]];
+  const url = p && p.search ? p.search(encodeURIComponent(it.title || '')) : null;
+  if (url) window.open(url, '_blank', 'noopener');
 }
 
 function buildMediaCard(it, kind) {

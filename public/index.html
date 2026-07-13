@@ -51,6 +51,7 @@
       <div class="tabs settings-tabs">
         <button class="tab active" data-tab="general">General</button>
         <button class="tab" data-tab="audio">Audio</button>
+        <button class="tab admin-only" data-tab="streaming">Streaming</button>
       </div>
 
       <div class="tab-panel active" data-panel="general">
@@ -62,12 +63,6 @@
             <button class="btn primary" data-add="tv">＋ Add TV Shows folder</button>
           </div>
           <div id="lib-list" class="lib-list"></div>
-        </div>
-
-        <div class="sub-account admin-only">
-          <h3>Streaming services <span class="beta-tag">admin preview</span></h3>
-          <p class="muted">Merge your streaming services into Movies &amp; TV Shows. Streaming titles get a provider badge and open the service when you select them — they can't play in-app (that's DRM). Tap a source to show or hide it:</p>
-          <div id="sources-list" class="sources-list"></div>
         </div>
 
         <div class="sub-account">
@@ -149,6 +144,14 @@
             <button class="btn" data-norm="0">Off</button>
             <button class="btn" data-norm="1">On</button>
           </div>
+        </div>
+      </div>
+
+      <div class="tab-panel" data-panel="streaming">
+        <div class="sub-account" style="border-top:none;margin-top:4px;padding-top:0">
+          <h3>Streaming services <span class="beta-tag">admin preview</span></h3>
+          <p class="muted">Merge your streaming services into Movies &amp; TV Shows. Streaming titles get a provider badge and open that service when you select them — they can't play in-app (that's DRM). Tap a source to show or hide it:</p>
+          <div id="sources-list" class="sources-list"></div>
         </div>
       </div>
 
