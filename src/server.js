@@ -262,11 +262,10 @@ app.delete('/api/users/:id', async (req, reply) => {
   return { ok: true };
 });
 
-// ---- Streaming sources (admin-only for now) --------------------------------
-// A per-user preference, but gated to admin while the owner tests it. Non-admins
-// always get local-only. Default for admin: local on, no services enabled.
+// ---- Streaming sources ------------------------------------------------------
+// A per-user preference: each user picks which sources (local + streaming
+// services) merge into their Movies/TV. Default: local on, no services enabled.
 function userSources(req) {
-  if (!req.user || req.user.role !== 'admin') return { local: true, enabled: [] };
   const row = db.prepare('SELECT value FROM user_prefs WHERE user_id = ? AND key = ?').get(req.user.id, 'sources');
   let s = null; try { s = JSON.parse(row && row.value); } catch {}
   const valid = new Set(PROVIDERS.map((p) => p.id));
@@ -849,15 +848,13 @@ app.post('/api/prefs', async (req, reply) => {
   return { ok: true };
 });
 
-// ---- Streaming services (admin-only for now) --------------------------------
+// ---- Streaming services -----------------------------------------------------
 // Which sources (local + streaming services) merge into Movies/TV for this user.
-app.get('/api/providers', async (req, reply) => {
-  if (!requireAdmin(req, reply)) return;
+app.get('/api/providers', async (req) => {
   const src = userSources(req);
   return { providers: providersList(), enabled: src.enabled, local: src.local, status: streamingStatus() };
 });
-app.post('/api/providers', async (req, reply) => {
-  if (!requireAdmin(req, reply)) return;
+app.post('/api/providers', async (req) => {
   const valid = new Set(PROVIDERS.map((p) => p.id));
   const body = req.body || {};
   const enabled = Array.isArray(body.enabled) ? body.enabled.filter((x) => valid.has(x)) : [];
