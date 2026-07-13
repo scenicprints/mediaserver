@@ -2108,7 +2108,15 @@ function openPlayer(ctx) {
   };
   document.addEventListener('keydown', vp._onKey, true);
   const origRemove = vp.remove.bind(vp);
-  vp.remove = () => { clearInterval(subTimer); document.removeEventListener('keydown', vp._onKey, true); origRemove(); };
+  vp.remove = () => {
+    clearInterval(subTimer);
+    document.removeEventListener('keydown', vp._onKey, true);
+    // Hard-stop every media element (main + pre-roll overlay) so audio can't keep
+    // playing after you back out — just detaching a streaming <video> from the DOM
+    // doesn't reliably kill its audio, and it also aborts the transcode request.
+    vp.querySelectorAll('video').forEach((v) => { try { v.pause(); v.removeAttribute('src'); v.load(); } catch (_e) {} });
+    origRemove();
+  };
 }
 
 // ---------- Detail modal open/close ----------
