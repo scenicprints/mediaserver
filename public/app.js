@@ -171,6 +171,7 @@ async function loadAll() {
     loadPrefs()
   ]);
   movies = mv; shows = sh; continueItems = cont;
+  refreshPreroll(); // prefetch the movie pre-roll (fire and forget)
 }
 
 // ---------- Navigation ----------
@@ -1551,6 +1552,14 @@ const ICONS = {
   fullscreen: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>'
 };
 
+// Pre-roll info (server-wide) is prefetched so the player can start it inside a
+// click gesture (autoplay-with-sound). Refreshed on load and when the admin saves.
+let prerollInfo = null;
+async function refreshPreroll() {
+  try { const r = await (await fetch('/api/preroll')).json(); prerollInfo = r && r.available ? r : null; }
+  catch (_e) { prerollInfo = null; }
+}
+
 function openPlayer(ctx) {
   if (activePlayer) { activePlayer.remove(); activePlayer = null; }
   let current = ctx.files.find((f) => f.id === ctx.startFileId) || ctx.files[0];
@@ -1585,6 +1594,7 @@ function openPlayer(ctx) {
   vp.className = 'vp';
   vp.innerHTML = `
     <video playsinline></video>
+    <video class="vp-preroll-vid hidden" playsinline></video>
     <div class="vp-subs"></div>
     <div class="vp-top vp-fade">
       <button class="vp-back">‹ Back</button>
@@ -1741,7 +1751,32 @@ function openPlayer(ctx) {
     if (subs.length) { currentSubIdx = 0; subVisible = true; loadDelay(); setSubtitle(subUrl(0)); }
     else { currentSubIdx = -1; subOffset = 0; setSubtitle(null); }
   }
-  loadFile(current, ctx.startAt || 0);
+  // Pre-roll: a video that plays before a MOVIE (not TV episodes, not Live TV),
+  // and only when starting from the beginning (skipped on resume). Not skippable —
+  // controls are locked until it ends. Fully fail-safe: any error/absence just
+  // starts the movie. Plays on a separate overlay <video> so it never touches the
+  // main player's state/handlers.
+  function startMain() { loadFile(current, ctx.startAt || 0); }
+  // `prerollInfo` is prefetched (see refreshPreroll), so we can start it
+  // synchronously inside the click's user-activation → autoplay with sound.
+  if (ctx.searchKind === 'movie' && !(ctx.startAt > 0) && prerollInfo) playPrerollThen(startMain);
+  else startMain();
+
+  function playPrerollThen(done) {
+    const pv = vp.querySelector('.vp-preroll-vid');
+    let doneOnce = false;
+    const go = () => { if (doneOnce) return; doneOnce = true; pv.classList.add('hidden'); pv.removeAttribute('src'); vp.classList.remove('vp-prerolling'); done(); };
+    vp.classList.add('vp-prerolling');
+    pv.classList.remove('hidden');
+    pv.src = withToken(prerollInfo.mode === 'transcode' ? prerollInfo.url + '?start=0&' + audioQuery() : prerollInfo.url);
+    pv.addEventListener('ended', go, { once: true });
+    pv.addEventListener('error', go, { once: true });
+    // Safety net: never let a stuck pre-roll trap the viewer.
+    setTimeout(() => { if (!doneOnce && (pv.error || pv.readyState < 2)) go(); }, 12000);
+    // Play with sound; if the browser blocks it, fall back to muted then unmute.
+    pv.muted = false;
+    pv.play().catch(() => { pv.muted = true; pv.play().then(() => { pv.muted = false; }).catch(go); });
+  }
 
   function setPlayIcons() {
     const i = video.paused ? ICONS.play : ICONS.pause;
@@ -2019,6 +2054,9 @@ function openPlayer(ctx) {
   function close() { save(); if (document.fullscreenElement) document.exitFullscreen(); vp.remove(); activePlayer = null; document.body.style.overflow = 'hidden'; }
   vp.querySelector('.vp-back').addEventListener('click', close);
   vp._onKey = (e) => {
+    // Pre-roll is not skippable — swallow playback keys while it's running (Back
+    // still closes the whole player, via the handler below only after this guard).
+    if (vp.classList.contains('vp-prerolling') && e.key !== 'Escape' && e.key !== 'Backspace') { e.preventDefault(); return; }
     const a = document.activeElement;
     if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA')) return; // typing (subtitle search)
     const menuOpen = !menu.classList.contains('hidden');
@@ -2189,9 +2227,35 @@ settingsBtn.addEventListener('click', openSettings);
 async function openSettings() {
   settingsModal.classList.remove('hidden');
   paintAudio();
-  loadVersion(); checkForUpdate(); loadSettings(); loadFfmpeg(); loadWhisper(); loadArr(); loadSources();
+  loadVersion(); checkForUpdate(); loadSettings(); loadFfmpeg(); loadWhisper(); loadArr(); loadSources(); loadPreroll();
   await renderLibraries();
 }
+
+// ---- Pre-roll video (admin): a clip that plays before every movie ----
+const prerollPathEl = document.getElementById('preroll-path');
+const prerollSaveEl = document.getElementById('preroll-save');
+const prerollStatusEl = document.getElementById('preroll-status');
+async function loadPreroll() {
+  if (!prerollPathEl) return;
+  try {
+    const s = await (await fetch('/api/settings')).json();
+    if (!s.preroll) return; // non-admin
+    prerollPathEl.value = s.preroll.path || '';
+    if (s.preroll.path) prerollStatusEl.textContent = s.preroll.available
+      ? '✓ Found on the server — plays before every movie.'
+      : '⚠ Saved, but no file was found at that path on the server.';
+  } catch (_e) {}
+}
+if (prerollSaveEl) prerollSaveEl.addEventListener('click', async () => {
+  prerollSaveEl.textContent = 'Saving…'; prerollSaveEl.disabled = true;
+  try {
+    const r = await (await fetch('/api/settings/preroll', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: prerollPathEl.value.trim() }) })).json();
+    prerollStatusEl.textContent = !r.path ? 'Pre-roll cleared — movies play with no intro.'
+      : (r.available ? '✓ Saved — plays before every movie.' : '⚠ Saved, but no file was found at that path on the server.');
+  } catch (_e) { prerollStatusEl.textContent = 'Could not save.'; }
+  prerollSaveEl.textContent = 'Save pre-roll'; prerollSaveEl.disabled = false;
+  refreshPreroll(); // pick up the new (or cleared) pre-roll for the next movie
+});
 
 // ---- Streaming services (admin preview): which sources merge into browse.
 // Per-user server-side (follows the account), but the API is admin-gated for now.

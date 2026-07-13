@@ -846,6 +846,46 @@ app.get('/api/transcode/:kind/:fileId', async (req, reply) => {
   return reply.send(proc.stdout);
 });
 
+// ---- Pre-roll: a video that plays before every MOVIE (not TV, not Live TV) ----
+// Server-wide (config.prerollPath, admin-set). Served through the same direct/
+// transcode engine so any format works; a missing/broken file just means the
+// movie plays normally (the client falls through).
+function prerollFile() {
+  const p = config.prerollPath;
+  try { return p && fs.existsSync(p) ? p : null; } catch { return null; }
+}
+app.get('/api/preroll', async (req) => {
+  const f = prerollFile();
+  if (!f) return { available: false };
+  const info = await playInfo(f, audioOpts(req));
+  return {
+    available: true, mode: info.mode, duration: info.duration,
+    url: info.mode === 'transcode' ? '/api/preroll/transcode' : '/api/preroll/stream'
+  };
+});
+app.get('/api/preroll/stream', (req, reply) => {
+  const f = prerollFile();
+  if (!f) return reply.code(404).send({ error: 'no preroll' });
+  return streamFile(f, req, reply);
+});
+app.get('/api/preroll/transcode', async (req, reply) => {
+  const f = prerollFile();
+  if (!f) return reply.code(404).send({ error: 'no preroll' });
+  const opts = audioOpts(req);
+  const info = await playInfo(f, opts);
+  if (info.mode !== 'transcode') return reply.code(400).send({ error: 'not transcoding' });
+  const start = Math.max(0, parseFloat(req.query.start) || 0);
+  const proc = transcodeStream(f, {
+    start, vcopy: info.vcopy, acopy: info.acopy, downmix: info.downmix, scaleH: info.scaleH,
+    forceStereo: opts.forceStereo, dboost: opts.dboost, night: opts.night, norm: opts.norm
+  });
+  proc.stderr.on('data', (d) => console.error('[ffmpeg preroll]', String(d).trim()));
+  proc.on('error', (e) => console.error('[ffmpeg preroll] spawn error:', e.message));
+  req.raw.on('close', () => { try { proc.kill('SIGKILL'); } catch {} });
+  reply.header('Content-Type', 'video/mp4');
+  return reply.send(proc.stdout);
+});
+
 // ---- Playback prefs (server-side so they follow the user across devices) ----
 // Version choices and caption delays used to live in localStorage, which is
 // per-browser — pick a version on the PC and the TV knows nothing about it.
@@ -1166,8 +1206,22 @@ app.get('/api/settings', async (req) => {
     out.tmdb = { configured: !!config.tmdbApiKey };
     out.radarr = { configured: radarrEnabled(config.radarr), url: (config.radarr && config.radarr.url) || '' };
     out.sonarr = { configured: sonarrEnabled(config.sonarr), url: (config.sonarr && config.sonarr.url) || '' };
+    out.preroll = { path: config.prerollPath || '', available: !!prerollFile() };
   }
   return out;
+});
+
+// Admin: set the pre-roll video path (saved to config.json so it survives restarts).
+app.post('/api/settings/preroll', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const p = typeof (req.body && req.body.path) === 'string' ? req.body.path.trim() : '';
+  config.prerollPath = p || undefined;
+  try {
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), 'utf8');
+  } catch (e) {
+    return reply.code(500).send({ error: 'could not save: ' + e.message });
+  }
+  return { path: config.prerollPath || '', available: !!prerollFile() };
 });
 
 // Each user saves their own OpenSubtitles login (per-user, so quotas don't mix).

@@ -258,13 +258,20 @@ export function transcodeStream(filePath, { start = 0, vcopy = false, acopy = fa
     if (downmix) af.push(downmixFilter(dboost));
     if (night) af.push(NIGHT_FILTER);
     if (norm) af.push(NORM_FILTER);
-    af.push('aresample=async=1');
+    // aresample async pads/stretches audio to stay locked to the (re-encoded)
+    // video timeline; `first_pts=0` pins the first sample to t=0 and a stronger
+    // async budget lets it correct a real offset instead of only a tiny drift —
+    // aimed at the constant audio-ahead lip-sync gap on some transcoded files.
+    af.push('aresample=async=1000:first_pts=0');
     args.push('-af', af.join(','));
     args.push('-c:a', 'aac', '-b:a', '192k');
     // A pan-based downmix already emits stereo; otherwise force stereo when the
     // device wants it (surround mode keeps the source's channel count).
     if (!downmix && forceStereo) args.push('-ac', '2');
   }
+  // Normalize container start timestamps to zero — keeps the copied video and the
+  // re-encoded audio referenced to the same zero so they don't start misaligned.
+  args.push('-avoid_negative_ts', 'make_zero');
   args.push('-movflags', '+frag_keyframe+empty_moov+default_base_moof', '-f', 'mp4', 'pipe:1');
   return spawn(ffmpegPath, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
 }

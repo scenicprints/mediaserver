@@ -565,6 +565,11 @@ button { font-family: inherit; }
 .vp { position: fixed; inset: 0; z-index: 100; background: #000; overflow: hidden; cursor: default; }
 .vp.hide-ui { cursor: none; }
 .vp video { position: absolute; inset: 0; width: 100%; height: 100%; background: #000; }
+/* Pre-roll overlay video sits above the (not-yet-loaded) main video; while it
+   plays, the player chrome is hidden so it can't be skipped or scrubbed. */
+.vp-preroll-vid { z-index: 3; }
+.vp.vp-prerolling .vp-top, .vp.vp-prerolling .vp-bottom, .vp.vp-prerolling .vp-engine,
+.vp.vp-prerolling .vp-pausedbadge, .vp.vp-prerolling .vp-skipbtn { display: none !important; }
 .vp ::cue { background: rgba(0,0,0,0.55); color: #fff; font-size: 1.05em; line-height: 1.35; }
 .vp-fade { transition: opacity 0.25s ease; }
 .vp.hide-ui .vp-top, .vp.hide-ui .vp-bottom, .vp.hide-ui .vp-engine { opacity: 0; pointer-events: none; }
