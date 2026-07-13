@@ -15,6 +15,7 @@ const WIN_TAR = 'C:\\Windows\\System32\\tar.exe'; // bsdtar — extracts zips on
 let ffmpegPath = null;
 let ffprobePath = null;
 let hasNvenc = false;
+let maxTranscodeHeight = 0; // config cap on re-encoded video height (0 = auto/off)
 const probeCache = new Map(); // path+mtime -> probe json
 
 function tryRun(cmd, args) {
@@ -43,6 +44,7 @@ function findInTools(toolsDir, exe) {
 }
 
 export async function detectFfmpeg(root, config = {}) {
+  maxTranscodeHeight = Number(config.maxTranscodeHeight) || 0; // e.g. 1080 to force a cap
   const toolsDir = path.join(root, 'tools');
   const candidates = [
     config.ffmpegPath,
@@ -177,10 +179,15 @@ export async function playInfo(filePath, { forceStereo = false, night = false, n
   const multichannel = !!a && (+a.channels || 0) > 2;
   const downmix = forceStereo && multichannel; // fold 5.1/7.1 → stereo, server-side
   const needAudio = downmix || night || norm;  // any of these forces an audio re-encode
-  // Cap re-encoded video at 1080p. A real-time 4K→4K encode can't keep up (esp. on
-  // the Dell's 1050 Ti), so video lags audio → A/V desync; downscaling makes the
-  // transcode real-time again. 0 = no scaling (source is already ≤1080p).
-  const scaleH = v && +v.height > 1080 ? 1080 : 0;
+  // Downscale ONLY when the encoder can't sustain the source resolution in real
+  // time (otherwise a 4K→4K encode lags audio → A/V desync). Last resort, not the
+  // default — timestamp/async hardening in transcodeStream is the first line of
+  // defense. With a hardware encoder (NVENC) we keep the source resolution; a
+  // CPU-only encoder can't do >1080p live, so it caps at 1080p. `maxTranscodeHeight`
+  // in config forces a cap (e.g. 1080) if a given box still can't keep up at 4K.
+  const srcH = v ? (+v.height || 0) : 0;
+  const cap = maxTranscodeHeight || (hasNvenc ? 0 : 1080); // 0 = no cap (keep source res)
+  const scaleH = cap && srcH > cap ? cap : 0;
   if (DIRECT_EXT.has(ext) && vOK && aOK && !needAudio) return { mode: 'direct', duration, chapters };
   return { mode: 'transcode', duration, vcopy: vOK, acopy: aOK && !needAudio, downmix, scaleH, chapters };
 }
@@ -207,9 +214,14 @@ const NIGHT_FILTER = 'acompressor=threshold=-24dB:ratio=4:attack=20:release=250,
 const NORM_FILTER = 'loudnorm=I=-16:TP=-1.5:LRA=11';
 
 export function transcodeStream(filePath, { start = 0, vcopy = false, acopy = false, downmix = false, forceStereo = false, dboost = 'normal', night = false, norm = false, scaleH = 0 } = {}) {
-  // `+genpts` regenerates missing timestamps up front — cheap insurance against
-  // the A/V drift some sources exhibit through a live transcode.
+  // First line of defense against A/V drift (applied regardless of resolution):
+  // `+genpts` regenerates missing timestamps up front, and `aresample=async=1`
+  // (below) keeps audio locked to the video timeline.
   const args = ['-hide_banner', '-loglevel', 'error', '-fflags', '+genpts'];
+  // Offload decode to the GPU when we have one — this is what lets a 4K source
+  // transcode in real time without downscaling (CPU HEVC decode is the bottleneck).
+  // `auto` falls back to software if the GPU can't decode a given file.
+  if (hasNvenc) args.push('-hwaccel', 'auto');
   if (start > 0) args.push('-ss', String(start));
   args.push('-i', filePath, '-map', '0:v:0', '-map', '0:a:0?', '-sn', '-dn');
   if (vcopy) {

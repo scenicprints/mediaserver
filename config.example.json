@@ -4,5 +4,7 @@
   "dbPath": "./data/library.db",
   "mediaRoots": [],
   "tmdbApiKey": "",
-  "openSubtitles": { "apiKey": "", "username": "", "password": "" }
+  "openSubtitles": { "apiKey": "", "username": "", "password": "" },
+  "_maxTranscodeHeight": "optional: cap re-encoded video height (e.g. 1080) if 4K transcodes still can't keep up on this box. Omit/0 = auto (keep source res when a GPU encoder is present, else 1080p).",
+  "maxTranscodeHeight": 0
 }
