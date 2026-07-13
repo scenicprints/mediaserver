@@ -1597,6 +1597,26 @@ function openPlayer(ctx) {
     return t;
   }
   let seekGen = 0; // drop stale async seeks (rapid scrubbing)
+  // Swapping src on a PLAYING element can carry stale audio-clock state across
+  // the swap in Chromium-family browsers — the new stream then renders with a
+  // constant A/V offset even though its container is perfectly aligned ("lags
+  // after skipping ±10s"). A hard reset (drop src + load()) tears the whole
+  // pipeline down so the next stream starts with fresh clocks.
+  function resetPipeline() {
+    try { video.pause(); video.removeAttribute('src'); video.load(); } catch (_e) {}
+  }
+  // THE "audio lags from the start" fix: never start rendering on bare metadata.
+  // A live transcode pipe delivers a whole video GOP before the first audio
+  // trickles in — start play() that early and video's clock runs ahead while the
+  // audio pipeline is still filling: a session-constant audio-behind offset that
+  // (tellingly) a later mid-session seek "cures", because by then the pipe is
+  // warm and both decoders start together. Waiting for `canplay` (real decodable
+  // data in BOTH streams) makes every start behave like that healthy case.
+  function playWhenReady(startFn) {
+    const go = () => { video.removeEventListener('canplay', go); startFn(); };
+    if (video.readyState >= 3 /* HAVE_FUTURE_DATA */) startFn();
+    else video.addEventListener('canplay', go);
+  }
   async function seekTo(t) {
     t = Math.max(0, dur() ? Math.min(t, dur() - 0.3) : t);
     if (play.mode === 'transcode') {
@@ -1604,8 +1624,9 @@ function openPlayer(ctx) {
       const s = await resolveStart(t);
       if (gen !== seekGen) return; // a newer seek superseded this one
       base = s;
+      resetPipeline();
       video.src = withToken(play.url + '?start=' + s.toFixed(2) + '&snapped=1&' + audioQuery());
-      video.play();
+      playWhenReady(() => video.play());
     } else video.currentTime = t;
   }
 
@@ -1799,9 +1820,13 @@ function openPlayer(ctx) {
     base = 0;
     if (play.mode === 'transcode') {
       base = await resolveStart(at || 0); // resume lands on the true keyframe start
+      if (video.src) resetPipeline();     // version switch mid-playback = src swap
       video.src = withToken(play.url + '?start=' + base.toFixed(2) + '&snapped=1&' + audioQuery());
-      video.addEventListener('loadedmetadata', () => attemptPlay(), { once: true });
+      // canplay, NOT loadedmetadata — see playWhenReady (starting on bare
+      // metadata is what made from-beginning/resume playback lag).
+      playWhenReady(() => attemptPlay());
     } else {
+      if (video.src) resetPipeline();
       video.src = withToken(play.url);
       video.addEventListener('loadedmetadata', () => { if (at) video.currentTime = at; attemptPlay(); }, { once: true });
     }

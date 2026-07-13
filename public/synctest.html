@@ -14,6 +14,20 @@
 const q = new URLSearchParams(location.search);
 const fileId = q.get('fileId'), start = parseFloat(q.get('start') || '0'), token = q.get('token') || '';
 const runSecs = parseFloat(q.get('secs') || '14');
+// Skip mode: play, then swap src mid-playback exactly like the player's ±10s
+// buttons do, and measure sync BEFORE vs AFTER the swap. `reset=1` tears the
+// media pipeline down before the swap (the player's fix for stale-clock desync).
+const mode = q.get('mode') || 'plain';       // plain | skip
+const doReset = q.get('reset') === '1';
+const skipAt = parseFloat(q.get('skipAt') || '6');   // seconds after start
+const skipTo = parseFloat(q.get('skipTo') || '31.7'); // content time to skip to
+// gate=1: start playback only once real decodable data is buffered (canplay),
+// like the fixed player — gate=0 starts on bare metadata like the old player.
+const gate = q.get('gate') === '1';
+const startPlay = (el) => new Promise((res) => {
+  if (!gate || el.readyState >= 3) { el.play(); return res(); }
+  el.addEventListener('canplay', () => { el.play(); res(); }, { once: true });
+});
 const v = document.getElementById('v'), c = document.getElementById('c'), ctx2d = c.getContext('2d', { willReadFrequently: true });
 const out = document.getElementById('out');
 const flashes = [], beeps = [];
@@ -59,21 +73,43 @@ document.getElementById('go').addEventListener('click', async () => {
   };
   v.requestVideoFrameCallback(onFrame);
   v.src = `/api/transcode/movie/${fileId}?start=${s}&snapped=1&token=${token}`;
-  await v.play();
-  out.textContent = `playing (requested ${start}s → stream from ${s}s)…`;
-  setTimeout(() => {
-    // pair each flash with the nearest beep
-    const diffs = flashes.map(f => {
+  await startPlay(v);
+  out.textContent = `playing (requested ${start}s → stream from ${s}s, gate=${gate})…`;
+
+  // pair flashes with nearest beeps, keeping only events in [from, to) wall time
+  const offsets = (from, to) => {
+    const diffs = flashes.filter(f => f.wall >= from && f.wall < to).map(f => {
       let best = null;
       for (const b of beeps) if (best == null || Math.abs(b - f.wall) < Math.abs(best - f.wall)) best = b;
       return best != null ? Math.round(best - f.wall) : null;
     }).filter(x => x != null && Math.abs(x) < 900);
     diffs.sort((a, b) => a - b);
+    return { offsetsMs: diffs, medianMs: diffs[Math.floor(diffs.length / 2)] ?? null };
+  };
+
+  let swapWall = null;
+  if (mode === 'skip') {
+    setTimeout(async () => {
+      // resolve like the player, then swap src mid-playback (the ±10s path)
+      let s2 = skipTo;
+      try { s2 = (await (await fetch(`/api/seekpoint/movie/${fileId}?start=${skipTo}&token=${token}`)).json()).start; } catch {}
+      if (doReset) { try { v.pause(); v.removeAttribute('src'); v.load(); } catch {} }
+      swapWall = performance.now();
+      v.src = `/api/transcode/movie/${fileId}?start=${s2}&snapped=1&token=${token}`;
+      startPlay(v);
+      out.textContent = `skipped to ${s2}s (reset=${doReset}, gate=${gate})…`;
+    }, skipAt * 1000);
+  }
+
+  setTimeout(() => {
+    const t0 = 0, tEnd = Infinity;
     result = {
-      requested: start, streamFrom: s,
+      mode, reset: doReset, gate, requested: start, streamFrom: s,
       flashCount: flashes.length, beepCount: beeps.length,
       firstFlashMedia: flashes[0] ? +flashes[0].media.toFixed(3) : null,
-      offsetsMs: diffs, medianMs: diffs[Math.floor(diffs.length / 2)] ?? null
+      ...(mode === 'skip' && swapWall
+        ? { preSkip: offsets(t0, swapWall), postSkip: offsets(swapWall + 800, tEnd) }
+        : offsets(t0, tEnd))
     };
     out.textContent = 'RESULT ' + JSON.stringify(result, null, 1);
     console.log('SYNCLAB_RESULT', JSON.stringify(result));
