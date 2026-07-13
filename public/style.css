@@ -192,6 +192,15 @@ button { font-family: inherit; }
 }
 .card .badge.new { background: var(--hot); border-color: transparent; }
 .card .badge.stream { left: 7px; right: auto; border-color: transparent; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,0.4); max-width: calc(100% - 14px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* "Also on <service>" on an OWNED card: subtler than the solid streaming-only
+   badge — dark pill outlined in the brand colour, top-left (NEW/quality sits at
+   top-right, so they don't collide). */
+.card .badge.alsoon { left: 7px; right: auto; background: rgba(8,9,13,0.78);
+  border: 1px solid var(--c, var(--line)); color: #fff; font-size: 9.5px; padding: 2px 6px;
+  max-width: calc(100% - 14px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* "Open on <service> ▸" action button on the detail page. */
+.btn-stream { border-color: var(--c, var(--line)) !important; }
+.btn-stream:hover { background: var(--c, var(--accent)); color: #fff; border-color: transparent !important; }
 .card .prog { position: absolute; left: 0; right: 0; bottom: 0; height: 4px; background: rgba(255, 255, 255, 0.18); }
 .card .prog > i { display: block; height: 100%; background: var(--grad); }
 

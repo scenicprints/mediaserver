@@ -177,8 +177,12 @@ export async function playInfo(filePath, { forceStereo = false, night = false, n
   const multichannel = !!a && (+a.channels || 0) > 2;
   const downmix = forceStereo && multichannel; // fold 5.1/7.1 → stereo, server-side
   const needAudio = downmix || night || norm;  // any of these forces an audio re-encode
+  // Cap re-encoded video at 1080p. A real-time 4K→4K encode can't keep up (esp. on
+  // the Dell's 1050 Ti), so video lags audio → A/V desync; downscaling makes the
+  // transcode real-time again. 0 = no scaling (source is already ≤1080p).
+  const scaleH = v && +v.height > 1080 ? 1080 : 0;
   if (DIRECT_EXT.has(ext) && vOK && aOK && !needAudio) return { mode: 'direct', duration, chapters };
-  return { mode: 'transcode', duration, vcopy: vOK, acopy: aOK && !needAudio, downmix, chapters };
+  return { mode: 'transcode', duration, vcopy: vOK, acopy: aOK && !needAudio, downmix, scaleH, chapters };
 }
 
 // ---- Transcode stream ----
@@ -202,22 +206,31 @@ function downmixFilter(level) {
 const NIGHT_FILTER = 'acompressor=threshold=-24dB:ratio=4:attack=20:release=250,alimiter=limit=0.95';
 const NORM_FILTER = 'loudnorm=I=-16:TP=-1.5:LRA=11';
 
-export function transcodeStream(filePath, { start = 0, vcopy = false, acopy = false, downmix = false, forceStereo = false, dboost = 'normal', night = false, norm = false } = {}) {
-  const args = ['-hide_banner', '-loglevel', 'error'];
+export function transcodeStream(filePath, { start = 0, vcopy = false, acopy = false, downmix = false, forceStereo = false, dboost = 'normal', night = false, norm = false, scaleH = 0 } = {}) {
+  // `+genpts` regenerates missing timestamps up front — cheap insurance against
+  // the A/V drift some sources exhibit through a live transcode.
+  const args = ['-hide_banner', '-loglevel', 'error', '-fflags', '+genpts'];
   if (start > 0) args.push('-ss', String(start));
   args.push('-i', filePath, '-map', '0:v:0', '-map', '0:a:0?', '-sn', '-dn');
-  if (vcopy) args.push('-c:v', 'copy');
-  else if (hasNvenc) args.push('-c:v', 'h264_nvenc', '-preset', 'p4', '-cq', '23', '-pix_fmt', 'yuv420p');
-  else args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21', '-pix_fmt', 'yuv420p');
+  if (vcopy) {
+    args.push('-c:v', 'copy');
+  } else {
+    if (scaleH) args.push('-vf', `scale=-2:${scaleH}`); // downscale 4K/UHD so it transcodes in real time
+    if (hasNvenc) args.push('-c:v', 'h264_nvenc', '-preset', 'p4', '-cq', '23', '-pix_fmt', 'yuv420p');
+    else args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21', '-pix_fmt', 'yuv420p');
+  }
   if (acopy) {
     args.push('-c:a', 'copy');
   } else {
-    // Order: fold down first (→ stereo), then compress, then normalize.
+    // Order: fold down first (→ stereo), then compress, then normalize, then a
+    // final aresample=async=1 that pads/stretches audio to keep it locked to the
+    // (re-encoded) video timeline instead of drifting out of sync.
     const af = [];
     if (downmix) af.push(downmixFilter(dboost));
     if (night) af.push(NIGHT_FILTER);
     if (norm) af.push(NORM_FILTER);
-    if (af.length) args.push('-af', af.join(','));
+    af.push('aresample=async=1');
+    args.push('-af', af.join(','));
     args.push('-c:a', 'aac', '-b:a', '192k');
     // A pan-based downmix already emits stereo; otherwise force stereo when the
     // device wants it (surround mode keeps the source's channel count).

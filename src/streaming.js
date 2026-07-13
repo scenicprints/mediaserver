@@ -120,6 +120,42 @@ export function catalogFor(kind, slugs) {
   return [...byId.values()];
 }
 
+// tmdb_id -> [enabled slugs that carry it], from the cached popular catalog.
+// Cheap (no API calls) — used to badge owned titles in the grid with "also on X".
+// Only covers titles in the pulled catalog (popular), so it's a hint, not gospel.
+export function catalogProviderMap(kind, slugs) {
+  const map = new Map();
+  for (const slug of slugs) {
+    if (!BY_SLUG.has(slug)) continue;
+    for (const it of catalog[kind]?.get(slug) || []) {
+      const arr = map.get(it.tmdb_id) || [];
+      if (!arr.includes(slug)) arr.push(slug);
+      map.set(it.tmdb_id, arr);
+    }
+  }
+  return map;
+}
+
+// Authoritative per-title lookup: which of OUR services carry this exact title
+// (flatrate), via /watch/providers. One cached API call — used on the detail page
+// where accuracy matters (a title that isn't in the popular catalog still resolves).
+const provCache = new Map();
+export async function titleProviders(apiKey, kind, tmdbId, region = 'US') {
+  const type = kind === 'tv' ? 'tv' : 'movie';
+  const key = `${type}:${tmdbId}:${region}`;
+  if (provCache.has(key)) return provCache.get(key);
+  let slugs = [];
+  if (apiKey && tmdbId) {
+    try {
+      const d = await tmdbGet(apiKey, `/${type}/${tmdbId}/watch/providers`);
+      const ids = new Set((d.results?.[region]?.flatrate || []).map((p) => p.provider_id));
+      slugs = PROVIDERS.filter((p) => ids.has(p.tmdb)).map((p) => p.id);
+    } catch {}
+  }
+  provCache.set(key, slugs);
+  return slugs;
+}
+
 // Public provider metadata for the settings UI.
 export function providersList() {
   return PROVIDERS.map((p) => ({ id: p.id, name: p.name, color: p.color }));

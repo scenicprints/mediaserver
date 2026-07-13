@@ -1012,16 +1012,17 @@ function streamCard(it) {
     onOpen: () => openStream(it), onPlay: () => openStream(it) });
 }
 
-// Open the badge's service directly to this title (its search), not a TMDB page.
-// Inside the Android TV app, hand the URL to the native bridge so it launches the
-// real service app; in a browser, open it in a new tab.
-function openStream(it) {
-  const p = STREAM_PROVIDERS[(it.providers || [])[0]];
-  const url = p && p.search ? p.search(encodeURIComponent(it.title || '')) : null;
+// Open a service directly to this title (its search), not a TMDB page. Inside the
+// Android TV app, hand the URL to the native bridge so it launches the real
+// service app; in a browser, open it in a new tab.
+function openService(slug, title) {
+  const p = STREAM_PROVIDERS[slug];
+  const url = p && p.search ? p.search(encodeURIComponent(title || '')) : null;
   if (!url) return;
   if (window.MarqueeTV && typeof window.MarqueeTV.openApp === 'function') window.MarqueeTV.openApp(url);
   else window.open(url, '_blank', 'noopener');
 }
+function openStream(it) { openService((it.providers || [])[0], it.title); }
 
 function buildMediaCard(it, kind) {
   if (it.source === 'stream') return streamCard(it);
@@ -1030,6 +1031,11 @@ function buildMediaCard(it, kind) {
   if (kind === 'show' && it.unwatched > 0) badge = `<div class="badge new">${it.unwatched} new</div>`;
   else if (isNew(it)) badge = `<div class="badge new">NEW</div>`;
   else if (kind === 'movie' && it.versions > 1 && it.qualities) badge = `<div class="badge">${it.qualities.split(',').sort().reverse()[0]}</div>`;
+  // Owned, but also streamable on an enabled service — flag it (top-left).
+  if (it.alsoOn && it.alsoOn.length) {
+    const ap = STREAM_PROVIDERS[it.alsoOn[0]] || { name: it.alsoOn[0], color: '#555' };
+    badge += `<div class="badge alsoon" style="--c:${ap.color}">▸ ${escapeHtml(ap.name)}${it.alsoOn.length > 1 ? ` +${it.alsoOn.length - 1}` : ''}</div>`;
+  }
   const sub = kind === 'show' ? `${it.episodes} episode${it.episodes === 1 ? '' : 's'}` : (it.year || '');
   return cardEl({
     poster: it.poster, title: it.title, sub, badge, pct,
@@ -1173,6 +1179,7 @@ async function openDetail(id, autoplay = true) {
             <span id="d-playbtns"></span>
             <button class="btn" id="favBtn">${m.favorite ? '★ Favorited' : '☆ Favorite'}</button>
             <button class="btn" id="watchedBtn">${m.watched ? '✓ Watched' : 'Mark watched'}</button>
+            ${(extra.alsoOn || []).map((slug) => { const p = STREAM_PROVIDERS[slug]; return p ? `<button class="btn btn-stream" data-slug="${slug}" style="--c:${p.color}">${escapeHtml(p.name)} ▸</button>` : ''; }).join('')}
             ${versionControl}
           </div>
         </div>
@@ -1186,6 +1193,9 @@ async function openDetail(id, autoplay = true) {
     </div>`;
   openDetailModal();
   detail.scrollTop = 0;
+
+  // "Open on Netflix ▸" buttons → launch that service to this title.
+  detailInner.querySelectorAll('.btn-stream').forEach((b) => b.addEventListener('click', () => openService(b.dataset.slug, m.title)));
 
   const sel = document.getElementById('ver-select');
   if (sel && current) sel.value = String(current.id); // reflect the remembered version

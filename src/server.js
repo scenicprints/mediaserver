@@ -16,7 +16,7 @@ import { translateVttFile } from './translate.js';
 import { radarrEnabled, sonarrEnabled, testConn, radarrSearch, radarrAdd, sonarrSearch, sonarrAdd, getProfiles, radarrQueue, sonarrQueue } from './arr.js';
 import { runIntroDetection, introForFile } from './introdetect.js';
 import { hashPassword, verifyPassword, newToken, tokenFromReq, cookieHeader } from './auth.js';
-import { PROVIDERS, providersList, refreshCatalog, catalogFor, watchLink, status as streamingStatus } from './streaming.js';
+import { PROVIDERS, providersList, refreshCatalog, catalogFor, catalogProviderMap, titleProviders, watchLink, status as streamingStatus } from './streaming.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -290,14 +290,28 @@ function streamItem(t) {
 }
 
 // Append enabled streaming titles to a local list, dropping any already owned
-// locally (dedupe by tmdb_id).
+// locally (dedupe by tmdb_id) — and tagging the surviving owned title with which
+// enabled services ALSO carry it, so the client can badge "also on Netflix".
 function withStreaming(req, kind, local) {
   const src = userSources(req);
   const base = src.local ? local : [];
   if (!src.enabled.length) return base;
+  if (src.local) {
+    const also = catalogProviderMap(kind, src.enabled);
+    for (const it of base) { const on = also.get(it.tmdb_id); if (on && on.length) it.alsoOn = on; }
+  }
   const owned = new Set(local.map((x) => x.tmdb_id).filter(Boolean));
   const extra = catalogFor(kind, src.enabled).filter((t) => !owned.has(t.tmdb_id)).map(streamItem);
   return [...base, ...extra];
+}
+
+// Which of the user's enabled services carry this exact title (authoritative,
+// per-title). Empty when streaming is off or the title isn't on any enabled one.
+async function alsoOnFor(req, kind, tmdbId) {
+  const enabled = userSources(req).enabled;
+  if (!enabled.length || !tmdbId) return [];
+  const on = await titleProviders(config.tmdbApiKey, kind, tmdbId, config.region || 'US');
+  return enabled.filter((s) => on.includes(s));
 }
 
 app.get('/api/movies', async (req) => {
@@ -391,11 +405,12 @@ app.get('/api/movies/:id/extra', async (req, reply) => {
   const m = db.prepare('SELECT tmdb_id FROM movies WHERE id = ?').get(req.params.id);
   if (!m) return reply.code(404).send({ error: 'not found' });
   const extra = await movieExtra(config.tmdbApiKey, m.tmdb_id);
-  if (!extra) return { genres: [], runtime: null, cast: [], directors: [], trailer: null, recommendations: [] };
+  if (!extra) return { genres: [], runtime: null, cast: [], directors: [], trailer: null, recommendations: [], alsoOn: await alsoOnFor(req, 'movie', m.tmdb_id) };
   const owned = db.prepare('SELECT id, tmdb_id FROM movies WHERE tmdb_id IS NOT NULL').all();
   const byTmdb = new Map(owned.map((o) => [o.tmdb_id, o.id]));
   for (const r of extra.recommendations) r.localId = byTmdb.get(r.tmdb_id) || null;
   if (extra.collection) for (const p of extra.collection.parts) p.localId = byTmdb.get(p.tmdb_id) || null;
+  extra.alsoOn = await alsoOnFor(req, 'movie', m.tmdb_id); // enabled services that also carry it
   return extra;
 });
 
@@ -521,7 +536,9 @@ app.get('/api/episodes/:id/extra', async (req, reply) => {
 app.get('/api/shows/:id/extra', async (req, reply) => {
   const s = db.prepare('SELECT tmdb_id FROM shows WHERE id = ?').get(req.params.id);
   if (!s) return reply.code(404).send({ error: 'not found' });
-  return (await showExtra(config.tmdbApiKey, s.tmdb_id)) || { seasons: [] };
+  const extra = (await showExtra(config.tmdbApiKey, s.tmdb_id)) || { seasons: [] };
+  extra.alsoOn = await alsoOnFor(req, 'tv', s.tmdb_id); // enabled services that also carry it
+  return extra;
 });
 
 app.get('/api/shows/:id', async (req, reply) => {
@@ -818,7 +835,7 @@ app.get('/api/transcode/:kind/:fileId', async (req, reply) => {
   if (info.mode !== 'transcode') return reply.code(400).send({ error: 'file does not need transcoding' });
   const start = Math.max(0, parseFloat(req.query.start) || 0);
   const proc = transcodeStream(row.path, {
-    start, vcopy: info.vcopy, acopy: info.acopy, downmix: info.downmix,
+    start, vcopy: info.vcopy, acopy: info.acopy, downmix: info.downmix, scaleH: info.scaleH,
     forceStereo: opts.forceStereo, dboost: opts.dboost, night: opts.night, norm: opts.norm
   });
   proc.stderr.on('data', (d) => console.error('[ffmpeg]', String(d).trim()));
