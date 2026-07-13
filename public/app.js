@@ -1013,10 +1013,14 @@ function streamCard(it) {
 }
 
 // Open the badge's service directly to this title (its search), not a TMDB page.
+// Inside the Android TV app, hand the URL to the native bridge so it launches the
+// real service app; in a browser, open it in a new tab.
 function openStream(it) {
   const p = STREAM_PROVIDERS[(it.providers || [])[0]];
   const url = p && p.search ? p.search(encodeURIComponent(it.title || '')) : null;
-  if (url) window.open(url, '_blank', 'noopener');
+  if (!url) return;
+  if (window.MarqueeTV && typeof window.MarqueeTV.openApp === 'function') window.MarqueeTV.openApp(url);
+  else window.open(url, '_blank', 'noopener');
 }
 
 function buildMediaCard(it, kind) {

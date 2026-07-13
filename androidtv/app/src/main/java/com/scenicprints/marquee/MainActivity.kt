@@ -3,12 +3,14 @@ package com.scenicprints.marquee
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
 import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
@@ -57,6 +59,12 @@ class MainActivity : Activity() {
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(web, true)
 
+        // Bridge for the web app: streaming titles call MarqueeTV.openApp(url) so
+        // they launch the real Netflix/Disney+/… app instead of loading the
+        // service's website inside this WebView (a web page can't hand off to a
+        // native app; only we can, from here).
+        web.addJavascriptInterface(TvBridge(), "MarqueeTV")
+
         web.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 return false // keep every server page inside this WebView
@@ -92,6 +100,40 @@ class MainActivity : Activity() {
                 }
             } catch (_: Exception) { /* offline / no update / declined — ignore */ }
         }.start()
+    }
+
+    /** Exposed to the web app as `window.MarqueeTV`. The web UI calls openApp()
+     *  for a streaming deep-link; we fire it from the native side so the OS can
+     *  route it to the installed app. */
+    inner class TvBridge {
+        @JavascriptInterface
+        fun openApp(url: String) { runOnUiThread { openExternal(url) } }
+    }
+
+    // Streaming domains we hand off to a native app. The bridge is only meant for
+    // these deep-links from our own UI, so we allowlist them (defense in depth).
+    private val streamHosts = listOf(
+        "netflix.com", "primevideo.com", "amazon.com", "disneyplus.com",
+        "hulu.com", "max.com", "tv.apple.com", "paramountplus.com", "peacocktv.com"
+    )
+
+    /** Launch an https streaming URL in its native app via an ACTION_VIEW intent —
+     *  Google TV routes it to the installed app through Android App Links. We
+     *  prefer a real (non-browser) app and fall back to the browser only if that's
+     *  all that can handle it. Fully guarded, so it can never crash the app. */
+    private fun openExternal(url: String) {
+        val uri = try { Uri.parse(url) } catch (_: Exception) { return }
+        if (uri.scheme != "https") return
+        val host = (uri.host ?: "").removePrefix("www.")
+        if (streamHosts.none { host == it || host.endsWith(".$it") }) return
+        try {
+            val i = Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            if (Build.VERSION.SDK_INT >= 30) i.addFlags(Intent.FLAG_ACTIVITY_REQUIRE_NON_BROWSER)
+            startActivity(i)
+        } catch (_: Exception) {
+            // Only a browser (or nothing) can handle it — open it however we can.
+            try { startActivity(Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) } catch (_: Exception) {}
+        }
     }
 
     /** TV is always fullscreen: hide the status + navigation bars. */
