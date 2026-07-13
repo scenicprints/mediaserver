@@ -188,15 +188,12 @@ export async function playInfo(filePath, { forceStereo = false, night = false, n
   const srcH = v ? (+v.height || 0) : 0;
   const cap = maxTranscodeHeight || (hasNvenc ? 0 : 1080); // 0 = no cap (keep source res)
   const scaleH = cap && srcH > cap ? cap : 0;
-  // B-frame reorder delay: when we COPY a video that has B-frames, its first frame
-  // displays a couple frames late (has_b_frames / fps ≈ 67ms), which shows up as the
-  // video starting after the audio → a constant audio-ahead lip-sync gap. We delay
-  // the audio by exactly that (in transcodeStream) to line them back up. Only for the
-  // copy path — re-encodes emit no B-frames (-bf 0), so their video already starts at 0.
-  const fpsOf = (s) => { const m = /^(\d+)\/(\d+)$/.exec((s && (s.avg_frame_rate || s.r_frame_rate)) || ''); return m && +m[2] ? +m[1] / +m[2] : 0; };
+  // B-frames cause the lip-sync lag: a copied B-frame video's first frame displays a
+  // couple frames late (has_b_frames / fps ≈ 67ms) → video starts after the audio →
+  // constant audio-ahead. So only remux (copy) the video when it has NO B-frames;
+  // otherwise re-encode it (transcodeStream emits `-bf 0`, so the output starts at 0).
   const bf = v ? (+v.has_b_frames || 0) : 0;
-  const fps = fpsOf(v);
-  const bfDelayMs = vOK && bf > 0 && fps ? Math.round((bf / fps) * 1000) : 0;
+  const vcopy = vOK && bf === 0;
   // Engine summary for the admin playback badge: what each stream is and what the
   // server will do with it, plus the source per-stream start offset — a non-zero
   // gap here is the usual culprit for a constant A/V (lip-sync) offset.
@@ -209,12 +206,11 @@ export async function playInfo(filePath, { forceStereo = false, night = false, n
   if (DIRECT_EXT.has(ext) && vOK && aOK && !needAudio) {
     return { mode: 'direct', duration, chapters, engine: { ...src, mode: 'direct', videoAction: 'direct play', audioAction: 'direct play' } };
   }
-  // Applying the audio delay needs the audio re-encoded (can't filter a copied stream).
-  const acopy = aOK && !needAudio && !bfDelayMs;
-  const videoAction = vOK ? 'copy (remux)' : (scaleH ? `transcode → ${scaleH}p` : 'transcode');
-  const audioAction = acopy ? 'copy' : (downmix ? 'downmix → stereo' : (a ? `${String(a.codec_name || '').toUpperCase()} → AAC` : 'none')) + (bfDelayMs ? ` (+${bfDelayMs}ms sync)` : '');
+  const acopy = aOK && !needAudio;
+  const videoAction = vcopy ? 'copy (remux)' : (scaleH ? `transcode → ${scaleH}p` : (bf > 0 ? 'transcode (de-B-frame)' : 'transcode'));
+  const audioAction = acopy ? 'copy' : (downmix ? 'downmix → stereo' : (a ? `${String(a.codec_name || '').toUpperCase()} → AAC` : 'none'));
   return {
-    mode: 'transcode', duration, vcopy: vOK, acopy, downmix, scaleH, bfDelayMs, chapters,
+    mode: 'transcode', duration, vcopy, acopy, downmix, scaleH, chapters,
     engine: { ...src, mode: 'transcode', videoAction, audioAction }
   };
 }
@@ -264,7 +260,7 @@ function downmixFilter(level) {
 const NIGHT_FILTER = 'acompressor=threshold=-24dB:ratio=4:attack=20:release=250,alimiter=limit=0.95';
 const NORM_FILTER = 'loudnorm=I=-16:TP=-1.5:LRA=11';
 
-export function transcodeStream(filePath, { start = 0, vcopy = false, acopy = false, downmix = false, forceStereo = false, dboost = 'normal', night = false, norm = false, scaleH = 0, duration = 0, bfDelayMs = 0 } = {}) {
+export function transcodeStream(filePath, { start = 0, vcopy = false, acopy = false, downmix = false, forceStereo = false, dboost = 'normal', night = false, norm = false, scaleH = 0, duration = 0 } = {}) {
   // First line of defense against A/V drift (applied regardless of resolution):
   // `+genpts` regenerates missing timestamps up front, and `aresample=async=1`
   // (below) keeps audio locked to the video timeline.
@@ -292,9 +288,6 @@ export function transcodeStream(filePath, { start = 0, vcopy = false, acopy = fa
     // final aresample=async=1 that pads/stretches audio to keep it locked to the
     // (re-encoded) video timeline instead of drifting out of sync.
     const af = [];
-    // Delay the audio to match a copied B-frame video's display start (see playInfo)
-    // — this is the lip-sync fix for the "audio ahead" on B-frame files.
-    if (bfDelayMs > 0) af.push(`adelay=${bfDelayMs}:all=1`);
     if (downmix) af.push(downmixFilter(dboost));
     if (night) af.push(NIGHT_FILTER);
     if (norm) af.push(NORM_FILTER);

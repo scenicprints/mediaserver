@@ -133,7 +133,9 @@ an update.
   don't actually play, but they exercise scanning/metadata/UI.
 - **Real playable test media** (dev machine): `C:\Users\jkevi\mediaserver-testmedia\` —
   ffmpeg-generated `Transcode Test (2020) 1080p.mkv` (HEVC+AC3 → exercises the transcode
-  path; has a matching `.srt`) and `Direct Test (2021) 720p.mp4` (H264+AAC → direct play).
+  path; has a matching `.srt`), `Direct Test (2021) 720p.mp4` (H264+AAC → direct play), and
+  `BFrame Test (2022) 1080p.mkv` (H264 `-bf 2`+AC3 → exercises the B-frame de-B-frame
+  re-encode path; Diagnose on it must read `offsetMs: 0`).
   Added as a movie library in the dev DB. Regenerate with ffmpeg's `testsrc2`/`sine` if lost.
 - Browser checks via the preview tools: **screenshots hang on remote TMDB poster images —
   use `preview_snapshot` / `preview_eval` to read the DOM instead.**

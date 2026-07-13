@@ -837,7 +837,7 @@ app.get('/api/transcode/:kind/:fileId', async (req, reply) => {
   if (info.mode !== 'transcode') return reply.code(400).send({ error: 'file does not need transcoding' });
   const start = Math.max(0, parseFloat(req.query.start) || 0);
   const proc = transcodeStream(row.path, {
-    start, vcopy: info.vcopy, acopy: info.acopy, downmix: info.downmix, scaleH: info.scaleH, bfDelayMs: info.bfDelayMs,
+    start, vcopy: info.vcopy, acopy: info.acopy, downmix: info.downmix, scaleH: info.scaleH,
     forceStereo: opts.forceStereo, dboost: opts.dboost, night: opts.night, norm: opts.norm
   });
   proc.stderr.on('data', (d) => console.error('[ffmpeg]', String(d).trim()));
@@ -865,7 +865,7 @@ app.get('/api/diagnose/:kind/:fileId', async (req, reply) => {
     try {
       await new Promise((res, rej) => {
         const proc = transcodeStream(row.path, {
-          start: 0, vcopy: info.vcopy, acopy: info.acopy, downmix: info.downmix, scaleH: info.scaleH, bfDelayMs: info.bfDelayMs,
+          start: 0, vcopy: info.vcopy, acopy: info.acopy, downmix: info.downmix, scaleH: info.scaleH,
           forceStereo: opts.forceStereo, dboost: opts.dboost, night: opts.night, norm: opts.norm, duration: 3
         });
         const out = fs.createWriteStream(tmp);
@@ -879,7 +879,7 @@ app.get('/api/diagnose/:kind/:fileId', async (req, reply) => {
       sample = {
         video: { startTime: +v.start_time || 0, duration: +v.duration || 0 },
         audio: { startTime: +a.start_time || 0, duration: +a.duration || 0 },
-        // video−audio: positive = video starts later = audio AHEAD (the reported symptom).
+        // video−audio: positive = video starts later = audio ahead (the symptom).
         offsetMs: Math.round(((+v.start_time || 0) - (+a.start_time || 0)) * 1000)
       };
     } catch (e) { sample = { error: e.message }; }
