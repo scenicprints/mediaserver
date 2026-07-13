@@ -45,6 +45,26 @@ APK to the **`marquee-tv-latest`** release for sideloading onto the friend's TCL
 ---
 
 ## ✅ Done
+- **A/V lip-sync ROOT CAUSE fixed: keyframe-snapped seeks (2026-07-13).** The "audio lags"
+  bug wasn't B-frames or stream offsets — it was the **resume/seek path**: remuxed (copied)
+  video can only start on a keyframe, so ffmpeg silently emitted from the keyframe *before*
+  the requested `?start=`, while the player assumed the stream began exactly at it. Result:
+  up to a GOP of unexpected video over silence-padded audio, and the virtual timeline (and
+  every subtitle cue) off by the gap for the whole session. Real-world rips have 5–10s GOPs;
+  Diagnose only ever sampled `start=0`, which is why it kept reading 0 ms. Fix (the
+  progressive-stream equivalent of Plex/Jellyfin's timestamp-honest HLS): new
+  `GET /api/seekpoint` asks ffprobe to seek **exactly like ffmpeg's demuxer will** and
+  returns the true start; the player uses it as its timeline base (`&snapped=1`);
+  `/api/transcode` snaps server-side for raw callers; Diagnose gained a **mid-file seek
+  sample** showing requested→snapped. Verified: content-level flash/beep lab (offsets ≤32 ms,
+  was 2000 ms of leading silence), and **measured in a real Chrome render** (rVFC + WebAudio):
+  median −19 ms on both the remux and re-encode paths. Test assets live in
+  `mediaserver-testmedia/` (`Sync Lab BF0/BF2`); `public/synctest.html` is the measurement page.
+- **Performance batch (2026-07-13):** rescans are **fully async** (a scan of the big library
+  froze every active stream for its duration — same event-loop-blocking class as the old
+  check-update git fetch); subtitle discovery gets a **10s folder-listing cache** (a 200-episode
+  show view was ~1200 synchronous readdirs); session tokens update `last_used_at` **at most
+  hourly** (was one DB write per request).
 - Node/Fastify/`node:sqlite` server; vanilla web UI; dark theme.
 - In-app **library manager**: browse the server's drives, add folders as **Movies** or
   **TV Shows**, remove them — no config editing.
@@ -313,9 +333,9 @@ APK to the **`marquee-tv-latest`** release for sideloading onto the friend's TCL
    Dell's Claude (adjust `BIT_THRESH`/`MIN_INTRO_SEC`/`MAX_GAP`; require a stronger match/consensus
    across more than adjacent pairs), fix the **button auto-hide/bounds**, add a Settings toggle +
    progress, and consider end-credits detection. Also: the whole feature must stay **fully async**
-   (it once froze playback — see fc263dd). Separately, the scanner leaves **stale file rows** when a
-   file is deleted/replaced on disk — worth pruning `episode_files`/`movie_files` with missing paths
-   on rescan.
+   (it once froze playback — see fc263dd). ~~Separately, the scanner leaves **stale file rows**~~ —
+   already handled: `pruneMissing()` in `src/scan.js` runs on every rescan (with a reachable-root
+   guard so an unplugged drive never wipes its library).
 0b. **Whisper "auto-generate subtitles for files that have none" (opt-in toggle).** Owner asked
     whether to pre-generate like intros — decided NO for the whole library (too expensive, rarely
     needed), but a targeted background job for files with **zero** existing subtitle tracks is
@@ -329,11 +349,14 @@ APK to the **`marquee-tv-latest`** release for sideloading onto the friend's TCL
    broadly (currently only the top menu grows in remote mode); let the remote **focus + type in
    the search box** (deliberately excluded for now so arrows keep navigating); consider a
    left/right **Skip Intro / Up Next** reachable by remote inside the player.
-2. **Embedded subtitles inside media files** (owner asked; `.mkv` often has embedded subs).
-   The ffmpeg pipeline **now exists** (`src/ffmpeg.js`) — use `probe()` to list subtitle
-   streams and an ffmpeg `-map 0:s:N` extract-to-WebVTT endpoint; list them alongside sidecar
-   tracks in the player.
-3. **Audio‑track selection** — same story: pipeline exists; add an `audio=N` param to
+2. **Embedded subtitles — DONE (2026-07-13).** Text subtitle streams inside `.mkv`/`.mp4`
+   (subrip/ass/mov_text; bitmap PGS/VobSub excluded — they'd need OCR) now appear in the
+   player's subtitle menu alongside sidecars, labeled "ENG (embedded)" etc. New
+   `GET /api/subtitles/list/:kind/:fileId` returns the full track list (sidecars first,
+   embedded after — same `?idx=` addressing as `/api/subtitle/...`, which extracts embedded
+   tracks to WebVTT on first use and caches them in git-ignored `data/subcache/`). The player
+   refreshes its track list when playback starts, so detail endpoints never probe files.
+3. **Audio‑track selection** — pipeline exists; add an `audio=N` param to
    `/api/transcode` (`-map 0:a:N`) and list probe-detected audio tracks in the player menu.
 4. **Skip Intro accuracy** — upgrade the heuristic with ffprobe chapter markers (probe() is
    available now) / per‑show manual ranges.

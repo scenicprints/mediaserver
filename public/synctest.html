@@ -1,0 +1,83 @@
+<!-- TEMPORARY dev-only page (not linked from the app): measures REAL rendered A/V
+     sync in the browser. Plays a transcode stream of a flash+beep test file and
+     cross-times flash presentation (requestVideoFrameCallback + canvas luminance)
+     against beep arrival (WebAudio analyser). Delete before shipping if unwanted. -->
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>sync lab</title>
+<style>body{background:#111;color:#eee;font:14px monospace;padding:16px}#out{white-space:pre;margin-top:12px}video{width:320px;display:block;margin-top:8px}</style>
+</head><body>
+<button id="go">start</button>
+<video id="v" playsinline></video>
+<canvas id="c" width="32" height="18" style="display:none"></canvas>
+<div id="out">idle</div>
+<script>
+const q = new URLSearchParams(location.search);
+const fileId = q.get('fileId'), start = parseFloat(q.get('start') || '0'), token = q.get('token') || '';
+const runSecs = parseFloat(q.get('secs') || '14');
+const v = document.getElementById('v'), c = document.getElementById('c'), ctx2d = c.getContext('2d', { willReadFrequently: true });
+const out = document.getElementById('out');
+const flashes = [], beeps = [];
+let result = null;
+
+document.getElementById('go').addEventListener('click', async () => {
+  out.textContent = 'resolving seekpoint…';
+  // resolve like the real player now does
+  let s = start;
+  if (start > 0) {
+    const r = await (await fetch(`/api/seekpoint/movie/${fileId}?start=${start}&token=${token}`)).json();
+    s = r.start;
+  }
+  const ac = new AudioContext();
+  const src = ac.createMediaElementSource(v);
+  // ScriptProcessor runs on the audio thread — unlike setInterval it is NOT
+  // throttled in occluded/background tabs, so short beeps are never missed.
+  const sp = ac.createScriptProcessor(512, 1, 1); // ~10.7ms @48k
+  src.connect(sp); sp.connect(ac.destination);
+  let inBeep = false;
+  window._dbg = { fires: 0, maxRms: 0 };
+  sp.onaudioprocess = (e) => {
+    const b = e.inputBuffer.getChannelData(0);
+    let sum = 0; for (let i = 0; i < b.length; i++) sum += b[i] * b[i];
+    const rms = Math.sqrt(sum / b.length);
+    window._dbg.fires++; window._dbg.maxRms = Math.max(window._dbg.maxRms, rms);
+    // e.playbackTime = when this buffer will be HEARD, in audio-context time.
+    const wall = performance.now() + (e.playbackTime - ac.currentTime) * 1000 - (ac.outputLatency || ac.baseLatency || 0) * 1000;
+    if (rms > 0.03 && !inBeep) { inBeep = true; beeps.push(wall); }
+    else if (rms < 0.008 && inBeep) inBeep = false;
+    // pass audio through so the element keeps playing normally
+    e.outputBuffer.getChannelData(0).set(b);
+  };
+  let inFlash = false;
+  const onFrame = (now, meta) => {
+    ctx2d.drawImage(v, 0, 0, 32, 18);
+    const d = ctx2d.getImageData(0, 0, 32, 18).data;
+    let lum = 0; for (let i = 0; i < d.length; i += 4) lum += d[i];
+    lum /= (d.length / 4);
+    if (lum > 100 && !inFlash) { inFlash = true; flashes.push({ wall: meta.expectedDisplayTime, media: meta.mediaTime }); }
+    else if (lum < 60 && inFlash) inFlash = false;
+    v.requestVideoFrameCallback(onFrame);
+  };
+  v.requestVideoFrameCallback(onFrame);
+  v.src = `/api/transcode/movie/${fileId}?start=${s}&snapped=1&token=${token}`;
+  await v.play();
+  out.textContent = `playing (requested ${start}s → stream from ${s}s)…`;
+  setTimeout(() => {
+    // pair each flash with the nearest beep
+    const diffs = flashes.map(f => {
+      let best = null;
+      for (const b of beeps) if (best == null || Math.abs(b - f.wall) < Math.abs(best - f.wall)) best = b;
+      return best != null ? Math.round(best - f.wall) : null;
+    }).filter(x => x != null && Math.abs(x) < 900);
+    diffs.sort((a, b) => a - b);
+    result = {
+      requested: start, streamFrom: s,
+      flashCount: flashes.length, beepCount: beeps.length,
+      firstFlashMedia: flashes[0] ? +flashes[0].media.toFixed(3) : null,
+      offsetsMs: diffs, medianMs: diffs[Math.floor(diffs.length / 2)] ?? null
+    };
+    out.textContent = 'RESULT ' + JSON.stringify(result, null, 1);
+    console.log('SYNCLAB_RESULT', JSON.stringify(result));
+  }, runSecs * 1000);
+});
+</script>
+</body></html>

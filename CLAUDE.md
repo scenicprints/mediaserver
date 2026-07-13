@@ -90,7 +90,8 @@ node C:\Users\jkevi\mediaserver\src\server.js
   localStorage — it's per-browser and the owner watches from multiple devices.**
 - **Self-update:** `GET /version`, `GET /check-update`, `POST /update` (exits 42 → `run.bat` pulls & restarts)
 - **Collections:** `GET /collections` (owned movies grouped by TMDB franchise), `GET /collections/:id`
-- **Playback engine:** `GET /play/:kind/:fileId` (direct vs transcode + duration + chapters + fingerprinted `intro` for episodes), `GET /transcode/:kind/:fileId?start=`, `GET/POST /ffmpeg[/install]`
+- **Playback engine:** `GET /play/:kind/:fileId` (direct vs transcode + duration + chapters + fingerprinted `intro` for episodes), `GET /transcode/:kind/:fileId?start=&snapped=1`, `GET /seekpoint/:kind/:fileId?start=` (where a copied-video stream will REALLY start — the keyframe at/before `start`; the player uses it as its timeline base. Skipping this was the "audio lags after resume/seek" lip-sync bug), `GET /diagnose/:kind/:fileId` (admin: source timing + start-0 AND mid-file-seek transcode samples), `GET/POST /ffmpeg[/install]`
+- **Subtitle tracks:** `GET /subtitles/list/:kind/:fileId` — full track list for the player (sidecar files first, then text subtitles **embedded** in the container, extracted to WebVTT on demand and cached in git-ignored `data/subcache/`)
 - **Live TV:** `GET /livetv/episodes` (flat playable episodes with show art/genres + duration, for the broadcast schedule)
 - **AI subtitles:** `GET/POST /whisper[/install]`, `POST /subtitles/generate` `{kind,fileId,language,translate}`
 - **Requests (Radarr/Sonarr):** `GET /requests/status`, `GET /requests/search?q=`, `POST /requests/add` `{type,tmdbId|tvdbId}`, `POST /settings/arr` `{radarr,sonarr:{url,apiKey}}`. Keys → git-ignored `config.json` (`config.radarr`/`config.sonarr`). **Never commit config.json.**
@@ -133,10 +134,18 @@ an update.
   don't actually play, but they exercise scanning/metadata/UI.
 - **Real playable test media** (dev machine): `C:\Users\jkevi\mediaserver-testmedia\` —
   ffmpeg-generated `Transcode Test (2020) 1080p.mkv` (HEVC+AC3 → exercises the transcode
-  path; has a matching `.srt`), `Direct Test (2021) 720p.mp4` (H264+AAC → direct play), and
-  `BFrame Test (2022) 1080p.mkv` (H264 `-bf 2`+AC3 → exercises the B-frame de-B-frame
-  re-encode path; Diagnose on it must read `offsetMs: 0`).
-  Added as a movie library in the dev DB. Regenerate with ffmpeg's `testsrc2`/`sine` if lost.
+  path; has a matching `.srt`), `Direct Test (2021) 720p.mp4` (H264+AAC → direct play),
+  `BFrame Test (2022) 1080p.mkv` (H264 `-bf 2`+AC3 → the B-frame re-encode path; Diagnose
+  must read `offsetMs: 0`), `Sync Lab BF0/BF2 (2023/2024) 720p.mkv` (**white flash + beep
+  at every even second, 2s GOPs** → content-level A/V sync measurement; BF0 remuxes, BF2
+  re-encodes), and `Embedded Subs Test (2025) 720p.mkv` (2 embedded text subtitle tracks,
+  eng+spa). Added as a movie library in the dev DB. Regenerate with ffmpeg's
+  `testsrc2`/`sine` if lost.
+- **A/V sync measurement in a real browser**: `public/synctest.html` (dev tool, unlinked;
+  needs `?fileId=&start=&token=`) plays a Sync Lab file through the real transcode pipeline
+  and cross-times flash presentation (requestVideoFrameCallback + canvas) against beep
+  arrival (WebAudio) — the number a viewer's eyes/ears actually get. ±20 ms precision;
+  |median| ≤ 45 ms is perceptually synced.
 - Browser checks via the preview tools: **screenshots hang on remote TMDB poster images —
   use `preview_snapshot` / `preview_eval` to read the DOM instead.**
 - Simulate progress by POSTing to `/progress`; simulate an episode ending with
@@ -156,7 +165,7 @@ The owner wants a native Apple TV app but has **no Mac**. A Mac is only needed t
 (recurring). Open alternative: switch the TV box to **Fire TV / Nvidia Shield** to skip the
 fee and slow cloud builds. Decision not yet made.
 
-## Current status (2026-07-11, sha b90a577)
+## Current status (2026-07-13, sha 03d3407 + uncommitted batch)
 Mature, feature-rich. On top of the core (library manager, movie/TV scan + TMDB, versions/quality,
 HTTP-range streaming + **ffmpeg transcode** of any format, Continue Watching, subtitles): a
 **cinematic "MARQUEE" UI** with a **tvOS remote focus engine** (arrows = content, **Back = the top

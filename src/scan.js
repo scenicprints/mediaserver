@@ -21,7 +21,10 @@ export function seedLibraries(db, roots) {
 // Scan every library. Movie libraries → logical movies + files (grouped by
 // title+year). TV libraries → shows + episodes (grouped by show name, with
 // season/episode parsed from filenames and Season folders).
-export function scanLibraries(db) {
+// Async: the directory walk yields to the event loop between folders, so a
+// rescan of a big library never freezes active streams (the same class of bug
+// as the synchronous check-update git fetch that stuttered playback).
+export async function scanLibraries(db) {
   const libs = db.prepare('SELECT id, path, type FROM libraries').all();
 
   // Movie statements
@@ -51,7 +54,7 @@ export function scanLibraries(db) {
     const root = path.resolve(lib.path);
 
     if (lib.type === 'movie') {
-      walk(root, (full, stat) => {
+      await walk(root, (full, stat) => {
         const name = path.basename(full);
         if (!isVideo(name)) return;
         seen++;
@@ -73,7 +76,7 @@ export function scanLibraries(db) {
         added++;
       });
     } else if (lib.type === 'tv') {
-      walk(root, (full, stat) => {
+      await walk(root, (full, stat) => {
         const name = path.basename(full);
         if (!isVideo(name)) return;
         seen++;
@@ -105,7 +108,7 @@ export function scanLibraries(db) {
       });
     }
   }
-  const { removed } = pruneMissing(db);
+  const { removed } = await pruneMissing(db);
   return { added, seen, removed };
 }
 
@@ -114,7 +117,7 @@ export function scanLibraries(db) {
 // source of truth. SAFETY: only prune within libraries whose root is currently
 // reachable — a temporarily disconnected drive (unplugged USB, offline share)
 // must never wipe its whole library.
-export function pruneMissing(db) {
+export async function pruneMissing(db) {
   const libs = db.prepare('SELECT id, path FROM libraries').all();
   const reachable = new Set();
   for (const lib of libs) {
@@ -123,16 +126,26 @@ export function pruneMissing(db) {
     } catch { /* unreadable/missing root — leave its rows untouched */ }
   }
 
+  // Existence checks are async in batches — thousands of stat calls against a
+  // spinning disk must not freeze streams for the duration.
+  const missing = async (rows) => {
+    const gone = [];
+    for (let i = 0; i < rows.length; i += 64) {
+      const batch = rows.slice(i, i + 64);
+      const checks = await Promise.all(batch.map((f) =>
+        reachable.has(f.library_id) ? fs.promises.access(f.path).then(() => false, () => true) : false));
+      for (let j = 0; j < batch.length; j++) if (checks[j]) gone.push(batch[j].id);
+    }
+    return gone;
+  };
   let removed = 0;
   const delMovieFile = db.prepare('DELETE FROM movie_files WHERE id = ?');
-  for (const f of db.prepare('SELECT id, path, library_id FROM movie_files').all()) {
-    if (!reachable.has(f.library_id)) continue;
-    if (!fs.existsSync(f.path)) { delMovieFile.run(f.id); removed++; }
+  for (const id of await missing(db.prepare('SELECT id, path, library_id FROM movie_files').all())) {
+    delMovieFile.run(id); removed++;
   }
   const delEpFile = db.prepare('DELETE FROM episode_files WHERE id = ?');
-  for (const f of db.prepare('SELECT id, path, library_id FROM episode_files').all()) {
-    if (!reachable.has(f.library_id)) continue;
-    if (!fs.existsSync(f.path)) { delEpFile.run(f.id); removed++; }
+  for (const id of await missing(db.prepare('SELECT id, path, library_id FROM episode_files').all())) {
+    delEpFile.run(id); removed++;
   }
 
   // Drop logical rows that no longer have any files (same cleanup the
@@ -144,20 +157,20 @@ export function pruneMissing(db) {
   return { removed };
 }
 
-function walk(dir, cb) {
+async function walk(dir, cb) {
   let entries;
   try {
-    entries = fs.readdirSync(dir, { withFileTypes: true });
+    entries = await fs.promises.readdir(dir, { withFileTypes: true });
   } catch {
     return; // unreadable/missing drive — skip quietly
   }
   for (const e of entries) {
     const full = path.join(dir, e.name);
     if (e.isDirectory()) {
-      walk(full, cb);
+      await walk(full, cb);
     } else if (e.isFile()) {
       let stat;
-      try { stat = fs.statSync(full); } catch { continue; }
+      try { stat = await fs.promises.stat(full); } catch { continue; }
       cb(full, stat);
     }
   }

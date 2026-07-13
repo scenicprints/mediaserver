@@ -1584,10 +1584,29 @@ function openPlayer(ctx) {
   let base = 0;
   const cur = () => (play.mode === 'transcode' ? base + video.currentTime : video.currentTime);
   const dur = () => play.duration || video.duration || 0;
-  function seekTo(t) {
+  // Remuxed (copied) video can only start on a keyframe — the server emits from
+  // the one BEFORE the requested time. Ask where the stream will really begin and
+  // use that as the timeline base, or position/subtitles drift by the gap and the
+  // first seconds play video over padded silence ("audio lags after seek/resume").
+  async function resolveStart(t) {
+    if (!(t > 0)) return 0;
+    try {
+      const r = await (await fetch(`/api/seekpoint/${ctx.searchKind}/${current.id}?start=${t.toFixed(2)}&${audioQuery()}`)).json();
+      if (r && typeof r.start === 'number' && r.start >= 0 && r.start <= t) return r.start;
+    } catch (_e) {}
+    return t;
+  }
+  let seekGen = 0; // drop stale async seeks (rapid scrubbing)
+  async function seekTo(t) {
     t = Math.max(0, dur() ? Math.min(t, dur() - 0.3) : t);
-    if (play.mode === 'transcode') { base = t; video.src = withToken(play.url + '?start=' + t.toFixed(2) + '&' + audioQuery()); video.play(); }
-    else video.currentTime = t;
+    if (play.mode === 'transcode') {
+      const gen = ++seekGen;
+      const s = await resolveStart(t);
+      if (gen !== seekGen) return; // a newer seek superseded this one
+      base = s;
+      video.src = withToken(play.url + '?start=' + s.toFixed(2) + '&snapped=1&' + audioQuery());
+      video.play();
+    } else video.currentTime = t;
   }
 
   const vp = document.createElement('div');
@@ -1732,9 +1751,11 @@ function openPlayer(ctx) {
     if (d) showDiagnoseOverlay(d); else alert('Diagnose failed');
   }
   function showDiagnoseOverlay(d) {
-    const sv = (d.source && d.source.video) || {}, sa = (d.source && d.source.audio) || {}, sm = d.sample;
+    const sv = (d.source && d.source.video) || {}, sa = (d.source && d.source.audio) || {}, sm = d.sample, sk = d.seek;
     const pk = (arr) => (arr || []).map((p) => `pts ${p.pts} / dts ${p.dts}`).join('   ') || '—';
     const off = sm && !sm.error ? sm.offsetMs : null;
+    const sampleLine = (s, label) => s.error ? `${label} error: ${s.error}`
+      : `${label} → video ${s.video.startTime}s / audio ${s.audio.startTime}s  ⇒  A/V offset ${s.offsetMs} ms  ${Math.abs(s.offsetMs) > 15 ? '⚠ audio ' + (s.offsetMs > 0 ? 'AHEAD' : 'BEHIND') : '(synced)'}`;
     const text = [
       `ENGINE: ${d.engine ? d.engine.mode : '?'}   V→${(d.engine && d.engine.videoAction) || ''}   A→${(d.engine && d.engine.audioAction) || ''}`,
       ``,
@@ -1743,9 +1764,10 @@ function openPlayer(ctx) {
       `SOURCE audio: ${sa.codec} ${sa.channels}ch  start=${sa.startTime}`,
       `  first audio packets: ${pk(sa.firstPackets)}`,
       ``,
-      !sm ? 'SAMPLE: direct play (no transcode)' : sm.error ? `SAMPLE error: ${sm.error}`
-        : `SAMPLE (3s transcode) → video ${sm.video.startTime}s / audio ${sm.audio.startTime}s  ⇒  A/V offset ${off} ms  ${Math.abs(off) > 15 ? '⚠ audio ' + (off > 0 ? 'AHEAD' : 'BEHIND') : '(synced)'}`
-    ].join('\n');
+      !sm ? 'SAMPLE: direct play (no transcode)' : sampleLine(sm, 'SAMPLE (3s from start)'),
+      !sk ? null
+        : `SEEK   (resume path) requested ${sk.requested}s → keyframe snap ${sk.snapped}s (${sk.snapMs} ms back)\n  ${sampleLine(sk, 'sample at snap')}`
+    ].filter((l) => l != null).join('\n');
     const ov = document.createElement('div');
     ov.className = 'diag-overlay';
     ov.innerHTML = `<div class="diag-box"><pre></pre><div class="diag-actions"><button class="btn primary" id="diag-copy">Copy for Claude</button><button class="btn" id="diag-close">Close</button></div></div>`;
@@ -1776,13 +1798,19 @@ function openPlayer(ctx) {
     creditsCh = chaps.find((c) => /\b(credits?|ending|outro|ed|end ?card)\b/i.test(c.title)) || null;
     base = 0;
     if (play.mode === 'transcode') {
-      base = at || 0;
-      video.src = withToken(play.url + '?start=' + (at || 0) + '&' + audioQuery());
+      base = await resolveStart(at || 0); // resume lands on the true keyframe start
+      video.src = withToken(play.url + '?start=' + base.toFixed(2) + '&snapped=1&' + audioQuery());
       video.addEventListener('loadedmetadata', () => attemptPlay(), { once: true });
     } else {
       video.src = withToken(play.url);
       video.addEventListener('loadedmetadata', () => { if (at) video.currentTime = at; attemptPlay(); }, { once: true });
     }
+    // The detail payload only knows sidecar files; ask for the FULL track list
+    // (embedded mkv subtitles included) now that we're actually playing this file.
+    try {
+      const full = await (await fetch(`/api/subtitles/list/${ctx.searchKind}/${f.id}`)).json();
+      if (Array.isArray(full) && full.length >= (current.subtitles || []).length) current.subtitles = full;
+    } catch (_e) {}
     const subs = current.subtitles || [];
     if (subs.length) { currentSubIdx = 0; subVisible = true; loadDelay(); setSubtitle(subUrl(0)); }
     else { currentSubIdx = -1; subOffset = 0; setSubtitle(null); }

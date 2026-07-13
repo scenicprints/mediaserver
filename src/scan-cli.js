@@ -10,5 +10,5 @@ const db = openDb(path.resolve(ROOT, config.dbPath));
 
 const mediaRoots = (config.mediaRoots || []).map((r) => path.resolve(ROOT, r));
 seedLibraries(db, mediaRoots);
-const result = scanLibraries(db);
+const result = await scanLibraries(db);
 console.log(`Scan complete: ${result.added} new file(s), ${result.seen} video file(s) seen.`);

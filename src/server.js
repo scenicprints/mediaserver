@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import os from 'node:os';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile, execFileSync } from 'node:child_process';
@@ -11,7 +12,7 @@ import { enrichLibrary, enrichShows, enrichEpisodes, movieExtra, showExtra, back
 import { ext, qualityRank } from './parse.js';
 import { listDrives, listDirs } from './fsbrowse.js';
 import { osEnabled, searchSubtitles, downloadSubtitle, clearAuth } from './opensubtitles.js';
-import { detectFfmpeg, status as ffmpegStatus, installFfmpeg, playInfo, transcodeStream, ffmpegBin, sourceTiming, probe } from './ffmpeg.js';
+import { detectFfmpeg, status as ffmpegStatus, installFfmpeg, playInfo, transcodeStream, ffmpegBin, sourceTiming, probe, keyframeBefore, embeddedSubtitles, extractSubtitle } from './ffmpeg.js';
 import { detectWhisper, status as whisperStatus, installWhisper, generate as generateSubs } from './whisper.js';
 import { translateVttFile } from './translate.js';
 import { radarrEnabled, sonarrEnabled, testConn, radarrSearch, radarrAdd, sonarrSearch, sonarrAdd, getProfiles, radarrQueue, sonarrQueue } from './arr.js';
@@ -67,10 +68,14 @@ function currentUser(req) {
   const tok = tokenFromReq(req);
   if (!tok) return null;
   const row = db.prepare(
-    'SELECT u.id, u.username, u.role FROM tokens t JOIN users u ON u.id = t.user_id WHERE t.token = ?'
+    'SELECT u.id, u.username, u.role, t.last_used_at FROM tokens t JOIN users u ON u.id = t.user_id WHERE t.token = ?'
   ).get(tok);
-  if (row) db.prepare('UPDATE tokens SET last_used_at = ? WHERE token = ?').run(Date.now(), tok);
-  return row || null;
+  // Freshen last_used_at at most hourly — writing it on EVERY request turned
+  // each poster/pref/progress hit into a DB write for no benefit.
+  if (row && (!row.last_used_at || Date.now() - row.last_used_at > 3600e3)) {
+    db.prepare('UPDATE tokens SET last_used_at = ? WHERE token = ?').run(Date.now(), tok);
+  }
+  return row ? { id: row.id, username: row.username, role: row.role } : null;
 }
 
 function requireAdmin(req, reply) {
@@ -692,7 +697,7 @@ app.post('/api/libraries', async (req, reply) => {
   const lib = db.prepare('SELECT * FROM libraries WHERE path = ?').get(p);
 
   // Scan straight away so new titles show up, then enrich in the background.
-  const scan = scanLibraries(db);
+  const scan = await scanLibraries(db);
   if (config.tmdbApiKey) {
     enrichLibrary(db, config.tmdbApiKey)
       .then(() => enrichShows(db, config.tmdbApiKey))
@@ -825,6 +830,22 @@ app.get('/api/play/:kind/:fileId', async (req, reply) => {
   };
 });
 
+// Where does a transcode stream asked to start at ?start REALLY begin? Copied
+// (remuxed) video can only start on a keyframe — ffmpeg emits from the previous
+// one no matter what we ask — so the player calls this before seeking and uses
+// the answer as its timeline base. Skipping this was the "audio lags after a
+// resume/seek" lip-sync bug: up to a GOP of unexpected video over padded silence,
+// and subtitles off by the gap. Re-encoded video seeks exactly → echoed back.
+app.get('/api/seekpoint/:kind/:fileId', async (req, reply) => {
+  const { kind, fileId } = req.params;
+  const row = fileRow(kind, fileId);
+  if (!row) return reply.code(404).send({ error: 'not found' });
+  const start = Math.max(0, parseFloat(req.query.start) || 0);
+  const info = await playInfo(row.path, audioOpts(req));
+  const snap = info.mode === 'transcode' && info.vcopy && start > 0;
+  return { start: snap ? await keyframeBefore(row.path, start) : start };
+});
+
 // Live-transcoded stream. ?start=SECONDS seeks (the client restarts the stream
 // and keeps a virtual timeline). The ffmpeg child is killed when the client
 // disconnects so seeks don't pile up encoder processes.
@@ -835,7 +856,11 @@ app.get('/api/transcode/:kind/:fileId', async (req, reply) => {
   const opts = audioOpts(req);
   const info = await playInfo(row.path, opts);
   if (info.mode !== 'transcode') return reply.code(400).send({ error: 'file does not need transcoding' });
-  const start = Math.max(0, parseFloat(req.query.start) || 0);
+  let start = Math.max(0, parseFloat(req.query.start) || 0);
+  // Snap copy-path starts to the keyframe ffmpeg will actually use. The player
+  // pre-resolves via /api/seekpoint and passes &snapped=1 (idempotent either way —
+  // snapping a keyframe time returns itself); this guards direct API callers.
+  if (start > 0 && info.vcopy && req.query.snapped !== '1') start = await keyframeBefore(row.path, start);
   const proc = transcodeStream(row.path, {
     start, vcopy: info.vcopy, acopy: info.acopy, downmix: info.downmix, scaleH: info.scaleH,
     forceStereo: opts.forceStereo, dboost: opts.dboost, night: opts.night, norm: opts.norm
@@ -859,13 +884,14 @@ app.get('/api/diagnose/:kind/:fileId', async (req, reply) => {
   const opts = audioOpts(req);
   const info = await playInfo(row.path, opts);
   const source = await sourceTiming(row.path);
-  let sample = null;
-  if (info.mode === 'transcode') {
+  // A 3-second transcode sample starting at `start`, probed for per-stream starts.
+  const takeSample = async (start) => {
     const tmp = path.join(os.tmpdir(), `marquee-diag-${Date.now()}.mp4`);
+    let sample;
     try {
       await new Promise((res, rej) => {
         const proc = transcodeStream(row.path, {
-          start: 0, vcopy: info.vcopy, acopy: info.acopy, downmix: info.downmix, scaleH: info.scaleH,
+          start, vcopy: info.vcopy, acopy: info.acopy, downmix: info.downmix, scaleH: info.scaleH,
           forceStereo: opts.forceStereo, dboost: opts.dboost, night: opts.night, norm: opts.norm, duration: 3
         });
         const out = fs.createWriteStream(tmp);
@@ -884,8 +910,21 @@ app.get('/api/diagnose/:kind/:fileId', async (req, reply) => {
       };
     } catch (e) { sample = { error: e.message }; }
     try { fs.unlinkSync(tmp); } catch {}
+    return sample;
+  };
+  let sample = null, seek = null;
+  if (info.mode === 'transcode') {
+    sample = await takeSample(0);
+    // The resume/seek path — where the keyframe-snap bug lived. Diagnose it the
+    // way the player now plays it: pick a mid-file point, snap it, sample there.
+    const mid = info.duration > 60 ? Math.round(info.duration * 0.4) : 0;
+    if (mid > 0) {
+      const requested = mid + 0.7; // deliberately mid-GOP, like a real resume
+      const snapped = info.vcopy ? await keyframeBefore(row.path, requested) : requested;
+      seek = { requested, snapped, snapMs: Math.round((requested - snapped) * 1000), ...(await takeSample(snapped)) };
+    }
   }
-  return { engine: info.engine, source, sample };
+  return { engine: info.engine, source, sample, seek };
 });
 
 // ---- Pre-roll: a video that plays before every MOVIE (not TV, not Live TV) ----
@@ -1126,6 +1165,24 @@ app.post('/api/settings/arr', async (req, reply) => {
 
 // ---- Subtitles: .srt sidecars served as WebVTT ----
 
+// Short-TTL folder-listing cache for subtitle discovery. A show page asks for
+// the subtitles of every episode file, and episodes share season folders — with
+// up to 6 readdirs per file that was hundreds of synchronous disk hits per view
+// (stuttering active streams on the Dell's HDDs). Cached, a 200-episode show
+// costs a handful of reads. 10s TTL so a freshly downloaded .srt still appears
+// on the next open.
+const dirListCache = new Map(); // folder -> { t, files|null }
+function cachedDirList(folder) {
+  const now = Date.now();
+  const hit = dirListCache.get(folder);
+  if (hit && now - hit.t < 10e3) return hit.files;
+  let files = null;
+  try { files = fs.readdirSync(folder); } catch { /* missing/unreadable */ }
+  if (dirListCache.size > 500) dirListCache.clear(); // tiny + self-limiting
+  dirListCache.set(folder, { t: now, files });
+  return files;
+}
+
 // Find external .srt subtitles for a video: next to it (loose name match, either
 // direction) and in a Subs/Subtitles subfolder. Returns [{ path, label }].
 function listSubtitles(videoPath) {
@@ -1136,8 +1193,8 @@ function listSubtitles(videoPath) {
   const out = [];
 
   const consider = (folder, loose) => {
-    let files;
-    try { files = fs.readdirSync(folder); } catch { return; }
+    const files = cachedDirList(folder);
+    if (!files) return;
     for (const f of files) {
       if (!/\.(srt|vtt)$/i.test(f)) continue;
       const b = path.basename(f, path.extname(f));
@@ -1163,6 +1220,40 @@ function listSubtitles(videoPath) {
   return out.filter((s) => (seen.has(s.path) ? false : seen.add(s.path)));
 }
 
+// The full track list for one file: sidecar files first (same order the detail
+// endpoints use), then text subtitles embedded in the container (mkv rips).
+// Embedded ones ride on the same ?idx= addressing, appended after the sidecars.
+async function allSubtitleTracks(videoPath) {
+  const side = listSubtitles(videoPath).map((s) => ({ ...s, embedded: false }));
+  let emb = [];
+  try { emb = (await embeddedSubtitles(videoPath)).map((e) => ({ ...e, embedded: true })); } catch {}
+  return [...side, ...emb];
+}
+
+// Full track list (sidecars + embedded) for the player, fetched when playback
+// starts. Kept off the movie/show detail endpoints so they never probe files.
+app.get('/api/subtitles/list/:kind/:fileId', async (req, reply) => {
+  const row = fileRow(req.params.kind, req.params.fileId);
+  if (!row) return reply.code(404).send({ error: 'not found' });
+  const tracks = await allSubtitleTracks(row.path);
+  return tracks.map((t, i) => ({ label: t.label, idx: i }));
+});
+
+// Extracted-embedded-subtitle cache: pulling a track out of an mkv reads the
+// whole file (demux-only, no decode) — do it once, keep the WebVTT.
+const SUBCACHE_DIR = path.resolve(ROOT, 'data', 'subcache');
+async function embeddedVtt(videoPath, sIndex) {
+  let st;
+  try { st = fs.statSync(videoPath); } catch { return null; }
+  const key = crypto.createHash('sha1').update(`${videoPath}:${st.mtimeMs}:${sIndex}`).digest('hex');
+  const cached = path.join(SUBCACHE_DIR, key + '.vtt');
+  if (!fs.existsSync(cached)) {
+    fs.mkdirSync(SUBCACHE_DIR, { recursive: true });
+    await extractSubtitle(videoPath, sIndex, cached);
+  }
+  return fs.promises.readFile(cached, 'utf8');
+}
+
 function srtToVtt(srt) {
   const body = srt
     .replace(/^﻿/, '')
@@ -1171,13 +1262,19 @@ function srtToVtt(srt) {
   return 'WEBVTT\n\n' + body;
 }
 
-function serveSubtitle(videoPath, idx, reply) {
-  const subs = videoPath ? listSubtitles(videoPath) : [];
+async function serveSubtitle(videoPath, idx, reply) {
+  const subs = videoPath ? await allSubtitleTracks(videoPath) : [];
   const sub = subs[idx] || subs[0];
   if (!sub) return reply.code(404).send({ error: 'no subtitle' });
+  reply.header('Content-Type', 'text/vtt; charset=utf-8');
+  if (sub.embedded) {
+    let vtt;
+    try { vtt = await embeddedVtt(videoPath, sub.sIndex); } catch (e) { return reply.code(500).send({ error: 'extract failed: ' + e.message }); }
+    if (!vtt) return reply.code(404).send({ error: 'no subtitle' });
+    return reply.send(vtt);
+  }
   let text;
   try { text = fs.readFileSync(sub.path, 'utf8'); } catch { return reply.code(404).send({ error: 'unreadable' }); }
-  reply.header('Content-Type', 'text/vtt; charset=utf-8');
   // .vtt sidecars (e.g. AI-generated) are already WebVTT; .srt needs converting.
   return reply.send(/\.vtt$/i.test(sub.path) ? text.replace(/^﻿/, '') : srtToVtt(text));
 }
@@ -1232,6 +1329,7 @@ app.post('/api/subtitles/download', async (req, reply) => {
   } catch (e) {
     return reply.code(500).send({ error: 'Could not save subtitle: ' + e.message });
   }
+  dirListCache.clear(); // a new sidecar exists — folder listings are stale
   return { ok: true };
 });
 
@@ -1308,7 +1406,7 @@ async function start() {
 
   (async () => {
     await new Promise((r) => setTimeout(r, 500)); // let the first page load paint before the scan
-    const scan = scanLibraries(db);
+    const scan = await scanLibraries(db);
     console.log(`Scan complete: ${scan.added} new file(s), ${scan.seen} video file(s) seen${scan.removed ? `, ${scan.removed} stale file(s) pruned` : ''}.`);
 
     if (config.tmdbApiKey) {

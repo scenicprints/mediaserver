@@ -142,6 +142,65 @@ export async function probe(filePath) {
   return json;
 }
 
+// Last video keyframe at or before `t` seconds. Copied (remuxed) video can only
+// begin on a keyframe: ask ffmpeg to start mid-GOP and it silently emits from the
+// previous keyframe anyway — up to a whole GOP of video the player doesn't know
+// about, played over silence-padded audio, with the virtual timeline (and every
+// subtitle cue) off by the gap for the rest of the session. That was the "audio
+// lags after resume/seek" bug. Seeks on the copy path snap here first, and the
+// player is told the real start. Returns `t` unchanged when it can't tell.
+export async function keyframeBefore(filePath, t) {
+  if (!ffprobePath || !(t > 0)) return Math.max(0, t || 0);
+  // Don't PREDICT the keyframe (scenecut keyframes aren't always seekable — mkv
+  // seeks land on cue points only); ASK: seek exactly like ffmpeg's demuxer will
+  // and read the first video packet it produces. Its pts IS the true stream start.
+  const out = await tryRun(ffprobePath, [
+    '-v', 'error', '-read_intervals', `${t.toFixed(3)}%+#1`,
+    '-select_streams', 'v:0', '-show_packets', '-show_entries', 'packet=pts_time,dts_time',
+    '-of', 'json', filePath
+  ]);
+  try {
+    const p = (JSON.parse(out || '{}').packets || [])[0];
+    const ts = p ? parseFloat(p.pts_time ?? p.dts_time) : NaN;
+    // Sanity: the demuxer seeks backward, so the packet must be at or before t
+    // (allow a frame of slack). Anything else means seeking is broken — keep t.
+    if (Number.isFinite(ts) && ts >= 0 && ts <= t + 0.1) return ts;
+  } catch {}
+  return t;
+}
+
+// Text-based subtitle streams embedded in the file (mkv rips usually carry
+// them). Bitmap subs (PGS/VobSub) can't become WebVTT without OCR — excluded.
+// Returns [{ sIndex, label }] where sIndex is the subtitle-relative stream index
+// (ffmpeg's -map 0:s:N numbering).
+const TEXT_SUB_CODECS = new Set(['subrip', 'srt', 'ass', 'ssa', 'mov_text', 'webvtt', 'text']);
+export async function embeddedSubtitles(filePath) {
+  const p = await probe(filePath);
+  const subs = ((p && p.streams) || []).filter((s) => s.codec_type === 'subtitle');
+  const out = [];
+  subs.forEach((s, sIndex) => {
+    if (!TEXT_SUB_CODECS.has(String(s.codec_name || '').toLowerCase())) return;
+    const tags = s.tags || {};
+    const lang = (tags.language || tags.LANGUAGE || '').toLowerCase();
+    const title = tags.title || tags.TITLE || '';
+    const flags = [s.disposition?.forced ? 'forced' : '', s.disposition?.hearing_impaired ? 'SDH' : ''].filter(Boolean).join(' ');
+    const base = title || (lang && lang !== 'und' ? lang.toUpperCase() : 'Subtitles');
+    out.push({ sIndex, label: `${base}${flags ? ' ' + flags : ''} (embedded)` });
+  });
+  return out;
+}
+
+// Extract one embedded text-subtitle stream to WebVTT at `outPath` (ffmpeg
+// converts srt/ass/mov_text and strips styling). Demux-only — no video decode —
+// but it does read through the file, so callers cache the result.
+export function extractSubtitle(filePath, sIndex, outPath) {
+  return new Promise((resolve, reject) => {
+    execFile(ffmpegPath, [
+      '-y', '-v', 'error', '-i', filePath, '-map', `0:s:${sIndex}`, '-f', 'webvtt', outPath
+    ], { windowsHide: true }, (err) => (err ? reject(err) : resolve()));
+  });
+}
+
 // ---- Direct-play decision ----
 // Chrome/Edge can natively play these container+codec combos; everything else
 // goes through ffmpeg (video/audio are copied when already compatible, so an
