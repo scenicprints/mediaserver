@@ -188,8 +188,25 @@ export async function playInfo(filePath, { forceStereo = false, night = false, n
   const srcH = v ? (+v.height || 0) : 0;
   const cap = maxTranscodeHeight || (hasNvenc ? 0 : 1080); // 0 = no cap (keep source res)
   const scaleH = cap && srcH > cap ? cap : 0;
-  if (DIRECT_EXT.has(ext) && vOK && aOK && !needAudio) return { mode: 'direct', duration, chapters };
-  return { mode: 'transcode', duration, vcopy: vOK, acopy: aOK && !needAudio, downmix, scaleH, chapters };
+  // Engine summary for the admin playback badge: what each stream is and what the
+  // server will do with it, plus the source per-stream start offset — a non-zero
+  // gap here is the usual culprit for a constant A/V (lip-sync) offset.
+  const src = {
+    video: v ? { codec: v.codec_name, width: +v.width || 0, height: srcH } : null,
+    audio: a ? { codec: a.codec_name, channels: +a.channels || 0 } : null,
+    startV: v ? +v.start_time || 0 : 0,
+    startA: a ? +a.start_time || 0 : 0
+  };
+  if (DIRECT_EXT.has(ext) && vOK && aOK && !needAudio) {
+    return { mode: 'direct', duration, chapters, engine: { ...src, mode: 'direct', videoAction: 'direct play', audioAction: 'direct play' } };
+  }
+  const acopy = aOK && !needAudio;
+  const videoAction = vOK ? 'copy (remux)' : (scaleH ? `transcode → ${scaleH}p` : 'transcode');
+  const audioAction = acopy ? 'copy' : (downmix ? 'downmix → stereo' : (a ? `${String(a.codec_name || '').toUpperCase()} → AAC` : 'none'));
+  return {
+    mode: 'transcode', duration, vcopy: vOK, acopy, downmix, scaleH, chapters,
+    engine: { ...src, mode: 'transcode', videoAction, audioAction }
+  };
 }
 
 // ---- Transcode stream ----

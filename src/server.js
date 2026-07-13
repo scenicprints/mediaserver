@@ -819,6 +819,7 @@ app.get('/api/play/:kind/:fileId', async (req, reply) => {
     reason: info.reason || null,
     chapters: info.chapters || [],
     intro: kind === 'episode' ? introForFile(db, fileId) : null, // fingerprinted theme-song range
+    engine: req.user.role === 'admin' ? info.engine || null : null, // admin playback badge
     url: info.mode === 'transcode' ? `/api/transcode/${kind}/${fileId}` : directUrl
   };
 });

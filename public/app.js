@@ -1590,6 +1590,7 @@ function openPlayer(ctx) {
       <button class="vp-back">‹ Back</button>
       <div class="vp-titles"><div class="vp-t">${escapeHtml(ctx.title)}</div>${ctx.subtitle ? `<div class="vp-st">${escapeHtml(ctx.subtitle)}</div>` : ''}</div>
     </div>
+    <div class="vp-engine vp-fade hidden"></div>
     <div class="vp-pausedbadge">${ICONS.play}</div>
     <div class="vp-bottom vp-fade">
       <div class="vp-scrub" data-pf>
@@ -1691,6 +1692,24 @@ function openPlayer(ctx) {
     });
   }
 
+  // Admin-only playback badge: is this file direct-playing or transcoding, and
+  // exactly what's being converted — plus the source per-stream start offset,
+  // which is the usual cause of a constant audio-ahead/behind (lip-sync) gap.
+  function renderEngineBadge(eng) {
+    const el = vp.querySelector('.vp-engine');
+    if (!el) return;
+    if (!eng || !document.body.classList.contains('is-admin')) { el.classList.add('hidden'); return; }
+    const chLbl = (c) => (c === 1 ? 'mono' : c === 2 ? 'stereo' : c + 'ch');
+    const vTxt = eng.video ? `${eng.video.codec} ${eng.video.height}p` : '—';
+    const aTxt = eng.audio ? `${eng.audio.codec} ${chLbl(eng.audio.channels)}` : '—';
+    const off = Math.abs((eng.startV || 0) - (eng.startA || 0));
+    const offTxt = off > 0.01 ? ` · src A/V start ${(eng.startV || 0).toFixed(2)}/${(eng.startA || 0).toFixed(2)}s ⚠` : '';
+    el.innerHTML = eng.mode === 'direct'
+      ? `▶ Direct play · ${escapeHtml(vTxt)} · ${escapeHtml(aTxt)}${offTxt}`
+      : `⚙ Transcoding · V ${escapeHtml(vTxt)} → ${escapeHtml(eng.videoAction)} · A ${escapeHtml(aTxt)} → ${escapeHtml(eng.audioAction)}${offTxt}`;
+    el.classList.remove('hidden');
+  }
+
   async function loadFile(f, at) {
     current = f;
     errEl.classList.add('hidden');
@@ -1701,6 +1720,7 @@ function openPlayer(ctx) {
     play = info && info.mode === 'transcode'
       ? { mode: 'transcode', duration: info.duration || null, url: info.url, reason: null }
       : { mode: 'direct', duration: (info && info.duration) || null, url: ctx.streamBase + f.id, reason: (info && info.reason) || null };
+    renderEngineBadge(info && info.engine); // admin-only: shows direct-play vs what's being transcoded
     // Chapter-based Skip Intro / Skip Credits (precise when the file has named
     // chapters — common in .mkv rips).
     const chaps = (info && info.chapters) || [];
