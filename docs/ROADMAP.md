@@ -45,6 +45,24 @@ APK to the **`marquee-tv-latest`** release for sideloading onto the friend's TCL
 ---
 
 ## ✅ Done
+- **A/V lip-sync on seek: `-noaccurate_seek` (Plex's mechanism) (2026-07-13).** Owner captured
+  Plex's own ffmpeg command for the same file and it uses `-ss <t> -noaccurate_seek`. Root of the
+  remaining desync: default (accurate) seek decode-and-trims each stream to the exact requested
+  time, but a COPIED video can't cut mid-GOP so it backs up to the keyframe while the RE-ENCODED
+  audio trims precisely — a differential up to a full GOP (~7 s on the SpongeBob file) that
+  `make_zero` then bakes in as permanent offset. Crucially the old Diagnose measured each stream's
+  *start_time* (both 0 → looked "synced") not *content* alignment, where the damage was. Fix:
+  `transcodeStream` adds `-noaccurate_seek` on the **copy path only** (re-encode decodes video so
+  accurate seek aligns both streams at the exact time, and the client's base stays there — must not
+  snap). Verified by measuring OUTPUT content alignment (flash+beep test file, 8 s GOPs like
+  SpongeBob): raw mid-GOP seeks went from a **6000 ms A/V split → 23/23 events aligned within
+  ~30 ms**, confirmed on the real `/api/transcode` endpoint and in the live player (seek snaps to
+  keyframe, timeline base stays correct). Plex's literal `-copyts -start_at_zero -avoid_negative_ts
+  disabled` was tried and REJECTED: it produces negative timestamps that break the progressive fMP4
+  `<video>` pipe (Plex only gets away with it because DASH carries an explicit timeline). If the
+  owner still sees *from-beginning* lag (not seek-related), next steps are an on-device
+  `synctest.html` number, then possibly switching delivery to DASH/HLS (segmented, per-stream
+  representations — the bigger Plex-parity change).
 - **A/V lip-sync ROOT CAUSE fixed: keyframe-snapped seeks (2026-07-13).** The "audio lags"
   bug wasn't B-frames or stream offsets — it was the **resume/seek path**: remuxed (copied)
   video can only start on a keyframe, so ffmpeg silently emitted from the keyframe *before*

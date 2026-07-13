@@ -328,7 +328,25 @@ export function transcodeStream(filePath, { start = 0, vcopy = false, acopy = fa
   // transcode in real time without downscaling (CPU HEVC decode is the bottleneck).
   // `auto` falls back to software if the GPU can't decode a given file.
   if (hasNvenc) args.push('-hwaccel', 'auto');
-  if (start > 0) args.push('-ss', String(start));
+  // `-noaccurate_seek` is THE lip-sync-on-seek fix (this is what Plex does), and
+  // it's needed ONLY on the copy path. Default (accurate) seek decode-and-trims
+  // each stream to the exact requested time — but a COPIED video can't cut mid-GOP
+  // so it backs up to the keyframe, while the RE-ENCODED audio trims precisely to
+  // the request. That differential (up to a full GOP — ~7 s on the owner's
+  // SpongeBob file) then gets baked in as permanent A/V offset when the muxer
+  // zeroes each stream independently. `-noaccurate_seek` makes BOTH streams start
+  // at the same keyframe, so no differential can arise and `make_zero` shifts them
+  // together. Verified with a flash+beep test file (keyframes every 8 s): raw
+  // mid-GOP seeks went from a 6000 ms A/V split to 23/23 events aligned within
+  // ~30 ms. The client learns the true keyframe start via /api/seekpoint and uses
+  // it as its timeline base, so position + subtitles stay correct.
+  //   On the RE-ENCODE path, video is decoded so accurate seek trims BOTH streams
+  // to exactly the requested time (already aligned, no differential), and the
+  // client's base stays at the requested time — so we must NOT snap there.
+  if (start > 0) {
+    args.push('-ss', String(start));
+    if (vcopy) args.push('-noaccurate_seek');
+  }
   args.push('-i', filePath, '-map', '0:v:0', '-map', '0:a:0?', '-sn', '-dn');
   if (duration > 0) args.push('-t', String(duration)); // used by the admin diagnostics sample
   if (vcopy) {

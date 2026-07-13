@@ -138,9 +138,12 @@ an update.
   `BFrame Test (2022) 1080p.mkv` (H264 `-bf 2`+AC3 → the B-frame re-encode path; Diagnose
   must read `offsetMs: 0`), `Sync Lab BF0/BF2 (2023/2024) 720p.mkv` (**white flash + beep
   at every even second, 2s GOPs** → content-level A/V sync measurement; BF0 remuxes, BF2
-  re-encodes), and `Embedded Subs Test (2025) 720p.mkv` (2 embedded text subtitle tracks,
-  eng+spa). Added as a movie library in the dev DB. Regenerate with ffmpeg's
-  `testsrc2`/`sine` if lost.
+  re-encodes), `BigGOP (2026) 720p.mkv` (flash+beep every even second but **8s GOPs** — matches a
+  real rip's keyframe spacing; the file that proved `-noaccurate_seek`: raw mid-GOP seeks were
+  6000 ms out, aligned after), and `Embedded Subs Test (2025) 720p.mkv` (2 embedded text subtitle
+  tracks, eng+spa). Added as a movie library in the dev DB. Regenerate with ffmpeg's
+  `testsrc2`/`sine` if lost. **Measure OUTPUT content alignment (flash vs beep onsets), not stream
+  start_time** — start_time reads 0 on both streams even when content is a full GOP out of sync.
 - **A/V sync measurement in a real browser**: `public/synctest.html` (dev tool, unlinked;
   needs `?fileId=&start=&token=`) plays a Sync Lab file through the real transcode pipeline
   and cross-times flash presentation (requestVideoFrameCallback + canvas) against beep
