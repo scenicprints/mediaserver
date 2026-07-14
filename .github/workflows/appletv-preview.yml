@@ -70,6 +70,12 @@ jobs:
             xcrun simctl io "$DEV" screenshot "shots/$T.png" || true
             md5 -q "shots/$T.png" 2>/dev/null || true
           done
+          # The show-detail (seasons) screen, reached via PREVIEW_ROUTE.
+          SIMCTL_CHILD_PREVIEW_TMDB="${{ secrets.MARQUEE_PREVIEW_TMDB }}" \
+          SIMCTL_CHILD_PREVIEW_ROUTE="show" \
+          xcrun simctl launch --terminate-running-process "$DEV" "$BUNDLE"
+          sleep 24
+          xcrun simctl io "$DEV" screenshot "shots/showdetail.png" || true
           ls -la shots
 
       - uses: actions/upload-artifact@v4

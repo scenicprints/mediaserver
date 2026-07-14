@@ -26,10 +26,14 @@ enum Route: Hashable {
 struct ContentView: View {
     @EnvironmentObject var store: Store
     @State private var tab = "home"
+    @State private var previewShowId: Int?
 
     var body: some View {
         Group {
             if store.isLoggedIn {
+                if let sid = previewShowId {
+                    NavigationStack { ShowDetailView(showId: sid) }   // CI preview: seasons screen
+                } else {
                 TabView(selection: $tab) {
                     NavTab { HomeView(route: $0) }.tabItem { Text("Home") }.tag("home")
                     NavTab { MoviesView(route: $0) }.tabItem { Text("Movies") }.tag("movies")
@@ -47,6 +51,7 @@ struct ContentView: View {
                         .padding(.leading, Theme.gutter).padding(.top, 28)
                         .allowsHitTesting(false)
                 }
+                }
             } else {
                 LoginView()
             }
@@ -63,6 +68,7 @@ struct ContentView: View {
         if let t = env["PREVIEW_TAB"] { tab = t }
         if let key = env["PREVIEW_TMDB"], !key.isEmpty {
             await store.loadPreviewMock(tmdbKey: key)
+            if env["PREVIEW_ROUTE"] == "show" { previewShowId = store.shows.first?.localId }
             return true
         }
         if let server = env["PREVIEW_SERVER"], !server.isEmpty {

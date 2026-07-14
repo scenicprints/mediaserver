@@ -513,7 +513,27 @@ final class Store: ObservableObject {
         await get("api/movies/\(id)", as: MovieDetail.self)
     }
     func showDetail(_ id: Int) async -> ShowDetail? {
-        await get("api/shows/\(id)", as: ShowDetail.self)
+        if previewMode { return previewShowDetail(id) }
+        return await get("api/shows/\(id)", as: ShowDetail.self)
+    }
+    // A mock show detail (3 seasons) so the CI preview can screenshot the
+    // seasons/episodes layout with the server offline.
+    private func previewShowDetail(_ id: Int) -> ShowDetail? {
+        guard let s = shows.first(where: { $0.localId == id }) ?? shows.first else { return nil }
+        var seasons: [Season] = []
+        for sn in 1...3 {
+            let eps = (1...8).map { e in
+                Episode(id: sn * 100 + e, season: sn, episode: e,
+                        title: "Episode \(e)", overview: "A sample episode synopsis used in the preview build.",
+                        still: s.backdrop, duration: 1500,
+                        resumePosition: (sn == 1 && e == 1) ? 600 : 0,
+                        watched: (sn == 1 && e <= 2) ? 1 : 0,
+                        files: [MovieFile(id: sn * 100 + e, quality: "1080p", filename: "episode.mkv", size: nil)])
+            }
+            seasons.append(Season(season: sn, episodes: eps))
+        }
+        return ShowDetail(id: id, title: s.title, year: s.year, poster: s.poster, backdrop: s.backdrop,
+                          overview: s.overview, rating: s.rating, genres: s.genres, seasons: seasons)
     }
     func showExtra(_ id: Int) async -> ShowExtra? {
         await get("api/shows/\(id)/extra", as: ShowExtra.self)

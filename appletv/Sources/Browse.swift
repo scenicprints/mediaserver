@@ -163,6 +163,13 @@ struct BrowseScreen: View {
     }
 
     var body: some View {
+        ZStack {
+            Theme.bg.ignoresSafeArea()   // page bg == the hero's fade target, so no seam
+            scroll
+        }
+    }
+
+    private var scroll: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Theme.rowSpacing) {
                 if !heroItems.isEmpty { MarqueeHero(items: heroItems, route: $route) }
