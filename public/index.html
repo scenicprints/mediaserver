@@ -52,6 +52,7 @@
         <button class="tab active" data-tab="general">General</button>
         <button class="tab" data-tab="audio">Audio</button>
         <button class="tab" data-tab="streaming">Streaming</button>
+        <button class="tab admin-only" data-tab="sessions">Now Playing</button>
       </div>
 
       <div class="tab-panel active" data-panel="general">
@@ -165,6 +166,17 @@
           <h3>Streaming services <span class="beta-tag">beta</span></h3>
           <p class="muted">Merge your streaming services into Movies &amp; TV Shows. Streaming titles get a provider badge and open that service when you select them — they can't play in-app (that's DRM). Tap a source to show or hide it:</p>
           <div id="sources-list" class="sources-list"></div>
+        </div>
+      </div>
+
+      <div class="tab-panel" data-panel="sessions">
+        <div class="sub-account" style="border-top:none;margin-top:4px;padding-top:0">
+          <div class="sess-head">
+            <h3 style="margin:0">Who's watching now</h3>
+            <span class="muted" id="sess-count">…</span>
+          </div>
+          <p class="muted">Live playback sessions across all users — what they're watching, whether it's direct-playing or transcoding, and health details for troubleshooting. Refreshes automatically.</p>
+          <div id="sessions-list" class="sessions-list"></div>
         </div>
       </div>
 

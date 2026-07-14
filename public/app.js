@@ -1615,6 +1615,11 @@ function openPlayer(ctx) {
   // position = base + video.currentTime, and seeking restarts the stream.
   let play = { mode: 'direct', duration: null, url: '', reason: null };
   let base = 0;
+  let curEngine = null; // server's engine info for this file (admin clients only)
+  // A stable id for this player instance, so the admin "Now Playing" monitor can
+  // track one viewer across heartbeats and tell two devices/tabs apart.
+  const sessionId = (self.crypto && crypto.randomUUID) ? crypto.randomUUID()
+    : 's' + Date.now().toString(36) + Math.random().toString(36).slice(2);
   const cur = () => (play.mode === 'transcode' ? base + video.currentTime : video.currentTime);
   const dur = () => play.duration || video.duration || 0;
   // Remuxed (copied) video can only start on a keyframe — the server emits from
@@ -1859,6 +1864,7 @@ function openPlayer(ctx) {
     play = info && info.mode === 'transcode'
       ? { mode: 'transcode', duration: info.duration || null, url: info.url, reason: null }
       : { mode: 'direct', duration: (info && info.duration) || null, url: ctx.streamBase + f.id, reason: (info && info.reason) || null };
+    curEngine = (info && info.engine) || null;
     renderEngineBadge(info && info.engine); // admin-only: shows direct-play vs what's being transcoded
     // Chapter-based Skip Intro / Skip Credits (precise when the file has named
     // chapters — common in .mkv rips).
@@ -1960,6 +1966,42 @@ function openPlayer(ctx) {
     video.addEventListener('pause', syncMs);
     syncMs();
   }
+
+  // ---- Session heartbeat (feeds the admin "Now Playing" monitor) ----
+  // Report our live state every ~10s (and on play/pause) so an admin can see who's
+  // watching what, whether it's transcoding, and buffer/health for troubleshooting.
+  function sessionHeartbeat() {
+    if (!current) return;
+    let bufAhead = 0;
+    try { const bb = video.buffered; if (bb.length) bufAhead = Math.max(0, bb.end(bb.length - 1) - video.currentTime); } catch (_e) {}
+    const sub = currentSubIdx >= 0 ? (current.subtitles || [])[currentSubIdx] : null;
+    const body = {
+      sessionId,
+      kind: ctx.searchKind,
+      fileId: current.id,
+      title: ctx.title || '',
+      subtitle: ctx.subtitle || '',
+      mode: play && play.mode,
+      engine: curEngine,
+      position: cur(),
+      duration: dur(),
+      paused: video.paused,
+      bufferedAhead: bufAhead,
+      readyState: video.readyState,
+      networkState: video.networkState,
+      videoWidth: video.videoWidth,
+      videoHeight: video.videoHeight,
+      live,
+      subtitleTrack: sub ? (sub.label || sub.lang || 'on') : 'off',
+      audioMode: audioGet('audioMode') === 'surround' ? 'surround' : 'stereo',
+      tv: TV_MODE
+    };
+    try { fetch('/api/session/heartbeat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); } catch (_e) {}
+  }
+  const hbTimer = setInterval(sessionHeartbeat, 10000);
+  video.addEventListener('playing', sessionHeartbeat);
+  video.addEventListener('pause', sessionHeartbeat);
+
   vp.querySelectorAll('.vp-skip').forEach((b) => b.addEventListener('click', () => { seekTo(cur() + +b.dataset.d); }));
 
   // scrub + time (all through cur()/dur() so transcode's virtual timeline works)
@@ -2346,6 +2388,15 @@ function openPlayer(ctx) {
   const origRemove = vp.remove.bind(vp);
   vp.remove = () => {
     clearInterval(subTimer);
+    clearInterval(hbTimer);
+    // Drop our session from the admin monitor at once (sendBeacon so it still
+    // goes out if the page is unloading), rather than waiting for it to time out.
+    try {
+      const body = JSON.stringify({ sessionId });
+      // withToken keeps it authorized on the webOS app (which has no cookie).
+      if (navigator.sendBeacon) navigator.sendBeacon(withToken('/api/session/end'), new Blob([body], { type: 'application/json' }));
+      else fetch('/api/session/end', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+    } catch (_e) {}
     document.removeEventListener('keydown', vp._onKey, true);
     // Hard-stop every media element (main + pre-roll overlay) so audio can't keep
     // playing after you back out — just detaching a streaming <video> from the DOM
@@ -2463,8 +2514,8 @@ const osStatus = document.getElementById('os-status');
 const osSave = document.getElementById('os-save');
 const pickerState = { path: null, parent: null, type: 'movie' };
 
-document.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', () => document.getElementById(b.dataset.close).classList.add('hidden')));
-[settingsModal, picker].forEach((m) => m.addEventListener('click', (e) => { if (e.target === m) m.classList.add('hidden'); }));
+document.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', () => { document.getElementById(b.dataset.close).classList.add('hidden'); if (b.dataset.close === 'settings') stopSessionsPolling(); }));
+[settingsModal, picker].forEach((m) => m.addEventListener('click', (e) => { if (e.target === m) { m.classList.add('hidden'); if (m === settingsModal) stopSessionsPolling(); } }));
 document.querySelectorAll('[data-add]').forEach((b) => b.addEventListener('click', () => openPicker(b.dataset.add)));
 settingsBtn.addEventListener('click', openSettings);
 
@@ -2472,6 +2523,8 @@ async function openSettings() {
   settingsModal.classList.remove('hidden');
   paintAudio();
   loadVersion(); checkForUpdate(); loadSettings(); loadFfmpeg(); loadWhisper(); loadIntro(); loadArr(); loadSources(); loadPreroll();
+  // Resume the live monitor if settings reopens on the "Now Playing" tab.
+  if (document.querySelector('#settings .settings-tabs .tab[data-tab="sessions"].active')) startSessionsPolling();
   await renderLibraries();
 }
 
@@ -2555,7 +2608,89 @@ for (const [key, attr] of AUDIO_GROUPS)
 document.querySelectorAll('#settings .settings-tabs .tab').forEach((t) => t.addEventListener('click', () => {
   document.querySelectorAll('#settings .settings-tabs .tab').forEach((x) => x.classList.toggle('active', x === t));
   document.querySelectorAll('#settings .tab-panel').forEach((p) => p.classList.toggle('active', p.dataset.panel === t.dataset.tab));
+  // The "Now Playing" monitor only polls while its tab is the one on screen.
+  if (t.dataset.tab === 'sessions') startSessionsPolling(); else stopSessionsPolling();
 }));
+
+// ---- Admin "Now Playing" monitor: live playback sessions across all users ----
+let sessionsTimer = null;
+function startSessionsPolling() { loadSessions(); clearInterval(sessionsTimer); sessionsTimer = setInterval(loadSessions, 4000); }
+function stopSessionsPolling() { clearInterval(sessionsTimer); sessionsTimer = null; }
+const sessCountEl = document.getElementById('sess-count');
+const sessListEl = document.getElementById('sessions-list');
+// A compact browser/device label from the User-Agent, for the "on what" column.
+function deviceLabel(ua, tv) {
+  ua = ua || '';
+  let os = /Android/i.test(ua) ? 'Android' : /iPhone|iPad|iOS/i.test(ua) ? 'iOS'
+    : /Windows/i.test(ua) ? 'Windows' : /Mac OS X|Macintosh/i.test(ua) ? 'Mac'
+    : /Linux/i.test(ua) ? 'Linux' : '';
+  let br = /Edg\//i.test(ua) ? 'Edge' : /OPR\/|Opera/i.test(ua) ? 'Opera'
+    : /Chrome\//i.test(ua) ? 'Chrome' : /Firefox\//i.test(ua) ? 'Firefox'
+    : /Safari\//i.test(ua) ? 'Safari' : '';
+  const parts = [tv ? '📺 TV' : '', os, br].filter(Boolean);
+  return parts.join(' · ') || 'Unknown device';
+}
+function engineText(s) {
+  const e = s.engine;
+  if (s.mode !== 'transcode') return 'Direct play' + (e && e.video ? ` · ${e.video.codec} ${e.video.height}p` : '');
+  if (!e) return 'Transcoding';
+  const chLbl = (c) => (c === 1 ? 'mono' : c === 2 ? 'stereo' : c + 'ch');
+  const v = e.video ? `${e.video.codec} ${e.video.height}p → ${e.videoAction || '?'}` : '';
+  const a = e.audio ? `${e.audio.codec} ${chLbl(e.audio.channels)} → ${e.audioAction || '?'}` : '';
+  return `Transcoding · V ${v} · A ${a}`;
+}
+const READY = ['nothing', 'metadata', 'current', 'future', 'enough'];
+const NETST = ['empty', 'idle', 'loading', 'no source'];
+function fmtDur(sec) {
+  sec = Math.max(0, Math.round(sec || 0));
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  return h ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}` : `${m}:${String(s).padStart(2, '0')}`;
+}
+async function loadSessions() {
+  if (!sessListEl) return;
+  let d = null;
+  try { const r = await fetch('/api/admin/sessions'); if (!r.ok) return; d = await r.json(); } catch (_e) { return; }
+  const list = (d && d.sessions) || [];
+  if (sessCountEl) sessCountEl.textContent = list.length ? `${list.length} watching` : 'nobody watching';
+  if (!list.length) {
+    sessListEl.innerHTML = '<div class="sess-empty muted">No one is watching anything right now.</div>';
+    return;
+  }
+  sessListEl.innerHTML = list.map((s) => {
+    const pct = s.duration ? Math.min(100, Math.max(0, (s.position / s.duration) * 100)) : 0;
+    const what = escapeHtml(s.title || 'Unknown') + (s.subtitle ? ` — <span class="muted">${escapeHtml(s.subtitle)}</span>` : '');
+    const transcoding = s.mode === 'transcode';
+    const stale = s.staleSec > 20; // missed ~2 heartbeats: connection may have dropped
+    const health = [
+      `buffered ${Math.round(s.bufferedAhead || 0)}s`,
+      s.readyState != null ? READY[s.readyState] || ('ready ' + s.readyState) : null,
+      s.networkState === 2 ? 'loading' : (s.networkState != null ? NETST[s.networkState] : null),
+      (s.videoW && s.videoH) ? `${s.videoW}×${s.videoH}` : null
+    ].filter(Boolean).join(' · ');
+    const low = (s.bufferedAhead || 0) < 3 && !s.paused && !s.live; // possible buffering/stall
+    return `
+      <div class="sess-card${stale ? ' sess-stale' : ''}">
+        <div class="sess-top">
+          <span class="sess-user">${escapeHtml(s.username)}</span>
+          <span class="sess-badges">
+            <span class="sess-badge ${transcoding ? 'b-transcode' : 'b-direct'}">${transcoding ? '⚙ Transcode' : '▶ Direct'}</span>
+            ${s.live ? '<span class="sess-badge b-live">LIVE</span>' : ''}
+            <span class="sess-badge ${s.paused ? 'b-paused' : 'b-playing'}">${s.paused ? '⏸ Paused' : '▶ Playing'}</span>
+            ${low ? '<span class="sess-badge b-warn">⏳ Low buffer</span>' : ''}
+            ${stale ? '<span class="sess-badge b-warn">⚠ No signal ' + s.staleSec + 's</span>' : ''}
+          </span>
+        </div>
+        <div class="sess-what">${what}</div>
+        <div class="sess-bar"><div class="sess-bar-fill" style="width:${pct}%"></div></div>
+        <div class="sess-meta muted">
+          ${s.live ? 'LIVE' : `${fmtDur(s.position)} / ${fmtDur(s.duration)} (${Math.round(pct)}%)`}
+          · watching ${fmtDur(s.watchingForSec)}
+        </div>
+        <div class="sess-eng muted">${escapeHtml(engineText(s))}</div>
+        <div class="sess-dev muted">${escapeHtml(deviceLabel(s.userAgent, s.tv))} · ${escapeHtml(s.ip || '')} · ${escapeHtml(health)}${s.subtitleTrack && s.subtitleTrack !== 'off' ? ' · CC ' + escapeHtml(s.subtitleTrack) : ''} · ${escapeHtml(s.audioMode || '')}</div>
+      </div>`;
+  }).join('');
+}
 
 // ---- Requests: Radarr/Sonarr connection settings ----
 const arrStatus = document.getElementById('arr-status');

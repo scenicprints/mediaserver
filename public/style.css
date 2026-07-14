@@ -857,3 +857,25 @@ body.tv-mode .vp-fs { display: none; }
 .us-notes li { margin: 5px 0; font-size: 14px; line-height: 1.45; }
 .us-actions { display: flex; gap: 10px; justify-content: center; }
 .us-actions .btn { min-width: 130px; }
+
+/* ---------- Admin "Now Playing" monitor ---------- */
+.sess-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.sessions-list { display: flex; flex-direction: column; gap: 12px; margin-top: 6px; }
+.sess-empty { padding: 20px 0; text-align: center; }
+.sess-card { background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--r); padding: 12px 14px; }
+.sess-card.sess-stale { opacity: 0.6; }
+.sess-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.sess-user { font-weight: 700; font-size: 15px; }
+.sess-badges { display: flex; gap: 6px; flex-wrap: wrap; }
+.sess-badge { font-size: 11px; font-weight: 700; border-radius: 999px; padding: 2px 9px; border: 1px solid var(--line); white-space: nowrap; }
+.b-direct { color: #7ee0a2; border-color: rgba(126, 224, 162, 0.4); background: rgba(126, 224, 162, 0.08); }
+.b-transcode { color: #ffc14d; border-color: rgba(255, 193, 77, 0.4); background: rgba(255, 193, 77, 0.08); }
+.b-playing { color: var(--accent-2); border-color: rgba(55, 194, 255, 0.4); background: rgba(55, 194, 255, 0.08); }
+.b-paused { color: var(--muted); }
+.b-live { color: var(--hot); border-color: rgba(255, 77, 109, 0.5); background: rgba(255, 77, 109, 0.1); }
+.b-warn { color: #ff7a45; border-color: rgba(255, 122, 69, 0.5); background: rgba(255, 122, 69, 0.1); }
+.sess-what { margin: 8px 0 6px; font-size: 14px; }
+.sess-bar { height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.sess-bar-fill { height: 100%; background: var(--grad); }
+.sess-meta, .sess-eng, .sess-dev { font-size: 12px; margin-top: 5px; line-height: 1.4; }
+.sess-eng { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; font-size: 11.5px; }

@@ -86,6 +86,22 @@ function requireAdmin(req, reply) {
   return true;
 }
 
+// ---- Live playback sessions (admin "Now Playing" monitor) ----
+// All in-memory: "who's watching right now" needn't survive a restart. The web
+// player heartbeats every ~10s (POST /api/session/heartbeat); an entry not seen
+// within SESSION_TTL is treated as stopped. `playDecisions` caches the SERVER's
+// authoritative direct-vs-transcode decision from /api/play, so the monitor can
+// show real engine details even for non-admin viewers (whose own client is never
+// told them — see /api/play, where `engine` is admin-only in the response).
+const SESSION_TTL = 45000;
+const sessions = new Map();       // sessionId -> live session record
+const playDecisions = new Map();  // `${userId}:${kind}:${fileId}` -> { mode, engine, at }
+function pruneSessions() {
+  const now = Date.now();
+  for (const [id, s] of sessions) if (now - s.lastSeen > SESSION_TTL) sessions.delete(id);
+  for (const [k, d] of playDecisions) if (now - d.at > 6 * 3600e3) playDecisions.delete(k);
+}
+
 // Gate every /api/* route (except the auth endpoints) behind a valid session.
 // Static files (the UI + login page) stay public so the app can load and log in.
 app.addHook('onRequest', async (req, reply) => {
@@ -886,6 +902,9 @@ app.get('/api/play/:kind/:fileId', async (req, reply) => {
   if (!row) return reply.code(404).send({ error: 'not found' });
   const info = await playInfo(row.path, audioOpts(req));
   const directUrl = (kind === 'episode' ? '/api/stream/episode/' : '/api/stream/') + fileId;
+  // Remember the server's authoritative engine decision so the admin monitor can
+  // report accurate direct/transcode details for this viewer (see /api/session/*).
+  playDecisions.set(`${req.user.id}:${kind}:${fileId}`, { mode: info.mode, engine: info.engine || null, at: Date.now() });
   return {
     mode: info.mode,
     duration: info.duration,
@@ -1004,6 +1023,73 @@ app.get('/api/diagnose/:kind/:fileId', async (req, reply) => {
     }
   }
   return { engine: info.engine, source, sample, seek };
+});
+
+// ---- Live sessions: player heartbeat + admin "Now Playing" monitor ----
+
+// The web player posts its live state here (~every 10s, plus on play/pause) so the
+// admin monitor knows who's watching what. Any signed-in user may report their own
+// session; the engine (direct/transcode) is taken from the server's own decision
+// cache, never trusted from the client.
+app.post('/api/session/heartbeat', async (req, reply) => {
+  const b = req.body || {};
+  const id = String(b.sessionId || '').slice(0, 64);
+  if (!id) return reply.code(400).send({ error: 'sessionId required' });
+  const numOr = (v, d = null) => (Number.isFinite(+v) ? +v : d);
+  const now = Date.now();
+  const prev = sessions.get(id);
+  const kind = b.live ? 'live' : (b.kind === 'episode' ? 'episode' : 'movie');
+  const fileId = b.fileId != null ? String(b.fileId) : null;
+  const dec = playDecisions.get(`${req.user.id}:${kind}:${fileId}`);
+  sessions.set(id, {
+    id,
+    userId: req.user.id,
+    username: req.user.username,
+    kind,
+    fileId,
+    title: String(b.title || '').slice(0, 300),
+    subtitle: String(b.subtitle || '').slice(0, 300),
+    // The server's authoritative decision wins; fall back to what the client says.
+    mode: dec ? dec.mode : (b.mode === 'transcode' ? 'transcode' : 'direct'),
+    engine: dec ? dec.engine : null,
+    position: numOr(b.position, 0),
+    duration: numOr(b.duration, 0),
+    paused: !!b.paused,
+    bufferedAhead: numOr(b.bufferedAhead, 0),
+    readyState: numOr(b.readyState, null),
+    networkState: numOr(b.networkState, null),
+    videoW: numOr(b.videoWidth, null),
+    videoH: numOr(b.videoHeight, null),
+    live: !!b.live,
+    subtitleTrack: String(b.subtitleTrack || '').slice(0, 160),
+    audioMode: String(b.audioMode || '').slice(0, 40),
+    tv: !!b.tv,
+    ip: req.ip,
+    userAgent: String(req.headers['user-agent'] || '').slice(0, 300),
+    startedAt: prev ? prev.startedAt : now,
+    lastSeen: now
+  });
+  return { ok: true };
+});
+
+// The player calls this on close so a stopped session drops immediately instead
+// of lingering until it times out.
+app.post('/api/session/end', async (req) => {
+  const id = String((req.body || {}).sessionId || '');
+  if (id) sessions.delete(id);
+  return { ok: true };
+});
+
+// Admin: everyone currently watching, with the troubleshooting detail (engine,
+// progress, buffer health, device) the "Now Playing" settings tab renders.
+app.get('/api/admin/sessions', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  pruneSessions();
+  const now = Date.now();
+  const list = [...sessions.values()]
+    .sort((a, b) => (a.username || '').localeCompare(b.username || '') || a.startedAt - b.startedAt)
+    .map((s) => ({ ...s, watchingForSec: Math.round((now - s.startedAt) / 1000), staleSec: Math.round((now - s.lastSeen) / 1000) }));
+  return { now, count: list.length, sessions: list };
 });
 
 // ---- Pre-roll: a video that plays before every MOVIE (not TV, not Live TV) ----
