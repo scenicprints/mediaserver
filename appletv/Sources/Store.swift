@@ -336,6 +336,65 @@ final class Store: ObservableObject {
         norm = UserDefaults.standard.bool(forKey: "norm")
     }
 
+    // ---- CI preview: populate sample data straight from TMDB (public CDN), so
+    // the screenshot workflow can render real screens even when the media server
+    // is offline/unreachable. Preview-only; never used in normal operation. ----
+    private static let tmdbGenres: [Int: String] = [
+        28: "Action", 12: "Adventure", 16: "Animation", 35: "Comedy", 80: "Crime",
+        99: "Documentary", 18: "Drama", 10751: "Family", 14: "Fantasy", 36: "History",
+        27: "Horror", 10402: "Music", 9648: "Mystery", 10749: "Romance", 878: "Science Fiction",
+        53: "Thriller", 10752: "War", 37: "Western", 10759: "Action", 10762: "Kids",
+        10765: "Science Fiction", 10768: "War"
+    ]
+    func loadPreviewMock(tmdbKey: String) async {
+        token = "preview"
+        user = User(username: "kevin", role: "admin")
+        func names(_ ids: [Int]) -> String {
+            let g = ids.compactMap { Store.tmdbGenres[$0] }
+            return (try? String(data: JSONSerialization.data(withJSONObject: g), encoding: .utf8) ?? "[]") ?? "[]"
+        }
+        func img(_ path: Any?, _ size: String) -> String? {
+            guard let p = path as? String else { return nil }
+            return "https://image.tmdb.org/t/p/\(size)\(p)"
+        }
+        func fetch(_ url: String) async -> [[String: Any]] {
+            guard let u = URL(string: url), let (d, _) = try? await URLSession.shared.data(from: u),
+                  let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+                  let r = j["results"] as? [[String: Any]] else { return [] }
+            return r
+        }
+        let now = Date().timeIntervalSince1970 * 1000
+        // Movies
+        var mDicts: [[String: Any]] = []
+        for (i, m) in (await fetch("https://api.themoviedb.org/3/movie/popular?api_key=\(tmdbKey)&page=1")).enumerated() {
+            let year = (m["release_date"] as? String)?.prefix(4)
+            mDicts.append([
+                "id": m["id"] as? Int ?? i, "title": m["title"] as? String ?? "—",
+                "year": year.flatMap { Int($0) } as Any, "poster": img(m["poster_path"], "w500") as Any,
+                "backdrop": img(m["backdrop_path"], "w1280") as Any, "overview": m["overview"] as? String as Any,
+                "rating": m["vote_average"] as? Double as Any, "genres": names(m["genre_ids"] as? [Int] ?? []),
+                "added_at": (i < 6 ? now : now - 40 * 24 * 3600 * 1000), "versions": (i % 3 == 0 ? 2 : 1),
+                "qualities": (i % 4 == 0 ? "4K,1080p" : "1080p"), "watched": 0, "favorite": (i % 5 == 0 ? 1 : 0),
+                "resume_position": (i == 1 ? 1800 : 0), "duration": 6600, "runtime": 110
+            ])
+        }
+        // Shows
+        var sDicts: [[String: Any]] = []
+        for (i, s) in (await fetch("https://api.themoviedb.org/3/tv/popular?api_key=\(tmdbKey)&page=1")).enumerated() {
+            let year = (s["first_air_date"] as? String)?.prefix(4)
+            sDicts.append([
+                "id": s["id"] as? Int ?? i, "title": s["name"] as? String ?? "—",
+                "year": year.flatMap { Int($0) } as Any, "poster": img(s["poster_path"], "w500") as Any,
+                "backdrop": img(s["backdrop_path"], "w1280") as Any, "overview": s["overview"] as? String as Any,
+                "rating": s["vote_average"] as? Double as Any, "genres": names(s["genre_ids"] as? [Int] ?? []),
+                "added_at": (i < 5 ? now : now - 40 * 24 * 3600 * 1000), "episodes": 10 + i, "unwatched": (i % 3)
+            ])
+        }
+        let dec = decoder()
+        if let d = try? JSONSerialization.data(withJSONObject: mDicts) { movies = (try? dec.decode([Movie].self, from: d)) ?? [] }
+        if let d = try? JSONSerialization.data(withJSONObject: sDicts) { shows = (try? dec.decode([Show].self, from: d)) ?? [] }
+    }
+
     // Query string the server uses to mix audio for this device.
     func audioQuery() -> String {
         var q = "audio=\(audioMode == "surround" ? "surround" : "stereo")"

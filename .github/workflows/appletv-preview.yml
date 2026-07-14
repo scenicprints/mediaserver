@@ -55,12 +55,12 @@ jobs:
           mkdir -p shots
           for T in home movies tv livetv library settings; do
             xcrun simctl terminate "$DEV" "$BUNDLE" || true
-            SIMCTL_CHILD_PREVIEW_SERVER="${{ secrets.MARQUEE_PREVIEW_SERVER }}" \
-            SIMCTL_CHILD_PREVIEW_USER="${{ secrets.MARQUEE_PREVIEW_USER }}" \
-            SIMCTL_CHILD_PREVIEW_PASS="${{ secrets.MARQUEE_PREVIEW_PASS }}" \
+            # Mock mode: pull sample titles + real posters from TMDB's public CDN,
+            # so previews work even when the media server is offline.
+            SIMCTL_CHILD_PREVIEW_TMDB="${{ secrets.MARQUEE_PREVIEW_TMDB }}" \
             SIMCTL_CHILD_PREVIEW_TAB="$T" \
             xcrun simctl launch "$DEV" "$BUNDLE"
-            sleep 15
+            sleep 16
             xcrun simctl io "$DEV" screenshot "shots/$T.png" || true
           done
           ls -la shots

@@ -45,20 +45,28 @@ struct ContentView: View {
                 LoginView()
             }
         }
-        .task { await preview(); await store.checkSession() }
+        .task { if await preview() == false { await store.checkSession() } }
     }
 
     // CI "preview" hook: when launched with PREVIEW_* env vars (the screenshot
-    // workflow), point at the given server, auto-login, and open a tab — so the
-    // cloud Mac can screenshot real screens without TestFlight.
-    private func preview() async {
+    // workflow), open a tab and either populate sample data from TMDB (mock, so
+    // it works with the server offline) or auto-login to a real server. Returns
+    // true if a preview path handled setup. Harmless in normal operation.
+    private func preview() async -> Bool {
         let env = ProcessInfo.processInfo.environment
-        guard let server = env["PREVIEW_SERVER"], !server.isEmpty else { return }
-        store.serverURL = server
         if let t = env["PREVIEW_TAB"] { tab = t }
-        if let u = env["PREVIEW_USER"], let p = env["PREVIEW_PASS"], !store.isLoggedIn {
-            await store.login(username: u, password: p)
+        if let key = env["PREVIEW_TMDB"], !key.isEmpty {
+            await store.loadPreviewMock(tmdbKey: key)
+            return true
         }
+        if let server = env["PREVIEW_SERVER"], !server.isEmpty {
+            store.serverURL = server
+            if let u = env["PREVIEW_USER"], let p = env["PREVIEW_PASS"], !store.isLoggedIn {
+                await store.login(username: u, password: p)
+            }
+            return true
+        }
+        return false
     }
 }
 
