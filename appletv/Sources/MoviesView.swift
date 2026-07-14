@@ -1,8 +1,11 @@
 import SwiftUI
 
+// The full Movies library as a poster grid. Selecting a poster pushes the
+// cinematic detail page (which handles playback).
 struct MoviesView: View {
     @EnvironmentObject var store: Store
-    private let columns = [GridItem(.adaptive(minimum: 240), spacing: 40)]
+    @Binding var route: [Route]
+    private let columns = [GridItem(.adaptive(minimum: Theme.posterWidth), spacing: Theme.cardSpacing)]
 
     var body: some View {
         ScrollView {
@@ -10,41 +13,22 @@ struct MoviesView: View {
                 VStack(spacing: 14) {
                     Text("Couldn't load your library").font(.title2)
                     Text(e).foregroundStyle(.secondary)
-                    Button("Retry") { Task { await store.loadMovies() } }
+                    Button("Retry") { Task { await store.loadHome() } }
                 }
                 .padding(60)
             }
 
-            LazyVGrid(columns: columns, spacing: 40) {
+            LazyVGrid(columns: columns, spacing: Theme.rowSpacing) {
                 ForEach(store.movies) { movie in
-                    MovieCard(movie: movie)
-                }
-            }
-            .padding(60)
-        }
-        .task { if store.movies.isEmpty { await store.loadMovies() } }
-    }
-}
-
-struct MovieCard: View {
-    let movie: Movie
-
-    var body: some View {
-        Button { } label: {
-            VStack(alignment: .leading, spacing: 8) {
-                AsyncImage(url: URL(string: movie.poster ?? "")) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image.resizable().aspectRatio(2.0 / 3.0, contentMode: .fit)
-                    default:
-                        Rectangle().fill(.gray.opacity(0.25)).aspectRatio(2.0 / 3.0, contentMode: .fit)
+                    PosterCard(title: movie.title, posterURL: movie.poster,
+                               subtitle: movie.year.map(String.init),
+                               progress: movie.progressFraction) {
+                        route.append(.movie(movie.id))
                     }
                 }
-                .cornerRadius(10)
-
-                Text(movie.title).font(.caption).lineLimit(1)
             }
+            .padding(Theme.gutter)
         }
-        .buttonStyle(.card)
+        .task { if store.movies.isEmpty { await store.loadHome() } }
     }
 }

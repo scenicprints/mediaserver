@@ -24,14 +24,3 @@ struct SettingsView: View {
         .onAppear { url = store.serverURL }
     }
 }
-
-// Hex color helper (matches the web UI's accent palette).
-extension Color {
-    init(hex: UInt) {
-        self.init(.sRGB,
-                  red: Double((hex >> 16) & 0xff) / 255.0,
-                  green: Double((hex >> 8) & 0xff) / 255.0,
-                  blue: Double(hex & 0xff) / 255.0,
-                  opacity: 1.0)
-    }
-}

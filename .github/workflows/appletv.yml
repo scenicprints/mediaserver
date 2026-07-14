@@ -2,15 +2,28 @@ name: Apple TV app
 
 # Builds the MarqueeTV tvOS app on a cloud macOS runner and uploads it to
 # TestFlight, signed with an App Store Connect API key (no Mac needed locally).
+#
 # Requires these repo secrets (added after Apple Developer approval):
 #   APPLE_TEAM_ID        - 10-char team id (App Store Connect > Membership)
 #   ASC_KEY_ID           - App Store Connect API key id
 #   ASC_ISSUER_ID        - App Store Connect API issuer id
 #   ASC_KEY_P8_BASE64    - the AuthKey_XXXX.p8 file, base64-encoded
-# NOTE: signing/upload always needs a shakeout on the first real run.
-# Manual-only until the secrets above are added (so it doesn't auto-fail);
-# switch to a push trigger once TestFlight uploads are working.
+#
+# Triggers:
+#   * push to appletv/**        -> ships an update straight from your PC (git push)
+#   * schedule (every 2 months) -> rebuilds so the TestFlight build never expires
+#                                   (TestFlight builds lapse after 90 days)
+#   * workflow_dispatch         -> manual "Run workflow" button
+#
+# Before the secrets exist the Preflight step makes every run pass as a no-op
+# (green skip) instead of failing red, so early pushes don't spam failures.
 on:
+  push:
+    paths:
+      - 'appletv/**'
+      - '.github/workflows/appletv.yml'
+  schedule:
+    - cron: '0 9 1 */2 *'   # 09:00 UTC on the 1st of every 2nd month (~60d < 90d)
   workflow_dispatch:
 
 jobs:
@@ -22,19 +35,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Gate the build on the signing secrets. If they're not set yet, skip the
+      # rest and let the job succeed (so scheduled/push runs stay green).
+      - name: Preflight — check signing secrets
+        id: pre
+        run: |
+          if [ -z "${{ secrets.ASC_KEY_ID }}" ] || [ -z "${{ secrets.APPLE_TEAM_ID }}" ]; then
+            echo "::notice::Signing secrets not set yet — skipping the TestFlight build."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install XcodeGen
+        if: steps.pre.outputs.skip != 'true'
         run: brew install xcodegen
 
       - name: Generate Xcode project
+        if: steps.pre.outputs.skip != 'true'
         run: xcodegen generate
 
       - name: Write App Store Connect API key
+        if: steps.pre.outputs.skip != 'true'
         run: |
           KEYDIR="$HOME/.appstoreconnect/private_keys"
           mkdir -p "$KEYDIR"
           echo "${{ secrets.ASC_KEY_P8_BASE64 }}" | base64 --decode > "$KEYDIR/AuthKey_${{ secrets.ASC_KEY_ID }}.p8"
 
       - name: Archive
+        if: steps.pre.outputs.skip != 'true'
         run: |
           xcodebuild \
             -project MarqueeTV.xcodeproj \
@@ -51,6 +80,7 @@ jobs:
             archive
 
       - name: Export .ipa
+        if: steps.pre.outputs.skip != 'true'
         run: |
           cat > ExportOptions.plist <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
@@ -72,6 +102,7 @@ jobs:
             -authenticationKeyIssuerID "${{ secrets.ASC_ISSUER_ID }}"
 
       - name: Upload to TestFlight
+        if: steps.pre.outputs.skip != 'true'
         run: |
           xcrun altool --upload-app -t tvos \
             -f "$PWD/build/export/MarqueeTV.ipa" \
