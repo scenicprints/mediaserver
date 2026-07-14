@@ -1582,7 +1582,10 @@ const ICONS = {
   volHigh: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 10v4h4l5 5V5L7 10H3zm13 2a4 4 0 0 0-2-3.46v6.92A4 4 0 0 0 16 12zm-2-7.5v2.06a6 6 0 0 1 0 10.88v2.06a8 8 0 0 0 0-15z"/></svg>',
   volMute: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 10v4h4l5 5V5L7 10H3zm18.3 2 1.4-1.4L21.4 9 20 10.6 18.4 9 17 10.4 18.6 12 17 13.6 18.4 15 20 13.4 21.6 15 23 13.6z"/></svg>',
   gear: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M19.4 13a7.6 7.6 0 0 0 0-2l2-1.5-2-3.4-2.3.9a7 7 0 0 0-1.7-1l-.4-2.5H10.9l-.3 2.5a7 7 0 0 0-1.7 1l-2.4-.9-2 3.4L6.6 11a7.6 7.6 0 0 0 0 2l-2 1.5 2 3.4 2.4-.9c.5.4 1.1.7 1.7 1l.3 2.5h4.2l.4-2.5c.6-.3 1.2-.6 1.7-1l2.3.9 2-3.4-2-1.5zM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7z"/></svg>',
-  fullscreen: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>'
+  fullscreen: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>',
+  // Skip-to-next glyph for the Skip Intro/Credits labels (was the ⏭ emoji, which
+  // renders blank on Google TV's stripped font — same bug the nav gear had).
+  skipnext: '<svg class="skip-ico" viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden="true"><path d="M6 5l8.5 7L6 19V5zm10.5 0H19v14h-2.5V5z"/></svg>'
 };
 
 // Pre-roll info (server-wide) is prefetched so the player can start it inside a
@@ -1699,8 +1702,8 @@ function openPlayer(ctx) {
       <button class="vp-play" data-pf title="Play / Pause">${ICONS.pause}</button>
       <button class="vp-skip" data-pf data-d="10" title="Forward 10 seconds">${ICONS.fwd}<b>10</b></button>
     </div>
-    <button class="vp-skipbtn vp-skipintro hidden">Skip Intro ⏭</button>
-    <button class="vp-skipbtn vp-skipcredits hidden">Skip Credits ⏭</button>
+    <button class="vp-skipbtn vp-skipintro hidden" data-pf>Skip Intro ${ICONS.skipnext}</button>
+    <button class="vp-skipbtn vp-skipcredits hidden" data-pf>Skip Credits ${ICONS.skipnext}</button>
     <div class="vp-menu hidden"></div>
     <div class="vp-upnext hidden"></div>
     <div class="vp-error hidden"></div>`;
@@ -2036,8 +2039,22 @@ function openPlayer(ctx) {
     // tail window, which is itself bounded so it can't linger.
     if (creditsCh) showCredits = t >= creditsCh.start;
     else if (isEpisode && ctx.onEnded && d) showCredits = t >= d - 45 && t < d - 1;
+    const introWas = !skipIntro.classList.contains('hidden');
+    const creditsWas = !skipCredits.classList.contains('hidden');
+    const focusedBefore = pfEls()[pfIdx]; // capture before visibility changes shift the grid
     skipIntro.classList.toggle('hidden', !showIntro);
     skipCredits.classList.toggle('hidden', !showCredits);
+    // Remote reachability. On a clean screen (no control ring up), auto-seat focus
+    // on a skip button the instant it appears so the OK/center button skips in one
+    // press — the tvOS way. If the viewer is already driving the controls (ring up)
+    // we don't yank focus; the Skip row above the transport is one Up away. When a
+    // focused skip button disappears, drop the ring back to the scrub bar.
+    const justShown = (showIntro && !introWas) ? skipIntro : (showCredits && !creditsWas) ? skipCredits : null;
+    if (justShown && !vp.classList.contains('vp-keys')) { vp.classList.add('vp-keys'); pfFocus(justShown); }
+    // If the ring was on a skip button that just disappeared, its slot in the grid
+    // is gone — put focus back on a stable control (the scrub bar) instead of
+    // letting pfIdx silently land on whatever shifted into that index.
+    else if (focusedBefore && focusedBefore.classList.contains('vp-skipbtn') && focusedBefore.classList.contains('hidden')) pfSet(0);
   }
   seek.addEventListener('input', () => {
     seeking = true;
@@ -2262,10 +2279,14 @@ function openPlayer(ctx) {
   // step between rows; Left/Right move within one.
   function pfRows() {
     const vis = (el) => el && el.offsetParent !== null;
+    // Skip Intro/Credits sit above everything: a transient "do this now" action.
+    // They're only in the grid while visible (offsetParent filter), so Up from the
+    // transport reaches whichever one is showing and Down drops back into playback.
+    const skip = [...vp.querySelectorAll('.vp-skipbtn[data-pf]')].filter(vis);
     const transport = [...vp.querySelectorAll('.vp-transport [data-pf]')].filter(vis);
     const scrub = [...vp.querySelectorAll('.vp-scrub[data-pf]')].filter(vis);
     const utility = [...vp.querySelectorAll('.vp-ctrls [data-pf]')].filter(vis);
-    return [transport, scrub, utility].filter((r) => r.length);
+    return [skip, transport, scrub, utility].filter((r) => r.length);
   }
   function pfLocate() {
     const rows = pfRows(), el = pfEls()[pfIdx];
