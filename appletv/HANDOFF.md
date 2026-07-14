@@ -1,90 +1,93 @@
-# Apple TV app — handoff / continuation guide
+# Apple TV app — continuation guide
 
-Read this first, then `appletv/README.md` (owner-facing setup) and the
-`apple-tv-app-decision` auto-memory. Everything is pushed to `origin/main`
-(scenicprints/mediaserver, public repo, no secrets).
+Read this first, then the `apple-tv-app-decision` auto-memory (loaded every
+session). Everything is pushed to `origin/main` (scenicprints/mediaserver,
+public repo). **Coordinate: only ONE session edits shared code at a time; this
+app work has stayed inside `appletv/` — never touch `public/*`, `androidtv/*`,
+and touch `src/server.js` only for the HLS hook already in place.**
 
-## TL;DR — where we are
-Native **SwiftUI tvOS** app for the "Marquee" media server, delivered via
-**TestFlight** (owner has **no Mac** → cloud macOS CI). Scaffold + CI are built
-and pushed. **BLOCKED on Apple Developer Program approval** — owner enrolled as
-Individual (~2026-07-12, $99/yr) and is waiting on the approval email. Nothing in
-the pipeline can run until that lands.
+## TL;DR — where we are (2026-07-14)
+Native **SwiftUI tvOS** app ("Marquee") for the media server, shipping via
+**TestFlight** (owner has no Mac → cloud macOS CI). The app is **built,
+signed, and installing on the owner's Apple TV**. Full 1:1 parity with the web
+app (`public/`) is the goal and is ~90% done. The pipeline is green and
+repeatable. There is also a **preview pipeline** that screenshots the real app
+in the tvOS Simulator so we review look **before** shipping to TestFlight.
 
-## Why native (not a WebView wrapper like the TCL)
-**tvOS has no WebView.** The Android TV app (`androidtv/`) just wraps the web UI;
-that's impossible on tvOS, so this is a real native SwiftUI UI that reuses only
-the server's HTTP API. The recurring **$99/yr is unavoidable** (TestFlight builds
-expire ~90 days; the App Store won't approve a personal media-server app).
+## How to SHIP (owner ships from PC, or you push)
+- Any push under `appletv/**` triggers `.github/workflows/appletv.yml` →
+  builds on macos-15 → TestFlight. Owner has auto-distribution on ("Marquee
+  Testers" internal group) so the Apple TV auto-updates.
+- Watch a run: `gh run watch <id> --exit-status`; failures are almost always a
+  Swift compile error — `gh run view <id> --log-failed | grep error:`.
+- **Do NOT regress these CI fixes:** runner = **macos-15** + `xcode-select`
+  newest Xcode (XcodeGen emits objectVersion-77); **archive with
+  `CODE_SIGNING_ALLOWED=NO`**, sign at export; ASC API key must be **Admin**
+  role; `ITSAppUsesNonExemptEncryption=false` in Info.plist skips the
+  compliance prompt.
 
-## What's built (in `appletv/`, at commit 4719c80+)
-- `Sources/MediaServerApp.swift` — `@main`; `ContentView` shows `LoginView` until
-  signed in, else a `TabView` (Movies / Settings).
-- `Sources/Store.swift` — API client + auth. Default server
-  `https://marqu33.duckdns.org`. `login/register/checkSession/logout/loadMovies`.
-  Sends `Authorization: Bearer <token>` (server also accepts a cookie or `?token=`).
-- `Sources/LoginView.swift` — username / password / invite-code form.
-- `Sources/MoviesView.swift` — poster grid (`LazyVGrid` + `.buttonStyle(.card)` for
-  native tvOS D-pad focus).
-- `Sources/SettingsView.swift` — server URL + logout; `Color(hex:)` helper.
-- `Resources/Info.plist`, `Resources/Assets.xcassets` — tvOS plist + layered
-  **Brand Assets** icon (gradient placeholders — may need tweaks; see risks).
-- `project.yml` — **XcodeGen** spec. Bundle id **`com.scenicprints.marqueetv`**,
-  tvOS 17, automatic signing. (CI runs `xcodegen generate` to make the .xcodeproj.)
-- `.github/workflows/appletv.yml` — macOS runner → xcodegen → `xcodebuild` archive
-  (`-allowProvisioningUpdates` + ASC API key) → export (app-store) → upload to
-  TestFlight (`xcrun altool`). **Manual trigger only** (`workflow_dispatch`) until
-  the secrets exist, so it doesn't auto-fail.
+## How to PREVIEW without shipping (the review loop we now use)
+- `gh workflow run "Apple TV preview shots"` → `.github/workflows/appletv-preview.yml`
+  builds for the tvOS Simulator, boots it, and screenshots each tab, uploaded
+  as the `preview-shots` artifact.
+- It uses **mock data from TMDB** (secret `MARQUEE_PREVIEW_TMDB`) because the
+  owner's server is often offline/unreachable from CI — see
+  `Store.loadPreviewMock` + the `PREVIEW_*` env hook in `MediaServerApp.swift`.
+- Download + view: `gh run download <id> -n preview-shots -D /tmp/shots`.
+- To show the owner: downscale the PNGs to JPEG + base64 into an HTML page and
+  publish via the Artifact tool (that's how the gallery was delivered).
+- **Known harness flakiness:** Library & Settings tabs sometimes capture the
+  login screen (the mock token gets cleared mid-run). FIX: give `Store` a
+  `previewMode` flag so `isLoggedIn` stays true and a 401 can't clear it in
+  preview. Detail/Collections/Requests/Search aren't screenshotted yet — add
+  them (detail needs launching straight into a `.movie(id)` route).
 
-First build is deliberately **minimal** (login → movie grid → settings) to prove
-the pipeline. Full UI comes after it's landing on the device.
+## What's built (Swift in `appletv/Sources/`)
+Home/Movies/TV as **BrowseScreen** (rotating **Marquee hero** — weekly pick of
+6, 9s rotation + dots — over the web's full categorized rows); rich **movie
+detail** (cast, More Like This, Favorite/Watched, version picker, Resume + From
+Beginning); **TV detail** with **season cards** + episodes; **Library** A-Z;
+**Live TV** = full DirecTV-style **EPG** (movies + TV episodes, LT_EPOCH
+schedule, hero preview + guide grid); **Collections**, **Search**, **Requests**;
+**full Settings** with admin-only gating (`store.isAdmin`); **AVPlayer**
+playback with resume + progress sync + **pre-roll** (AVQueuePlayer);
+**streaming merge** (Movie/Show decode string ids `stream:movie:123`; provider
+badges + deep-links). Player routes non-mp4/m4v/mov containers to **HLS**.
 
-## NEXT STEPS (once Apple approves — owner does the browser steps; guide them)
-1. developer.apple.com → Identifiers → register App ID `com.scenicprints.marqueetv`.
-2. App Store Connect → Apps → **+** → new **tvOS** app, same bundle id, name "Marquee".
-3. App Store Connect → Users and Access → **Integrations → App Store Connect API** →
-   create key with **App Manager** role. Download `AuthKey_XXXX.p8` (**one-time**!).
-   Note the **Key ID** and **Issuer ID**.
-4. Membership page → note the 10-char **Team ID**.
-5. GitHub repo → Settings → Secrets and variables → Actions → add:
-   - `APPLE_TEAM_ID`, `ASC_KEY_ID`, `ASC_ISSUER_ID`
-   - `ASC_KEY_P8_BASE64` — base64 of the `.p8`. On Windows PowerShell:
-     `[Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\path\AuthKey_XXXX.p8"))`
-6. Apple TV → install **TestFlight**, sign in with the same Apple ID.
-7. Trigger CI: GitHub → Actions → "Apple TV app" → **Run workflow**. Watch it.
+## Server HLS — DEPLOYED (needs on-device test)
+`src/hls.js` (`/api/hls/*`) is wired into `src/server.js` and pushed. Additive,
+transcodes mkv/etc. to HLS for AVPlayer. **Not yet verified on-device** — the
+first real .mkv is the test. Subtitles (below) will extend this module.
 
-## KNOWN RISKS — expect a shakeout (Swift can't be compiled locally; no Mac)
-Plan for **2–3 CI iterations** to get a green build. Most likely to break:
-- **Signing** — `-allowProvisioningUpdates` + ASC API key for automatic signing is
-  finicky in CI; may need to switch to **fastlane** (`match`/`sigh` + `pilot`).
-  This is the #1 suspect.
-- **tvOS asset catalog** — the layered Brand Assets icon (`Contents.json`/sizes) may
-  need fixing if `xcodebuild` complains about a missing/invalid app icon.
-- **Upload** — `altool` is deprecated; may need switching to `xcrun notarytool`/
-  fastlane `pilot`.
-- **Scheme** — confirm XcodeGen produces a shared scheme named `MarqueeTV`.
+## ROADMAP — prioritized, pick up here
+Owner saw build 13, said it "looked nothing like" the web, gave 11 issues;
+fixes shipped in batches H/I/J (see auto-memory). **Still open, roughly in order:**
+1. **Confirm the H/I/J fixes on-device** — owner has only seen the preview
+   gallery, not the fixes on the actual Apple TV. Get their read first.
+2. **AI/Whisper subtitles in the player** (owner-requested, item 11). AVPlayer
+   needs subs as an HLS WebVTT rendition — extend `src/hls.js` to add a
+   subtitle group (extract embedded subs via ffmpeg `embeddedSubtitles`/
+   `extractSubtitle`, and external/OpenSubtitles/Whisper via `/api/subtitle/*`).
+   Add a CC picker + "Generate AI subtitles" (`/api/subtitles/generate`, poll).
+3. **TV-show Back exits the app** — attempted fix `.toolbar(.hidden,for:.tabBar)`
+   is UNCONFIRMED. If still broken, present detail via `fullScreenCover` +
+   `.onExitCommand { dismiss }` instead of a NavigationStack push.
+4. **Version picker** present (Menu when >1 file) but owner reported missing —
+   confirm on a multi-version title.
+5. **Verify .mkv playback** via the deployed HLS end-to-end on the Apple TV.
+6. **Fix preview harness** (Library/Settings login flicker) + add remaining
+   tabs/detail to the gallery.
+7. Polish from on-device eyes: focus/spacing/colors, hero timing.
+8. Not done: trailer playback (YouTube on tvOS — skipped by choice); Live TV is
+   movie+episode but tune-in for episodes fetches the show to resolve the file.
 
-## After the pipeline is green
-Build the real UI to match the web app: cinematic detail pages, **AVPlayer**
-video player, Continue Watching, TV shows, Live TV, Collections, Requests — all
-against the existing server API. Playback: AVPlayer can't set headers, so stream
-via **`?token=`** on the URL (server supports it); transcode streams likely need
-an **HLS** endpoint (consider adding one server-side + a client-aware `playInfo`).
-
-## Project context the new chat needs
-- Server: Node/Fastify/`node:sqlite` at `C:\Users\jkevi\mediaserver` (dev PC) +
-  deployed on the **Dell** (auto-start via Task Scheduler, **Caddy** HTTPS, **PIA**
-  split-tunnel). Public URL **`https://marqu33.duckdns.org`**.
-- Auth: multi-user. Admin **`jkevinwagner` / `masterchief`**. Invite code
-  **`lantern-6274`**. `/api/login` → token (Bearer / cookie / `?token=`).
-- Working client: **TCL Google TV** (`androidtv/` WebView app, self-updating via the
-  `marquee-tv-latest` GitHub release). Dead ends: LG UM6900 (webOS locked/OOM),
-  VAVA 4K (2016 WebView). Apple TV is the current focus.
-- Repo `scenicprints/mediaserver` (public). Push to `origin/main`; the Dell
-  auto-updates on `run.bat`'s `git pull --ff-only`.
-- **Coordinate:** only ONE session should edit the shared code at a time.
-
-## Do NOT
-- Never commit the `.p8` or any secret to the repo.
-- Don't switch the workflow to a `push` trigger until the secrets are set and a
-  build succeeds (it's manual-only for now on purpose).
+## Facts a new chat needs
+- Bundle `com.scenicprints.marqueetv`, app name "Marquee TV". Server default
+  `https://marqu33.duckdns.org`. Owner Apple ID **`jbkevinwagner@gmail.com`**.
+- Secrets already set: `APPLE_TEAM_ID` W44MLC3KC2, `ASC_ISSUER_ID`
+  9607b849-ad0d-4854-8c2f-c232d8d07dca, `ASC_KEY_ID` 92DYT68946 (Admin),
+  `ASC_KEY_P8_BASE64`, and preview `MARQUEE_PREVIEW_TMDB` (+ USER/PASS/SERVER).
+- Owner isn't a CLI person; owner-only steps (Apple portal, secrets, installing
+  TestFlight) go one at a time via the browser. Ship grouped, meaningful updates.
+- Owner can't reach the server from their dev PC (LAN NAT hairpin); the Apple TV
+  and CI reach it when it's up.
