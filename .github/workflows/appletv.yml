@@ -28,7 +28,7 @@ on:
 
 jobs:
   testflight:
-    runs-on: macos-14
+    runs-on: macos-15
     defaults:
       run:
         working-directory: appletv
@@ -46,6 +46,16 @@ jobs:
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
+
+      # XcodeGen emits the newest project format (objectVersion 77), so select the
+      # newest installed Xcode (16.x) — older Xcode can't read that format.
+      - name: Select newest Xcode
+        if: steps.pre.outputs.skip != 'true'
+        run: |
+          XC="$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+          echo "Using $XC"
+          sudo xcode-select -s "$XC"
+          xcodebuild -version
 
       - name: Install XcodeGen
         if: steps.pre.outputs.skip != 'true'
