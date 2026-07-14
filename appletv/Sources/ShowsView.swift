@@ -26,18 +26,26 @@ struct ShowsView: View {
     }
 }
 
-// ---- Show detail: season picker + episode list with resume playback ----
+// ---- Show detail: hero + season cards + the selected season's episodes ----
 struct ShowDetailView: View {
     @EnvironmentObject var store: Store
     let showId: Int
 
     @State private var detail: ShowDetail?
+    @State private var extra: ShowExtra?
     @State private var loading = true
     @State private var selectedSeason = 0
     @State private var playing: Episode?
 
+    private var flatEpisodes: [Episode] { detail?.seasons.flatMap { $0.episodes } ?? [] }
+    private var firstUnwatched: Episode? {
+        flatEpisodes.first(where: { $0.watched != 1 }) ?? flatEpisodes.first
+    }
     private var currentEpisodes: [Episode] {
         detail?.seasons.first(where: { $0.season == selectedSeason })?.episodes ?? []
+    }
+    private func seasonPoster(_ s: Int) -> String? {
+        extra?.seasons?.first(where: { $0.season == s })?.poster ?? detail?.poster
     }
 
     var body: some View {
@@ -64,18 +72,30 @@ struct ShowDetailView: View {
             VStack(alignment: .leading, spacing: 0) {
                 ZStack(alignment: .bottomLeading) {
                     ArtImage(url: d.backdrop ?? d.poster, aspect: 16.0 / 9.0)
-                        .frame(height: 640).frame(maxWidth: .infinity).clipped()
+                        .frame(height: 720).frame(maxWidth: .infinity).clipped()
                         .overlay {
-                            LinearGradient(colors: [.clear, Theme.bg.opacity(0.6), Theme.bg],
-                                           startPoint: .top, endPoint: .bottom)
+                            LinearGradient(stops: [
+                                .init(color: Theme.bg, location: 0.0),
+                                .init(color: Theme.bg.opacity(0.35), location: 0.4),
+                                .init(color: .clear, location: 0.75)
+                            ], startPoint: .bottom, endPoint: .top)
                         }
                     VStack(alignment: .leading, spacing: 16) {
                         Text(d.title).font(.system(size: 60, weight: .bold)).shadow(radius: 10)
                         HStack(spacing: 16) {
                             if let y = d.year { Chip(String(y)) }
                             if let r = d.rating, r > 0 { Chip(String(format: "★ %.1f", r)) }
-                            ForEach(d.genreList.prefix(3), id: \.self) { Chip($0) }
+                            Chip("\(flatEpisodes.count) episodes")
+                            ForEach(d.genreList.prefix(2), id: \.self) { Chip($0) }
                         }
+                        Button {
+                            playing = firstUnwatched
+                        } label: {
+                            Label(firstUnwatched.map { ($0.resumePosition ?? 0) > 5 ? "Resume \($0.tag)" : "Play \($0.tag)" } ?? "Play",
+                                  systemImage: "play.fill")
+                                .font(.headline).padding(.horizontal, 16)
+                        }
+                        .buttonStyle(.borderedProminent).tint(Theme.accent)
                         if let o = d.overview {
                             Text(o).font(.title3).foregroundStyle(.white.opacity(0.85))
                                 .lineLimit(2).frame(maxWidth: 1100, alignment: .leading)
@@ -84,23 +104,24 @@ struct ShowDetailView: View {
                     .padding(.horizontal, Theme.gutter).padding(.bottom, 40)
                 }
 
-                if d.seasons.count > 1 {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 16) {
-                            ForEach(d.seasons, id: \.season) { s in
-                                Button { selectedSeason = s.season } label: {
-                                    Text(s.season == 0 ? "Specials" : "Season \(s.season)")
-                                        .font(.headline).padding(.horizontal, 20).padding(.vertical, 12)
-                                }
-                                .buttonStyle(.bordered)
-                                .tint(selectedSeason == s.season ? Theme.accent : .gray)
+                // Season cards
+                Text("Seasons").font(.title2).fontWeight(.semibold)
+                    .padding(.horizontal, Theme.gutter).padding(.top, 30)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: Theme.cardSpacing) {
+                        ForEach(d.seasons, id: \.season) { s in
+                            SeasonCard(title: s.season == 0 ? "Specials" : "Season \(s.season)",
+                                       posterURL: seasonPoster(s.season),
+                                       episodes: s.episodes.count,
+                                       selected: s.season == selectedSeason) {
+                                withAnimation { selectedSeason = s.season }
                             }
                         }
-                        .padding(.horizontal, Theme.gutter)
                     }
-                    .padding(.top, 20)
+                    .padding(.horizontal, Theme.gutter).padding(.vertical, 12)
                 }
 
+                // Selected season's episodes
                 LazyVStack(spacing: 24) {
                     ForEach(currentEpisodes) { ep in
                         EpisodeRow(episode: ep) { playing = ep }
@@ -117,6 +138,33 @@ struct ShowDetailView: View {
         detail = await store.showDetail(showId)
         selectedSeason = detail?.seasons.first?.season ?? 0
         loading = false
+        extra = await store.showExtra(showId)
+    }
+}
+
+// A season poster card in the show detail.
+struct SeasonCard: View {
+    let title: String
+    let posterURL: String?
+    let episodes: Int
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 10) {
+                ArtImage(url: posterURL, aspect: 2.0 / 3.0)
+                    .frame(width: 200, height: 300)
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.posterRadius))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: Theme.posterRadius)
+                            .strokeBorder(Theme.accent, lineWidth: selected ? 5 : 0)
+                    }
+                Text(title).font(.callout).fontWeight(.semibold).lineLimit(1)
+                Text("\(episodes) episodes").font(.caption).foregroundStyle(Theme.muted)
+            }
+        }
+        .buttonStyle(.card)
     }
 }
 

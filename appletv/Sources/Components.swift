@@ -12,22 +12,25 @@ enum CardBadge: Hashable {
     case alsoOn(String, UInt)      // owned + also on a service: outlined, top-left
 }
 
-// A 2:3 poster tile. Title/subtitle reveal on focus (like the web hover), and a
-// corner badge shows NEW / quality / streaming provider.
+// A 2:3 poster tile. Title/subtitle reveal on focus (like the web hover), and
+// corner badges show NEW/quality (top-right) and streaming provider (top-left).
 struct PosterCard: View {
     let title: String
     let posterURL: String?
     let subtitle: String?
     let progress: Double
-    let badge: CardBadge?
+    let badges: [CardBadge]
     let action: () -> Void
     @FocusState private var focused: Bool
 
     init(title: String, posterURL: String?, subtitle: String? = nil,
-         progress: Double = 0, badge: CardBadge? = nil, action: @escaping () -> Void) {
+         progress: Double = 0, badges: [CardBadge] = [], action: @escaping () -> Void) {
         self.title = title; self.posterURL = posterURL; self.subtitle = subtitle
-        self.progress = progress; self.badge = badge; self.action = action
+        self.progress = progress; self.badges = badges; self.action = action
     }
+
+    private var topRight: CardBadge? { badges.first { if case .stream = $0 { return false }; if case .alsoOn = $0 { return false }; return true } }
+    private var topLeft: CardBadge? { badges.first { if case .stream = $0 { return true }; if case .alsoOn = $0 { return true }; return false } }
 
     var body: some View {
         Button(action: action) {
@@ -35,10 +38,10 @@ struct PosterCard: View {
                 ArtImage(url: posterURL, aspect: 2.0 / 3.0)
                     .frame(width: Theme.posterWidth, height: Theme.posterHeight)
                     .clipShape(RoundedRectangle(cornerRadius: Theme.posterRadius))
-                    .overlay(alignment: .topTrailing) { badgeView }
+                    .overlay(alignment: .topTrailing) { if let b = topRight { pill(b) } }
+                    .overlay(alignment: .topLeading) { if let b = topLeft { pill(b) } }
                     .overlay(alignment: .bottom) { ProgressBar(progress: progress) }
 
-                // Reserve the label space so the grid doesn't jump; reveal on focus.
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title).font(.callout).fontWeight(.semibold).lineLimit(1)
                     Text(subtitle ?? " ").font(.caption).foregroundStyle(Theme.muted).lineLimit(1)
@@ -51,34 +54,23 @@ struct PosterCard: View {
         .focused($focused)
     }
 
-    @ViewBuilder private var badgeView: some View {
+    @ViewBuilder private func pill(_ badge: CardBadge) -> some View {
         switch badge {
-        case .new:
-            badgePill("NEW", bg: Theme.hot, fg: .white)
-        case .newCount(let n):
-            badgePill("\(n) new", bg: Theme.hot, fg: .white)
-        case .quality(let q):
-            badgePill(q, bg: Color.black.opacity(0.72), fg: Color(hex: 0xeaf0ff))
-        case .stream(let name, let color):
-            badgePill(name, bg: Color(hex: color), fg: .white, topLeading: true)
-        case .alsoOn(let name, let color):
-            badgePill("▸ \(name)", bg: Color.black.opacity(0.78), fg: .white,
-                      stroke: Color(hex: color), topLeading: true)
-        case .none:
-            EmptyView()
+        case .new:                    pillText("NEW", bg: Theme.hot, fg: .white)
+        case .newCount(let n):        pillText("\(n) new", bg: Theme.hot, fg: .white)
+        case .quality(let q):         pillText(q, bg: Color.black.opacity(0.72), fg: Color(hex: 0xeaf0ff))
+        case .stream(let name, let c):pillText(name, bg: Color(hex: c), fg: .white)
+        case .alsoOn(let name, let c):pillText("▸ \(name)", bg: Color.black.opacity(0.78), fg: .white, stroke: Color(hex: c))
         }
     }
 
-    private func badgePill(_ text: String, bg: Color, fg: Color,
-                           stroke: Color? = nil, topLeading: Bool = false) -> some View {
+    private func pillText(_ text: String, bg: Color, fg: Color, stroke: Color? = nil) -> some View {
         Text(text)
             .font(.caption2).fontWeight(.bold).foregroundStyle(fg)
             .padding(.horizontal, 10).padding(.vertical, 5)
             .background(bg, in: Capsule())
             .overlay(stroke.map { Capsule().strokeBorder($0, lineWidth: 2) })
             .padding(10)
-            .frame(maxWidth: .infinity, alignment: topLeading ? .leading : .trailing)
-            .frame(maxHeight: .infinity, alignment: .top)
     }
 }
 

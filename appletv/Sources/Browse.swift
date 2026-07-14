@@ -101,8 +101,34 @@ struct BrowseCard: Identifiable, Hashable {
     let poster: String?
     let subtitle: String?
     let progress: Double
-    let badge: CardBadge?
+    let badges: [CardBadge]
+    let stream: [String]?      // provider slugs → opens the service instead of a detail
     let route: Route
+}
+
+// Streaming providers — names, brand colors, and per-title deep links (web STREAM_PROVIDERS).
+enum StreamProvider {
+    static let table: [String: (name: String, color: UInt, base: String)] = [
+        "netflix":   ("Netflix",     0xe50914, "https://www.netflix.com/search?q="),
+        "prime":     ("Prime Video", 0x1399ff, "https://www.primevideo.com/search/?phrase="),
+        "disney":    ("Disney+",     0x0a63e6, "https://www.disneyplus.com/search?q="),
+        "hulu":      ("Hulu",        0x1ce783, "https://www.hulu.com/search?q="),
+        "max":       ("Max",         0xa05cff, "https://play.max.com/search?q="),
+        "appletv":   ("Apple TV+",   0x7d7d7d, "https://tv.apple.com/search?term="),
+        "paramount": ("Paramount+",  0x0064ff, "https://www.paramountplus.com/search/?query="),
+        "peacock":   ("Peacock",     0x00b7eb, "https://www.peacocktv.com/search?q=")
+    ]
+    static func name(_ s: String) -> String { table[s]?.name ?? s.capitalized }
+    static func color(_ s: String) -> UInt { table[s]?.color ?? 0x555555 }
+    static func label(_ provs: [String]) -> String {
+        guard let f = provs.first else { return "Streaming" }
+        return name(f) + (provs.count > 1 ? " +\(provs.count - 1)" : "")
+    }
+    static func url(_ slug: String, _ title: String) -> URL? {
+        guard let base = table[slug]?.base else { return nil }
+        let q = title.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        return URL(string: base + q)
+    }
 }
 struct BrowseRow: Identifiable {
     let id: String
@@ -113,10 +139,20 @@ struct BrowseRow: Identifiable {
 // A hero + Continue Watching + generated rows. Home/Movies/TV all use this.
 struct BrowseScreen: View {
     @EnvironmentObject var store: Store
+    @Environment(\.openURL) private var openURL
     @Binding var route: [Route]
     let heroItems: [HeroItem]
     let rows: [BrowseRow]
     let continueKind: String?     // "movie" | "episode" | nil (both)
+
+    // Streaming cards open the service; everything else pushes a detail page.
+    private func tap(_ c: BrowseCard) {
+        if let provs = c.stream, let slug = provs.first, let url = StreamProvider.url(slug, c.title) {
+            openURL(url)
+        } else {
+            route.append(c.route)
+        }
+    }
 
     private var continueItems: [ContinueItem] {
         guard let k = continueKind else { return store.continueItems }
@@ -144,7 +180,7 @@ struct BrowseScreen: View {
                     MediaRow(title: row.title) {
                         ForEach(row.cards) { c in
                             PosterCard(title: c.title, posterURL: c.poster, subtitle: c.subtitle,
-                                       progress: c.progress, badge: c.badge) { route.append(c.route) }
+                                       progress: c.progress, badges: c.badges) { tap(c) }
                         }
                     }
                 }
@@ -158,37 +194,57 @@ struct BrowseScreen: View {
 // ---- Row/hero builders (mirror the web app's view() row set) ----
 enum Browse {
     static func movieCard(_ m: Movie) -> BrowseCard {
-        var badge: CardBadge? = nil
-        if m.isNew { badge = .new }
-        else if (m.versions ?? 0) > 1, let q = m.bestQuality { badge = .quality(q) }
+        if m.isStream {
+            let provs = m.providers ?? []
+            return BrowseCard(id: "m\(m.id)", title: m.title, poster: m.poster,
+                              subtitle: m.year.map(String.init), progress: 0,
+                              badges: [.stream(StreamProvider.label(provs), StreamProvider.color(provs.first ?? ""))],
+                              stream: provs, route: .movie(0))
+        }
+        var badges: [CardBadge] = []
+        if m.isNew { badges.append(.new) }
+        else if (m.versions ?? 0) > 1, let q = m.bestQuality { badges.append(.quality(q)) }
+        if let also = m.alsoOn, let f = also.first {
+            badges.append(.alsoOn(StreamProvider.label(also), StreamProvider.color(f)))
+        }
         return BrowseCard(id: "m\(m.id)", title: m.title, poster: m.poster,
                           subtitle: m.year.map(String.init), progress: m.progressFraction,
-                          badge: badge, route: .movie(m.id))
+                          badges: badges, stream: nil, route: .movie(m.localId ?? 0))
     }
     static func showCard(_ s: Show) -> BrowseCard {
-        var badge: CardBadge? = nil
-        if let u = s.unwatched, u > 0 { badge = .newCount(u) }
-        else if s.isNew { badge = .new }
+        if s.isStream {
+            let provs = s.providers ?? []
+            return BrowseCard(id: "s\(s.id)", title: s.title, poster: s.poster,
+                              subtitle: s.year.map(String.init), progress: 0,
+                              badges: [.stream(StreamProvider.label(provs), StreamProvider.color(provs.first ?? ""))],
+                              stream: provs, route: .show(0))
+        }
+        var badges: [CardBadge] = []
+        if let u = s.unwatched, u > 0 { badges.append(.newCount(u)) }
+        else if s.isNew { badges.append(.new) }
+        if let also = s.alsoOn, let f = also.first {
+            badges.append(.alsoOn(StreamProvider.label(also), StreamProvider.color(f)))
+        }
         return BrowseCard(id: "s\(s.id)", title: s.title, poster: s.poster,
                           subtitle: s.year.map(String.init), progress: 0,
-                          badge: badge, route: .show(s.id))
+                          badges: badges, stream: nil, route: .show(s.localId ?? 0))
     }
 
     static func heroFromMovies(_ movies: [Movie]) -> [HeroItem] {
-        weeklyPick(movies.filter { $0.backdrop != nil }, 6).map {
+        weeklyPick(movies.filter { $0.backdrop != nil && !$0.isStream }, 6).map {
             HeroItem(id: "m\($0.id)", title: $0.title, backdrop: $0.backdrop, year: $0.year,
-                     rating: $0.rating, badge: $0.bestQuality, overview: $0.overview, route: .movie($0.id))
+                     rating: $0.rating, badge: $0.bestQuality, overview: $0.overview, route: .movie($0.localId ?? 0))
         }
     }
     static func heroFromShows(_ shows: [Show]) -> [HeroItem] {
-        weeklyPick(shows.filter { $0.backdrop != nil }, 6).map {
+        weeklyPick(shows.filter { $0.backdrop != nil && !$0.isStream }, 6).map {
             HeroItem(id: "s\($0.id)", title: $0.title, backdrop: $0.backdrop, year: $0.year,
-                     rating: $0.rating, badge: $0.episodes.map { "\($0) episodes" }, overview: $0.overview, route: .show($0.id))
+                     rating: $0.rating, badge: $0.episodes.map { "\($0) episodes" }, overview: $0.overview, route: .show($0.localId ?? 0))
         }
     }
     static func heroMixed(_ movies: [Movie], _ shows: [Show]) -> [HeroItem] {
-        let m = movies.filter { $0.backdrop != nil }.map { HeroItem(id: "m\($0.id)", title: $0.title, backdrop: $0.backdrop, year: $0.year, rating: $0.rating, badge: $0.bestQuality, overview: $0.overview, route: .movie($0.id)) }
-        let s = shows.filter { $0.backdrop != nil }.map { HeroItem(id: "s\($0.id)", title: $0.title, backdrop: $0.backdrop, year: $0.year, rating: $0.rating, badge: $0.episodes.map { "\($0) eps" }, overview: $0.overview, route: .show($0.id)) }
+        let m = movies.filter { $0.backdrop != nil && !$0.isStream }.map { HeroItem(id: "m\($0.id)", title: $0.title, backdrop: $0.backdrop, year: $0.year, rating: $0.rating, badge: $0.bestQuality, overview: $0.overview, route: .movie($0.localId ?? 0)) }
+        let s = shows.filter { $0.backdrop != nil && !$0.isStream }.map { HeroItem(id: "s\($0.id)", title: $0.title, backdrop: $0.backdrop, year: $0.year, rating: $0.rating, badge: $0.episodes.map { "\($0) eps" }, overview: $0.overview, route: .show($0.localId ?? 0)) }
         return weeklyPick((m + s).sorted { ($0.rating ?? 0) > ($1.rating ?? 0) }, 6)
     }
 

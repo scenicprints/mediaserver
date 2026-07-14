@@ -59,7 +59,7 @@ struct CollectionDetailView: View {
                                 PosterCard(title: movie.title, posterURL: movie.poster,
                                            subtitle: movie.year.map(String.init),
                                            progress: movie.progressFraction) {
-                                    route.append(.movie(movie.id))
+                                    if let lid = movie.localId { route.append(.movie(lid)) }
                                 }
                             }
                         }

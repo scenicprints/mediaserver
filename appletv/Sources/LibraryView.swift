@@ -33,13 +33,13 @@ struct LibraryView: View {
                         ForEach(movies) { m in
                             PosterCard(title: m.title, posterURL: m.poster,
                                        subtitle: m.year.map(String.init), progress: m.progressFraction) {
-                                route.append(.movie(m.id))
+                                if let lid = m.localId { route.append(.movie(lid)) }
                             }
                         }
                     } else {
                         ForEach(shows) { s in
                             PosterCard(title: s.title, posterURL: s.poster,
-                                       subtitle: s.year.map(String.init)) { route.append(.show(s.id)) }
+                                       subtitle: s.year.map(String.init)) { if let lid = s.localId { route.append(.show(lid)) } }
                         }
                     }
                 }

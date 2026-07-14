@@ -18,7 +18,7 @@ struct LiveTVView: View {
     @State private var tick = Date()
     private let timer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
 
-    private var channels: [LiveChannel] { Self.build(from: store.movies) }
+    private var channels: [LiveChannel] { Self.build(from: store.movies.filter { !$0.isStream }) }
 
     var body: some View {
         ZStack {
@@ -113,7 +113,7 @@ struct LiveTVView: View {
 // Identifiable wrapper so fullScreenCover(item:) can drive playback.
 private struct TunedItem: Identifiable, Hashable {
     let movie: Movie; let offset: Double
-    var id: Int { movie.id }
+    var id: String { movie.id }
 }
 
 // Resolves the movie's best file and plays it at the live offset.
@@ -131,7 +131,7 @@ private struct PlayerFor: View {
                 ZStack { Color.black; ProgressView().tint(.white) }
             }
         }
-        .task { detail = await store.movieDetail(movie.id) }
+        .task { detail = await store.movieDetail(movie.localId ?? 0) }
     }
 }
 

@@ -39,7 +39,7 @@ struct SearchView: View {
                         ForEach(movieHits) { m in
                             PosterCard(title: m.title, posterURL: m.poster,
                                        subtitle: m.year.map(String.init),
-                                       progress: m.progressFraction) { route.append(.movie(m.id)) }
+                                       progress: m.progressFraction) { if let lid = m.localId { route.append(.movie(lid)) } }
                         }
                     }
                 }
@@ -47,7 +47,7 @@ struct SearchView: View {
                     section("TV Shows") {
                         ForEach(showHits) { s in
                             PosterCard(title: s.title, posterURL: s.poster,
-                                       subtitle: s.year.map(String.init)) { route.append(.show(s.id)) }
+                                       subtitle: s.year.map(String.init)) { if let lid = s.localId { route.append(.show(lid)) } }
                         }
                     }
                 }

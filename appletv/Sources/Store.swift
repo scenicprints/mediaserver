@@ -4,7 +4,9 @@ import Foundation
 // Posters/backdrops are full https://image.tmdb.org URLs, so AsyncImage loads
 // them directly. snake_case -> camelCase via .convertFromSnakeCase.
 struct Movie: Identifiable, Decodable, Hashable {
-    let id: Int
+    // Local movies have an Int id; streaming-only titles have a String id like
+    // "stream:movie:1234" — so decode either and keep it as a String.
+    let id: String
     let title: String
     let year: Int?
     let poster: String?
@@ -20,7 +22,40 @@ struct Movie: Identifiable, Decodable, Hashable {
     let versions: Int?
     let addedAt: Double?
     let qualities: String?
+    let source: String?          // "stream" for streaming-only titles
+    let providers: [String]?     // streaming provider slugs (stream titles)
+    let alsoOn: [String]?        // owned title that's also on these services
 
+    enum CodingKeys: String, CodingKey {
+        case id, title, year, poster, backdrop, overview, rating, genres, watched, favorite
+        case resumePosition, duration, runtime, versions, addedAt, qualities, source, providers, alsoOn
+    }
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        if let i = try? c.decode(Int.self, forKey: .id) { id = String(i) }
+        else { id = (try? c.decode(String.self, forKey: .id)) ?? UUID().uuidString }
+        title = (try? c.decode(String.self, forKey: .title)) ?? "—"
+        year = try? c.decode(Int.self, forKey: .year)
+        poster = try? c.decode(String.self, forKey: .poster)
+        backdrop = try? c.decode(String.self, forKey: .backdrop)
+        overview = try? c.decode(String.self, forKey: .overview)
+        rating = try? c.decode(Double.self, forKey: .rating)
+        genres = try? c.decode(String.self, forKey: .genres)
+        watched = try? c.decode(Int.self, forKey: .watched)
+        favorite = try? c.decode(Int.self, forKey: .favorite)
+        resumePosition = try? c.decode(Double.self, forKey: .resumePosition)
+        duration = try? c.decode(Double.self, forKey: .duration)
+        runtime = try? c.decode(Int.self, forKey: .runtime)
+        versions = try? c.decode(Int.self, forKey: .versions)
+        addedAt = try? c.decode(Double.self, forKey: .addedAt)
+        qualities = try? c.decode(String.self, forKey: .qualities)
+        source = try? c.decode(String.self, forKey: .source)
+        providers = try? c.decode([String].self, forKey: .providers)
+        alsoOn = try? c.decode([String].self, forKey: .alsoOn)
+    }
+
+    var localId: Int? { Int(id) }
+    var isStream: Bool { source == "stream" }
     var progressFraction: Double {
         guard let d = duration, d > 0, let p = resumePosition else { return 0 }
         return min(max(p / d, 0), 1)
@@ -59,7 +94,7 @@ struct ContinueItem: Identifiable, Decodable, Hashable {
 }
 
 struct Show: Identifiable, Decodable, Hashable {
-    let id: Int
+    let id: String
     let title: String
     let year: Int?
     let poster: String?
@@ -70,7 +105,35 @@ struct Show: Identifiable, Decodable, Hashable {
     let unwatched: Int?
     let genres: String?
     let addedAt: Double?
+    let source: String?
+    let providers: [String]?
+    let alsoOn: [String]?
 
+    enum CodingKeys: String, CodingKey {
+        case id, title, year, poster, backdrop, overview, rating, episodes, unwatched
+        case genres, addedAt, source, providers, alsoOn
+    }
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        if let i = try? c.decode(Int.self, forKey: .id) { id = String(i) }
+        else { id = (try? c.decode(String.self, forKey: .id)) ?? UUID().uuidString }
+        title = (try? c.decode(String.self, forKey: .title)) ?? "—"
+        year = try? c.decode(Int.self, forKey: .year)
+        poster = try? c.decode(String.self, forKey: .poster)
+        backdrop = try? c.decode(String.self, forKey: .backdrop)
+        overview = try? c.decode(String.self, forKey: .overview)
+        rating = try? c.decode(Double.self, forKey: .rating)
+        episodes = try? c.decode(Int.self, forKey: .episodes)
+        unwatched = try? c.decode(Int.self, forKey: .unwatched)
+        genres = try? c.decode(String.self, forKey: .genres)
+        addedAt = try? c.decode(Double.self, forKey: .addedAt)
+        source = try? c.decode(String.self, forKey: .source)
+        providers = try? c.decode([String].self, forKey: .providers)
+        alsoOn = try? c.decode([String].self, forKey: .alsoOn)
+    }
+
+    var localId: Int? { Int(id) }
+    var isStream: Bool { source == "stream" }
     var genreList: [String] { Store.parseJSONStrings(genres) }
     var isNew: Bool { Store.isRecent(addedAt) }
 }
@@ -148,6 +211,10 @@ struct ShowDetail: Decodable {
 
     var genreList: [String] { Store.parseJSONStrings(genres) }
 }
+
+// ---- /api/shows/:id/extra : season posters etc. ----
+struct SeasonMeta: Decodable, Hashable { let season: Int; let poster: String? }
+struct ShowExtra: Decodable { let seasons: [SeasonMeta]? }
 
 // ---- /api/collections/:id : the collection's owned movies, in order ----
 struct CollectionDetail: Decodable {
@@ -368,6 +435,9 @@ final class Store: ObservableObject {
     }
     func showDetail(_ id: Int) async -> ShowDetail? {
         await get("api/shows/\(id)", as: ShowDetail.self)
+    }
+    func showExtra(_ id: Int) async -> ShowExtra? {
+        await get("api/shows/\(id)/extra", as: ShowExtra.self)
     }
     func collectionDetail(_ id: String) async -> CollectionDetail? {
         let enc = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
