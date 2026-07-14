@@ -38,8 +38,7 @@ struct ContentView: View {
                     NavTab { LibraryView(route: $0) }.tabItem { Text("Library") }.tag("library")
                     NavTab { CollectionsView(route: $0) }.tabItem { Text("Collections") }.tag("collections")
                     RequestsView().tabItem { Text("Requests") }.tag("requests")
-                    NavTab { SearchView(route: $0) }.tabItem { Image(systemName: "magnifyingglass") }.tag("search")
-                    SettingsView().tabItem { Image(systemName: "gearshape") }.tag("settings")
+                    SettingsView().tabItem { Text("Settings") }.tag("settings")
                 }
             } else {
                 LoginView()
