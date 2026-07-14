@@ -132,9 +132,11 @@ let heroItems = [];
 let heroIdx = 0;
 let heroTimer = null;
 
-// Skip Intro / Skip Credits are temporarily pulled (buggy on real content) —
-// set to true to restore when the intro-detection rebuild is ready.
-const SKIP_BUTTONS_ENABLED = false;
+// Skip Intro / Skip Credits. Driven ONLY by reliable, bounded signals — named
+// chapters and fingerprint-detected intro ranges (see introdetect.js consensus).
+// The old time-heuristic (show for the first 1–150s) is gone; that's what made
+// the button linger for minutes on real content.
+const SKIP_BUTTONS_ENABLED = true;
 
 const NEW_MS = 14 * 24 * 3600 * 1000;
 const isNew = (it) => it.added_at && Date.now() - it.added_at < NEW_MS;
@@ -180,6 +182,7 @@ document.querySelectorAll('.nav-link').forEach((b) =>
 );
 
 function setView(view) {
+  stopActivePlayer(); // switching top-level views must not leave a player running
   currentView = view;
   document.querySelectorAll('.nav-link').forEach((b) => b.classList.toggle('active', b.dataset.view === view));
   search.value = '';
@@ -1555,6 +1558,13 @@ function bindProgress(player, url, onEnd) {
 
 // ---------- Theater video player ----------
 let activePlayer = null;
+// Tear down the player and stop its audio. The player overlay lives on <body>
+// (not inside the detail/view), so any "leave to browse" path must call this or
+// the video keeps playing in the background. `.remove()` is overridden per player
+// to hard-stop every <video> (see openPlayer) — detaching alone doesn't.
+function stopActivePlayer() {
+  if (activePlayer) { activePlayer.remove(); activePlayer = null; }
+}
 
 function fmtTime(t) {
   if (!t || isNaN(t)) t = 0;
@@ -1707,9 +1717,26 @@ function openPlayer(ctx) {
   const isEpisode = ctx.searchKind === 'episode';
   const skipIntro = vp.querySelector('.vp-skipintro');
   const skipCredits = vp.querySelector('.vp-skipcredits');
-  // Chapter ranges for the current file, detected in loadFile() from ffprobe.
-  let introCh = null, creditsCh = null;
-  skipIntro.addEventListener('click', () => { seekTo(introCh ? introCh.end : cur() + 85); skipIntro.classList.add('hidden'); });
+  // Intro/credits ranges for the current file (chapters or fingerprint), set in
+  // loadFile(). `introSkipped` makes Skip Intro one-shot per file so it can't
+  // nag if the seek lands a hair short of the intro end.
+  let introCh = null, creditsCh = null, introSkipped = false;
+  async function skipIntroNow() {
+    introSkipped = true;
+    skipIntro.classList.add('hidden');
+    if (!introCh) return;
+    // Land on the keyframe AT OR AFTER the intro end (copy-path seeks snap to the
+    // previous keyframe, which could drop you back inside the intro).
+    let target = introCh.end;
+    if (play.mode === 'transcode') {
+      try {
+        const r = await (await fetch(`/api/seekpoint/${ctx.searchKind}/${current.id}?start=${introCh.end.toFixed(2)}&after=1&${audioQuery()}`)).json();
+        if (r && typeof r.start === 'number' && r.start >= introCh.end - 0.2) target = r.start;
+      } catch (_e) {}
+    }
+    seekTo(target);
+  }
+  skipIntro.addEventListener('click', skipIntroNow);
   skipCredits.addEventListener('click', () => { if (ctx.onEnded) ctx.onEnded(); else seekTo((dur() || cur()) - 1); skipCredits.classList.add('hidden'); });
   const errEl = vp.querySelector('.vp-error');
   video.addEventListener('error', () => {
@@ -1840,6 +1867,7 @@ function openPlayer(ctx) {
     introCh = chaps.find((c) => /\b(intro|opening|op|main title|titles?)\b/i.test(c.title))
       || (info && info.intro && info.intro.end > info.intro.start ? info.intro : null);
     creditsCh = chaps.find((c) => /\b(credits?|ending|outro|ed|end ?card)\b/i.test(c.title)) || null;
+    introSkipped = false; // fresh file → its Skip Intro is available again
     base = 0;
     if (play.mode === 'transcode') {
       base = await resolveStart(at || 0); // resume lands on the true keyframe start
@@ -1922,14 +1950,17 @@ function openPlayer(ctx) {
   // for anything, incl. a cold open before the intro). Without chapters we fall
   // back to a heuristic — but only for TV episodes, since movies have no intro.
   function updateSkipButtons() {
-    // TEMPORARILY DISABLED — Skip Intro/Credits pulled pending a rebuild. Flip
-    // SKIP_BUTTONS_ENABLED (top of file) to true to restore.
     if (!SKIP_BUTTONS_ENABLED) { skipIntro.classList.add('hidden'); skipCredits.classList.add('hidden'); return; }
     if (live) return; // no skipping on a live feed
     const t = cur(), d = dur();
     let showIntro = false, showCredits = false;
-    if (introCh) showIntro = t >= introCh.start && t < introCh.end;
-    else if (isEpisode) showIntro = t >= 1 && t <= 150; // click when the intro plays (handles cold opens)
+    // Intro: ONLY a named chapter or a fingerprint-detected range (introCh is set
+    // from either in loadFile). Always bounded → the button auto-hides once you're
+    // past the intro, and never appears when we don't actually know where it is.
+    // `introSkipped` keeps it from re-showing after you've used it.
+    if (introCh && !introSkipped) showIntro = t >= introCh.start && t < introCh.end;
+    // Credits: a named chapter, or — only for an episode that has a next one — the
+    // tail window, which is itself bounded so it can't linger.
     if (creditsCh) showCredits = t >= creditsCh.start;
     else if (isEpisode && ctx.onEnded && d) showCredits = t >= d - 45 && t < d - 1;
     skipIntro.classList.toggle('hidden', !showIntro);
@@ -2257,8 +2288,8 @@ function openPlayer(ctx) {
 // ---------- Detail modal open/close ----------
 function openDetailModal() { detail.classList.remove('hidden'); document.body.style.overflow = 'hidden'; }
 function closeDetail() {
-  const player = document.getElementById('player');
-  if (player) player.pause();
+  stopActivePlayer(); // leaving the detail must tear the player down, or its audio
+                      // keeps playing in the background (it lives on <body>, not here)
   detail.classList.add('hidden');
   detailInner.innerHTML = '';
   document.body.style.overflow = '';

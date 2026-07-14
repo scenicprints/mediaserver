@@ -12,7 +12,7 @@ import { enrichLibrary, enrichShows, enrichEpisodes, movieExtra, showExtra, back
 import { ext, qualityRank } from './parse.js';
 import { listDrives, listDirs } from './fsbrowse.js';
 import { osEnabled, searchSubtitles, downloadSubtitle, clearAuth } from './opensubtitles.js';
-import { detectFfmpeg, status as ffmpegStatus, installFfmpeg, playInfo, transcodeStream, ffmpegBin, sourceTiming, probe, keyframeBefore, embeddedSubtitles, extractSubtitle } from './ffmpeg.js';
+import { detectFfmpeg, status as ffmpegStatus, installFfmpeg, playInfo, transcodeStream, ffmpegBin, sourceTiming, probe, keyframeBefore, keyframeAtOrAfter, embeddedSubtitles, extractSubtitle } from './ffmpeg.js';
 import { detectWhisper, status as whisperStatus, installWhisper, generate as generateSubs } from './whisper.js';
 import { translateVttFile } from './translate.js';
 import { radarrEnabled, sonarrEnabled, testConn, radarrSearch, radarrAdd, sonarrSearch, sonarrAdd, getProfiles, radarrQueue, sonarrQueue } from './arr.js';
@@ -871,7 +871,19 @@ app.get('/api/seekpoint/:kind/:fileId', async (req, reply) => {
   const start = Math.max(0, parseFloat(req.query.start) || 0);
   const info = await playInfo(row.path, audioOpts(req));
   const snap = info.mode === 'transcode' && info.vcopy && start > 0;
-  return { start: snap ? await keyframeBefore(row.path, start) : start };
+  if (!snap) return { start };
+  // Skip Intro (`after=1`): ideally land on the keyframe just PAST the intro so
+  // you're clear of the theme — but only if that's a small overshoot. With a big
+  // GOP the next keyframe can be many seconds into the episode body, so skipping
+  // there would eat real content; in that case fall back to the keyframe BEFORE
+  // (you see a little more intro, but never miss content — the one-shot button
+  // keeps it from nagging). A normal seek always wants the keyframe at/before.
+  if (req.query.after === '1') {
+    const ka = await keyframeAtOrAfter(row.path, start);
+    if (ka - start <= 3) return { start: ka };
+    return { start: await keyframeBefore(row.path, start) };
+  }
+  return { start: await keyframeBefore(row.path, start) };
 });
 
 // Live-transcoded stream. ?start=SECONDS seeks (the client restarts the stream
@@ -1463,10 +1475,12 @@ async function start() {
     }, 12 * 3600 * 1000);
   }
 
-  // Intro (theme-song) detection + episode-duration probing — TEMPORARILY OFF
-  // (pulled pending a rebuild). Set `"introDetection": true` in config.json to
-  // re-enable. Fully async when it runs, so it never blocks playback.
-  if (config.introDetection) {
+  // Intro (theme-song) detection + episode-duration probing. Rebuilt with
+  // consensus matching (src/introdetect.js) and now ON by default — set
+  // `"introDetection": false` in config.json to disable. It's a background job:
+  // runs once per episode (guarded by intro_checked), fully async and paced, so
+  // it never blocks playback even churning through a big library on first pass.
+  if (config.introDetection !== false) {
     (async () => {
       await new Promise((r) => setTimeout(r, 45000)); // let boot/scan settle before the heavy job
       await runIntroDetection(db, ROOT, config, { log: (x) => console.log(x) });

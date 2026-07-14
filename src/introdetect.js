@@ -113,23 +113,52 @@ async function matchIntro(A, B) {
   };
 }
 
-// Analyze one season: fingerprint each episode, match consecutive pairs, and
-// return a Map of epId → { start, end } (best/longest match per episode). Fully
-// async + paced so it never blocks playback.
+const PAIRS_PER_EP = 3;    // match each episode against this many others (consensus)
+const AGREE_SEC = 4;       // two ranges describe the same intro if within this
+
+// Pick the intro range a set of candidate ranges AGREE on. Greedily find the
+// largest cluster of ranges with matching start+end, and require `minSupport`
+// members — a real intro shows up in several pairings, while a one-off shared
+// music cue (the classic false positive) appears in only one and is rejected.
+// The representative is the group's median start/end.
+function consensusRange(ranges, minSupport) {
+  if (!ranges.length) return null;
+  let best = null;
+  for (const r of ranges) {
+    const group = ranges.filter((o) => Math.abs(o.start - r.start) <= AGREE_SEC && Math.abs(o.end - r.end) <= AGREE_SEC);
+    if (!best || group.length > best.length) best = group;
+  }
+  if (!best || best.length < minSupport) return null;
+  const med = (xs) => { const s = [...xs].sort((a, b) => a - b); return s[Math.floor(s.length / 2)]; };
+  const start = med(best.map((g) => g.start)), end = med(best.map((g) => g.end));
+  return end > start ? { start, end } : null;
+}
+
+// Analyze one season: fingerprint each episode, match each against several others
+// (not just its neighbour), then keep only the intro range a CONSENSUS of pairings
+// agrees on. This is what makes it robust on real content — the old adjacent-only
+// matching trusted a single pair, so one coincidental shared cue produced a wrong
+// intro (that's why the feature was disabled). Fully async + paced.
 async function analyzeSeason(eps) {
   const fps = [];
   for (const e of eps) { fps.push({ ep: e, ...(await fingerprint(e.path)) }); await new Promise((r) => setTimeout(r, 30)); }
+  const N = fps.length;
+  const cands = new Map(); // epId → [candidate ranges from each pairing]
+  const push = (ep, r) => { if (r) (cands.get(ep.id) || cands.set(ep.id, []).get(ep.id)).push(r); };
+  for (let i = 0; i < N; i++) {
+    for (let j = i + 1; j <= Math.min(N - 1, i + PAIRS_PER_EP); j++) {
+      if (!fps[i].fp || !fps[j].fp) continue;
+      const m = await matchIntro(fps[i].fp, fps[j].fp);
+      if (m) { push(fps[i].ep, m.a); push(fps[j].ep, m.b); }
+    }
+  }
+  // ≥3-episode seasons demand corroboration (≥2 agreeing pairings); a 2-episode
+  // season has only one pair to go on, so accept it (lower confidence).
+  const minSupport = N >= 3 ? 2 : 1;
   const introById = new Map();
-  const assign = (ep, range) => {
-    if (!range) return;
-    const prev = introById.get(ep.id);
-    if (!prev || (range.end - range.start) > (prev.end - prev.start)) introById.set(ep.id, range);
-  };
-  for (let i = 0; i + 1 < fps.length; i++) {
-    const A = fps[i], B = fps[i + 1];
-    if (!A.fp || !B.fp) continue;
-    const m = await matchIntro(A.fp, B.fp);
-    if (m) { assign(A.ep, m.a); assign(B.ep, m.b); }
+  for (const [id, ranges] of cands) {
+    const r = consensusRange(ranges, minSupport);
+    if (r) introById.set(id, r);
   }
   return { introById, durations: new Map(fps.map((f) => [f.ep.id, f.duration])) };
 }

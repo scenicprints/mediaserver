@@ -169,6 +169,27 @@ export async function keyframeBefore(filePath, t) {
   return t;
 }
 
+// First video keyframe AT OR AFTER `t` seconds. Skip Intro seeks here: on the
+// copy path a plain seek to the intro's end snaps BACK to the previous keyframe
+// (landing you inside the intro again, up to a GOP short), so instead we land on
+// the first keyframe past it — you're always clear of the theme. Returns `t` if
+// none is found ahead (e.g. t is beyond the last keyframe).
+export async function keyframeAtOrAfter(filePath, t) {
+  if (!ffprobePath || !(t > 0)) return Math.max(0, t || 0);
+  const out = await tryRun(ffprobePath, [
+    '-v', 'error', '-read_intervals', `${t.toFixed(3)}%+30`,
+    '-select_streams', 'v:0', '-skip_frame', 'nokey', '-show_frames',
+    '-show_entries', 'frame=pts_time', '-of', 'json', filePath
+  ]);
+  try {
+    for (const f of (JSON.parse(out || '{}').frames || [])) {
+      const ts = parseFloat(f.pts_time);
+      if (Number.isFinite(ts) && ts >= t - 0.05) return ts;
+    }
+  } catch {}
+  return t;
+}
+
 // Text-based subtitle streams embedded in the file (mkv rips usually carry
 // them). Bitmap subs (PGS/VobSub) can't become WebVTT without OCR — excluded.
 // Returns [{ sIndex, label }] where sIndex is the subtitle-relative stream index

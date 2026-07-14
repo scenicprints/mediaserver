@@ -348,18 +348,20 @@ APK to the **`marquee-tv-latest`** release for sideloading onto the friend's TCL
 ---
 
 ## 🔜 Next (start here — priority order)
-0. **Skip Intro — built but TEMPORARILY DISABLED; needs a rebuild.** The audio-fingerprint
-   detection (`src/introdetect.js`) works in the lab but was **wrong on real content** (button
-   didn't bound correctly / persisted until pressed), so both the **background job** (gated behind
-   `config.introDetection`, default off) and the **player buttons** (`SKIP_BUTTONS_ENABLED = false`
-   at the top of `public/app.js` — hides both Skip Intro *and* Skip Credits) are OFF. The code and
-   DB columns remain. Rebuild plan when we return: **tune thresholds on the real library** via the
-   Dell's Claude (adjust `BIT_THRESH`/`MIN_INTRO_SEC`/`MAX_GAP`; require a stronger match/consensus
-   across more than adjacent pairs), fix the **button auto-hide/bounds**, add a Settings toggle +
-   progress, and consider end-credits detection. Also: the whole feature must stay **fully async**
-   (it once froze playback — see fc263dd). ~~Separately, the scanner leaves **stale file rows**~~ —
-   already handled: `pruneMissing()` in `src/scan.js` runs on every rescan (with a reachable-root
-   guard so an unplugged drive never wipes its library).
+0. **Skip Intro — REBUILT & re-enabled (2026-07-13).** Fixed the two things that got it pulled:
+   (1) **accuracy** — `src/introdetect.js` now matches each episode against several others and keeps
+   only the intro range a **consensus** of pairings agrees on (≥2 for 3+-episode seasons), so a
+   one-off shared music cue no longer produces a false intro (the old code trusted a single adjacent
+   pair). (2) **the button** — `SKIP_BUTTONS_ENABLED = true`, driven ONLY by named chapters +
+   fingerprint ranges; the old 1–150s time-heuristic (what made it "persist until pressed") is gone,
+   and it's **one-shot per file**. Skip lands on the keyframe just PAST the intro on the copy path
+   (`/api/seekpoint?after=1` → `keyframeAtOrAfter`, falling back to keyframe-before when the next one
+   is a big-GOP overshoot, so it never eats episode content); re-encode/direct paths seek exactly.
+   Detection job is **ON by default** (`config.introDetection !== false`), still fully async + paced.
+   Verified on synthetic seasons: shared intro detected incl. **cold open** (10–31s), **no false
+   intro** on unrelated content, button appears in-range and skips cleanly past the theme.
+   **Still needs threshold tuning on the real library** (`BIT_THRESH`/`MIN_INTRO_SEC`/`AGREE_SEC`) —
+   run it on the Dell and watch a few shows. Credits detection is still chapter/tail-window only.
 0b. **Whisper "auto-generate subtitles for files that have none" (opt-in toggle).** Owner asked
     whether to pre-generate like intros — decided NO for the whole library (too expensive, rarely
     needed), but a targeted background job for files with **zero** existing subtitle tracks is
