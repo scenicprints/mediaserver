@@ -72,6 +72,9 @@ jobs:
           mkdir -p "$KEYDIR"
           echo "${{ secrets.ASC_KEY_P8_BASE64 }}" | base64 --decode > "$KEYDIR/AuthKey_${{ secrets.ASC_KEY_ID }}.p8"
 
+      # Archive WITHOUT signing. tvOS "development" profiles need a registered
+      # device (we have none, and don't need one for TestFlight); signing is done
+      # at export with an App Store distribution profile, which needs no device.
       - name: Archive
         if: steps.pre.outputs.skip != 'true'
         run: |
@@ -80,13 +83,13 @@ jobs:
             -scheme MarqueeTV \
             -sdk appletvos \
             -configuration Release \
+            -destination 'generic/platform=tvOS' \
             -archivePath "$PWD/build/MarqueeTV.xcarchive" \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath "$HOME/.appstoreconnect/private_keys/AuthKey_${{ secrets.ASC_KEY_ID }}.p8" \
-            -authenticationKeyID "${{ secrets.ASC_KEY_ID }}" \
-            -authenticationKeyIssuerID "${{ secrets.ASC_ISSUER_ID }}" \
             DEVELOPMENT_TEAM="${{ secrets.APPLE_TEAM_ID }}" \
             CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
             archive
 
       - name: Export .ipa
