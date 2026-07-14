@@ -187,7 +187,9 @@ struct BrowseScreen: View {
             }
             .padding(.bottom, Theme.gutter)
         }
-        .ignoresSafeArea(edges: .top)
+        // Full-bleed: the hero art reaches every screen edge (no safe-area box);
+        // row content keeps its gutter padding so posters aren't clipped.
+        .ignoresSafeArea()
     }
 }
 

@@ -246,10 +246,14 @@ struct LiveTVView: View {
         }
     }
 
-    // The EPG grid: a shared timeline with a program row per channel.
+    // The EPG grid: a shared timeline, programs positioned by their real air
+    // time (so different lengths start at different points), with a live red
+    // playhead marking "now". The window opens 20 min in the past for context.
     private var guide: some View {
         let nowSec = now.timeIntervalSince1970
-        let winEnd = nowSec + windowMin * 60
+        let winStart = nowSec - 20 * 60
+        let winEnd = winStart + windowMin * 60
+        let nowX = Theme.gutter + labelW + CGFloat((nowSec - winStart) / 60) * ppm
         return VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 14) {
                 Circle().fill(.red).frame(width: 14, height: 14)
@@ -257,48 +261,64 @@ struct LiveTVView: View {
             }
             .padding(.horizontal, Theme.gutter)
 
-            // Time axis
+            // Time axis (every 30 min across the window).
             HStack(spacing: 0) {
                 Color.clear.frame(width: labelW)
-                ForEach(0..<3, id: \.self) { i in
-                    Text(clock(nowSec + Double(i) * 30 * 60))
+                ForEach(0..<4, id: \.self) { i in
+                    Text(clock(winStart + Double(i) * 30 * 60))
                         .font(.caption).foregroundStyle(.secondary)
                         .frame(width: 30 * ppm, alignment: .leading)
                 }
             }
             .padding(.leading, Theme.gutter)
 
-            ForEach(channels) { ch in
-                channelRow(ch, nowSec: nowSec, winEnd: winEnd)
+            // Channel rows with the red "now" line overlaid across all of them.
+            ZStack(alignment: .topLeading) {
+                VStack(spacing: 8) {
+                    ForEach(channels) { ch in
+                        channelRow(ch, winStart: winStart, winEnd: winEnd, nowSec: nowSec)
+                    }
+                }
+                Rectangle().fill(.red).frame(width: 3)
+                    .overlay(alignment: .top) { Circle().fill(.red).frame(width: 14, height: 14).offset(y: -6) }
+                    .padding(.leading, nowX)
+                    .allowsHitTesting(false)
             }
         }
     }
 
-    private func channelRow(_ ch: LiveChannel, nowSec: Double, winEnd: Double) -> some View {
-        let progs = LiveTV.window(ch, from: nowSec, to: winEnd)
+    private func channelRow(_ ch: LiveChannel, winStart: Double, winEnd: Double, nowSec: Double) -> some View {
+        let progs = LiveTV.window(ch, from: winStart, to: winEnd)
         return Button {
             let on = LiveTV.nowOn(ch, now.timeIntervalSince1970)
             tuned = TunedLive(item: on.item, offset: on.offset)
         } label: {
-            HStack(spacing: 8) {
+            HStack(spacing: 0) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("\(ch.number)  \(ch.name)").font(.callout).fontWeight(.bold).lineLimit(1)
                     Text(ch.sub).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                 }
                 .frame(width: labelW, alignment: .leading)
 
-                ForEach(progs) { p in
-                    let w = max(90, CGFloat(min(p.end, winEnd) - max(p.start, nowSec)) / 60 * ppm)
-                    let isNow = p.start <= nowSec && p.end > nowSec
-                    Text(p.item.title)
-                        .font(.callout).fontWeight(isNow ? .semibold : .regular).lineLimit(1)
-                        .padding(.horizontal, 14)
-                        .frame(width: w, height: 66, alignment: .leading)
-                        .background(isNow ? Theme.accent.opacity(0.28) : Color.white.opacity(0.06))
-                        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(isNow ? Theme.accent : Color.white.opacity(0.12), lineWidth: isNow ? 3 : 1))
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                ZStack(alignment: .topLeading) {
+                    ForEach(progs) { p in
+                        let x = CGFloat(max(0, (p.start - winStart) / 60)) * ppm
+                        let w = CGFloat((min(p.end, winEnd) - max(p.start, winStart)) / 60) * ppm
+                        let isNow = p.start <= nowSec && p.end > nowSec
+                        if w > 4 {
+                            Text(p.item.title)
+                                .font(.callout).fontWeight(isNow ? .semibold : .regular).lineLimit(1)
+                                .padding(.horizontal, 12)
+                                .frame(width: max(1, w - 4), height: 66, alignment: .leading)
+                                .background(isNow ? Theme.accent.opacity(0.30) : Color.white.opacity(0.06))
+                                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(isNow ? Theme.accent : Color.white.opacity(0.12), lineWidth: isNow ? 2 : 1))
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                                .offset(x: x)
+                        }
+                    }
                 }
-                Spacer(minLength: 0)
+                .frame(width: windowMin * ppm, height: 66, alignment: .topLeading)
+                .clipped()
             }
             .padding(.leading, Theme.gutter)
         }

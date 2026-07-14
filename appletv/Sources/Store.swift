@@ -324,7 +324,8 @@ final class Store: ObservableObject {
     @Published var night: Bool { didSet { UserDefaults.standard.set(night, forKey: "night") } }
     @Published var norm: Bool { didSet { UserDefaults.standard.set(norm, forKey: "norm") } }
 
-    var isLoggedIn: Bool { token != nil }
+    var previewMode = false   // CI screenshot mode: keep the session alive
+    var isLoggedIn: Bool { previewMode || token != nil }
     var isAdmin: Bool { user?.role == "admin" }
 
     init() {
@@ -347,6 +348,7 @@ final class Store: ObservableObject {
         10765: "Science Fiction", 10768: "War"
     ]
     func loadPreviewMock(tmdbKey: String) async {
+        previewMode = true
         token = "preview"
         user = User(username: "kevin", role: "admin")
         func names(_ ids: [Int]) -> String {
