@@ -1,9 +1,13 @@
 name: Apple TV preview shots
 
 # Renders the REAL app in the tvOS Simulator on a cloud Mac and screenshots each
-# tab — a true preview without shipping to TestFlight. Manual trigger.
-# Needs secrets: MARQUEE_PREVIEW_SERVER / _USER / _PASS (auto-login in the sim).
+# tab — a true preview that does NOT ship to TestFlight. Runs on every push to
+# appletv/ (review before shipping), plus a manual button.
+# Needs secret MARQUEE_PREVIEW_TMDB (sample data from TMDB's public CDN).
 on:
+  push:
+    paths:
+      - 'appletv/**'
   workflow_dispatch:
 
 jobs:

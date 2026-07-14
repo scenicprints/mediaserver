@@ -10,18 +10,12 @@ name: Apple TV app
 #   ASC_KEY_P8_BASE64    - the AuthKey_XXXX.p8 file, base64-encoded
 #
 # Triggers:
-#   * push to appletv/**        -> ships an update straight from your PC (git push)
+#   * workflow_dispatch         -> manual ONLY. Shipping to TestFlight happens
+#                                   only when explicitly run, AFTER previewing —
+#                                   pushing code never ships on its own.
 #   * schedule (every 2 months) -> rebuilds so the TestFlight build never expires
 #                                   (TestFlight builds lapse after 90 days)
-#   * workflow_dispatch         -> manual "Run workflow" button
-#
-# Before the secrets exist the Preflight step makes every run pass as a no-op
-# (green skip) instead of failing red, so early pushes don't spam failures.
 on:
-  push:
-    paths:
-      - 'appletv/**'
-      - '.github/workflows/appletv.yml'
   schedule:
     - cron: '0 9 1 */2 *'   # 09:00 UTC on the 1st of every 2nd month (~60d < 90d)
   workflow_dispatch:
