@@ -24,7 +24,7 @@ struct MarqueeHero: View {
     private let timer = Timer.publish(every: 9, on: .main, in: .common).autoconnect()
 
     var body: some View {
-        let it = items[safe: idx] ?? items[0]
+        let it = idx < items.count ? items[idx] : items[0]
         ZStack(alignment: .bottomLeading) {
             ArtImage(url: it.backdrop, aspect: 16.0 / 9.0)
                 .frame(height: 760).frame(maxWidth: .infinity).clipped()
@@ -260,10 +260,4 @@ func weeklyPick<T>(_ items: [T], _ n: Int) -> [T] {
         pool.swapAt(i, j)
     }
     return Array(pool.prefix(n))
-}
-
-extension Collection {
-    subscript(safe index: Index) -> Element? {
-        indices.contains(index) ? self[index] : nil
-    }
 }

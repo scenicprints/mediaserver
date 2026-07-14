@@ -57,7 +57,7 @@ struct NavTab<Content: View>: View {
             content($path)
                 .navigationDestination(for: Route.self) { route in
                     switch route {
-                    case .movie(let id): MovieDetailView(movieId: id)
+                    case .movie(let id): MovieDetailView(route: $path, movieId: id)
                     case .show(let id): ShowDetailView(showId: id)
                     case .collection(let id): CollectionDetailView(route: $path, collectionId: id)
                     }

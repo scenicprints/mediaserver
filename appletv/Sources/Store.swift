@@ -169,6 +169,38 @@ struct RequestResult: Identifiable, Decodable, Hashable {
 struct ArrProfile: Decodable, Hashable { let id: Int; let name: String? }
 struct ProfilesResponse: Decodable { let radarr: [ArrProfile]?; let sonarr: [ArrProfile]? }
 
+// ---- /api/movies/:id/extra : rich TMDB metadata ----
+struct CastMember: Decodable, Hashable { let name: String; let character: String?; let profile: String? }
+struct RecItem: Decodable, Hashable { let title: String; let year: Int?; let poster: String?; let localId: Int? }
+struct Trailer: Decodable, Hashable { let key: String; let name: String? }
+struct MovieExtra: Decodable {
+    let runtime: Int?
+    let tagline: String?
+    let genres: [String]?
+    let cast: [CastMember]?
+    let directors: [String]?
+    let recommendations: [RecItem]?
+    let trailer: Trailer?
+}
+
+// ---- Settings models ----
+struct UserRow: Identifiable, Decodable, Hashable { let id: Int; let username: String; let role: String }
+struct Provider: Decodable, Hashable, Identifiable { let id: String; let name: String; let color: String? }
+struct ProvidersResponse: Decodable { let providers: [Provider]; let enabled: [String]; let local: Bool }
+struct EngineStatus: Decodable { let ready: Bool?; let installing: Bool?; let installed: Bool?; let version: String? }
+struct AdminSession: Identifiable, Decodable, Hashable {
+    let sessionId: String?
+    let username: String?
+    let title: String?
+    let subtitle: String?
+    let mode: String?
+    let position: Double?
+    let duration: Double?
+    let paused: Bool?
+    var id: String { sessionId ?? "\(username ?? "")-\(title ?? "")" }
+}
+struct SessionsResponse: Decodable { let sessions: [AdminSession] }
+
 struct User: Decodable { let username: String; let role: String }
 private struct LoginResponse: Decodable { let token: String; let user: User }
 private struct MeResponse: Decodable { let user: User }
@@ -198,11 +230,32 @@ final class Store: ObservableObject {
     @Published var error: String?
     @Published var loading = false
 
+    // Per-device audio prefs (depend on THIS TV's speakers — like the web app's
+    // localStorage). Appended to stream URLs so the server mixes accordingly.
+    @Published var audioMode: String { didSet { UserDefaults.standard.set(audioMode, forKey: "audioMode") } }
+    @Published var dboost: String { didSet { UserDefaults.standard.set(dboost, forKey: "dboost") } }
+    @Published var night: Bool { didSet { UserDefaults.standard.set(night, forKey: "night") } }
+    @Published var norm: Bool { didSet { UserDefaults.standard.set(norm, forKey: "norm") } }
+
     var isLoggedIn: Bool { token != nil }
+    var isAdmin: Bool { user?.role == "admin" }
 
     init() {
         serverURL = UserDefaults.standard.string(forKey: "serverURL") ?? Store.defaultServer
         token = UserDefaults.standard.string(forKey: "authToken")
+        audioMode = UserDefaults.standard.string(forKey: "audioMode") ?? "stereo"
+        dboost = UserDefaults.standard.string(forKey: "dboost") ?? "normal"
+        night = UserDefaults.standard.bool(forKey: "night")
+        norm = UserDefaults.standard.bool(forKey: "norm")
+    }
+
+    // Query string the server uses to mix audio for this device.
+    func audioQuery() -> String {
+        var q = "audio=\(audioMode == "surround" ? "surround" : "stereo")"
+        if dboost != "normal" { q += "&dboost=\(dboost)" }
+        if night { q += "&night=1" }
+        if norm { q += "&norm=1" }
+        return q
     }
 
     private func decoder() -> JSONDecoder {
@@ -343,6 +396,82 @@ final class Store: ObservableObject {
         case .episode(let id): path = "api/episodes/\(id)/progress"
         }
         _ = try? await request(path, method: "POST", body: body)
+    }
+
+    // ---- Detail extras + favorite/watched ----
+    func movieExtra(_ id: Int) async -> MovieExtra? {
+        await get("api/movies/\(id)/extra", as: MovieExtra.self)
+    }
+    func toggleFavorite(_ id: Int) async -> Bool? {
+        struct R: Decodable { let favorite: Int }
+        do {
+            let (data, _) = try await request("api/movies/\(id)/favorite", method: "POST")
+            return (try? decoder().decode(R.self, from: data))?.favorite == 1
+        } catch { return nil }
+    }
+    func setWatched(_ id: Int, _ watched: Bool) async {
+        _ = try? await request("api/movies/\(id)/watched", method: "POST", body: ["watched": watched])
+    }
+
+    // ---- Settings: streaming sources ----
+    func loadProviders() async -> ProvidersResponse? { await get("api/providers", as: ProvidersResponse.self) }
+    func saveProviders(enabled: [String], local: Bool) async {
+        _ = try? await request("api/providers", method: "POST", body: ["enabled": enabled, "local": local])
+    }
+
+    // ---- Settings: accounts (admin) ----
+    func loadUsers() async -> [UserRow] { await get("api/users", as: [UserRow].self) ?? [] }
+    func addUser(username: String, password: String, role: String = "user") async -> String {
+        do {
+            let (data, http) = try await request("api/users", method: "POST",
+                body: ["username": username, "password": password, "role": role])
+            if (200..<300).contains(http.statusCode) { return "Added \(username)." }
+            return serverError(data) ?? "Couldn't add user (\(http.statusCode))."
+        } catch { return "Couldn't reach the server." }
+    }
+    func deleteUser(_ id: Int) async {
+        _ = try? await request("api/users/\(id)", method: "DELETE")
+    }
+
+    // ---- Settings: Radarr/Sonarr, pre-roll, subtitles (admin) ----
+    func saveArr(radarrURL: String, radarrKey: String, sonarrURL: String, sonarrKey: String) async -> String {
+        var body: [String: Any] = [:]
+        if !radarrURL.isEmpty { body["radarr"] = ["url": radarrURL, "apiKey": radarrKey] }
+        if !sonarrURL.isEmpty { body["sonarr"] = ["url": sonarrURL, "apiKey": sonarrKey] }
+        do {
+            let (data, http) = try await request("api/settings/arr", method: "POST", body: body)
+            return (200..<300).contains(http.statusCode) ? "Saved & tested." : (serverError(data) ?? "Save failed.")
+        } catch { return "Couldn't reach the server." }
+    }
+    func prerollAvailable() async -> Bool {
+        struct R: Decodable { let available: Bool }
+        return (await get("api/preroll", as: R.self))?.available ?? false
+    }
+    func savePreroll(path: String) async -> String {
+        do {
+            let (data, http) = try await request("api/settings/preroll", method: "POST", body: ["path": path])
+            return (200..<300).contains(http.statusCode) ? "Pre-roll saved." : (serverError(data) ?? "Save failed.")
+        } catch { return "Couldn't reach the server." }
+    }
+    func saveOpenSubtitles(apiKey: String, username: String, password: String) async -> String {
+        do {
+            let (_, http) = try await request("api/settings/opensubtitles", method: "POST",
+                body: ["apiKey": apiKey, "username": username, "password": password])
+            return (200..<300).contains(http.statusCode) ? "Subtitle account saved." : "Save failed."
+        } catch { return "Couldn't reach the server." }
+    }
+
+    // ---- Settings: engines (admin) ----
+    func engineStatus(_ path: String) async -> EngineStatus? { await get("api/\(path)", as: EngineStatus.self) }
+    func installEngine(_ path: String) async { _ = try? await request("api/\(path)/install", method: "POST") }
+    func runIntroDetect() async { _ = try? await request("api/intro/run", method: "POST") }
+    func loadSessions() async -> [AdminSession] {
+        (await get("api/admin/sessions", as: SessionsResponse.self))?.sessions ?? []
+    }
+    func serverVersion() async -> String? {
+        struct R: Decodable { let version: String?; let commit: String? }
+        let r = await get("api/version", as: R.self)
+        return r?.version ?? r?.commit
     }
 
     // ---- Requests (Radarr/Sonarr) ----
