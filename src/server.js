@@ -49,11 +49,30 @@ const app = Fastify({ logger: false });
 // send no body) without a 415. JSON bodies still use the built-in parser.
 app.addContentTypeParser('*', (req, payload, done) => done(null, undefined));
 
-// Serve the web UI from /public
+// Serve the web UI from /public. `index: false` so we serve index.html ourselves
+// (below) with cache-busted asset URLs.
 app.register(fastifyStatic, {
   root: path.join(ROOT, 'public'),
-  prefix: '/'
+  prefix: '/',
+  index: false
 });
+
+// Serve index.html with cache-busted asset URLs (?v=<file mtime>) so a redeploy's
+// new JS/CSS is actually picked up on the next load, instead of the browser or a
+// TV WebView quietly running a stale cached app.js/focus.js/style.css. index.html
+// itself is sent no-cache (it's tiny) so it's always re-read; the asset files keep
+// normal caching, and only their ?v changes when they change — a one-time refetch.
+const PUBLIC_DIR = path.join(ROOT, 'public');
+const assetVer = (f) => { try { return fs.statSync(path.join(PUBLIC_DIR, f)).mtimeMs.toString(36); } catch { return Date.now().toString(36); } };
+function renderIndex() {
+  return fs.readFileSync(path.join(PUBLIC_DIR, 'index.html'), 'utf8')
+    .replace('href="/style.css"', `href="/style.css?v=${assetVer('style.css')}"`)
+    .replace('src="/app.js"', `src="/app.js?v=${assetVer('app.js')}"`)
+    .replace('src="/focus.js"', `src="/focus.js?v=${assetVer('focus.js')}"`);
+}
+const sendIndex = (req, reply) => reply.header('Cache-Control', 'no-cache').type('text/html; charset=utf-8').send(renderIndex());
+app.get('/', sendIndex);
+app.get('/index.html', sendIndex);
 
 // ---- Auth guard ----
 // The invite code is baked into the app you hand out, so anyone with the app
