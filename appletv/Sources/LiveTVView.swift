@@ -57,7 +57,7 @@ enum LiveTV {
 
     static func pool(movies: [Movie], episodes: [LiveEpisode]) -> [LiveItem] {
         let mv = movies.filter { !$0.isStream && ($0.backdrop != nil || $0.poster != nil) }.map {
-            LiveItem(kind: "movie", title: $0.title, sub: $0.year.map(String.init), genres: $0.genreList,
+            LiveItem(kind: "movie", title: $0.title, sub: nil, genres: $0.genreList,
                      year: $0.year, rating: $0.rating,
                      duration: $0.runtime.map { Double($0) * 60 } ?? $0.duration ?? 6300,
                      backdrop: $0.backdrop, poster: $0.poster, still: nil, overview: $0.overview,
