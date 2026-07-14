@@ -12,8 +12,21 @@ enum CardBadge: Hashable {
     case alsoOn(String, UInt)      // owned + also on a service: outlined, top-left
 }
 
-// A 2:3 poster tile. Title/subtitle reveal on focus (like the web hover), and
-// corner badges show NEW/quality (top-right) and streaming provider (top-left).
+// The MARQUEE gradient wordmark. Lives at the top of each page's scroll content
+// (it scrolls away with the page — it is NOT pinned over everything).
+struct MarqueeWordmark: View {
+    var body: some View {
+        Text("MARQUEE")
+            .font(.system(size: 34, weight: .heavy)).kerning(1.5)
+            .foregroundStyle(Theme.grad)
+            .accessibilityHidden(true)
+    }
+}
+
+// A 2:3 poster tile. ONLY the artwork sits inside the focusable button (the
+// .card style wraps its whole label in the focus platter — putting text in
+// there is what produced the grey strip under focused posters). The title and
+// year live below, always visible, like a TV app should.
 struct PosterCard: View {
     let title: String
     let posterURL: String?
@@ -33,25 +46,27 @@ struct PosterCard: View {
     private var topLeft: CardBadge? { badges.first { if case .stream = $0 { return true }; if case .alsoOn = $0 { return true }; return false } }
 
     var body: some View {
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 10) {
-                ArtImage(url: posterURL, aspect: 2.0 / 3.0)
+        VStack(alignment: .leading, spacing: 14) {
+            Button(action: action) {
+                ArtImage(url: posterURL, aspect: 2.0 / 3.0, placeholderTitle: title)
                     .frame(width: Theme.posterWidth, height: Theme.posterHeight)
                     .clipShape(RoundedRectangle(cornerRadius: Theme.posterRadius))
                     .overlay(alignment: .topTrailing) { if let b = topRight { pill(b) } }
                     .overlay(alignment: .topLeading) { if let b = topLeft { pill(b) } }
                     .overlay(alignment: .bottom) { ProgressBar(progress: progress) }
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.callout).fontWeight(.semibold).lineLimit(1)
-                    Text(subtitle ?? " ").font(.caption).foregroundStyle(Theme.muted).lineLimit(1)
-                }
-                .frame(width: Theme.posterWidth, alignment: .leading)
-                .opacity(focused ? 1 : 0)
             }
+            .buttonStyle(.card)
+            .focused($focused)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.callout).fontWeight(.semibold).lineLimit(1)
+                    .foregroundStyle(focused ? .white : Color(hex: 0xd3d7e3))
+                Text(subtitle ?? " ")
+                    .font(.caption).foregroundStyle(Theme.muted).lineLimit(1)
+            }
+            .frame(width: Theme.posterWidth, alignment: .leading)
         }
-        .buttonStyle(.card)
-        .focused($focused)
     }
 
     @ViewBuilder private func pill(_ badge: CardBadge) -> some View {
@@ -74,35 +89,47 @@ struct PosterCard: View {
     }
 }
 
-// A 16:9 landscape tile used for Continue Watching (shows the resume progress).
+// Continue Watching: a poster card like the web's, with the resume progress
+// pinned to the poster and a long-press menu to mark it watched (the web ✓).
 struct ContinueCard: View {
     let title: String
     let subtitle: String?
     let posterURL: String?
     let progress: Double
     let action: () -> Void
+    var onMarkWatched: (() -> Void)? = nil
+    @FocusState private var focused: Bool
 
     var body: some View {
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 10) {
-                ArtImage(url: posterURL, aspect: 16.0 / 9.0)
-                    .frame(width: Theme.backdropWidth, height: Theme.backdropHeight)
+        VStack(alignment: .leading, spacing: 14) {
+            Button(action: action) {
+                ArtImage(url: posterURL, aspect: 2.0 / 3.0, placeholderTitle: title)
+                    .frame(width: Theme.posterWidth, height: Theme.posterHeight)
                     .clipShape(RoundedRectangle(cornerRadius: Theme.posterRadius))
                     .overlay(alignment: .bottomLeading) {
                         Image(systemName: "play.circle.fill")
-                            .font(.system(size: 44)).padding(16)
+                            .font(.system(size: 40)).padding(12)
                             .foregroundStyle(.white).shadow(radius: 6)
                     }
                     .overlay(alignment: .bottom) { ProgressBar(progress: progress) }
-
-                Text(title).font(.callout).fontWeight(.medium).lineLimit(1)
-                    .frame(width: Theme.backdropWidth, alignment: .leading)
-                if let subtitle {
-                    Text(subtitle).font(.caption).foregroundStyle(.secondary)
+            }
+            .buttonStyle(.card)
+            .focused($focused)
+            .contextMenu {
+                if let onMarkWatched {
+                    Button("Mark Watched", systemImage: "checkmark.circle", action: onMarkWatched)
                 }
             }
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.callout).fontWeight(.semibold).lineLimit(1)
+                    .foregroundStyle(focused ? .white : Color(hex: 0xd3d7e3))
+                Text(subtitle ?? " ")
+                    .font(.caption).foregroundStyle(Theme.muted).lineLimit(1)
+            }
+            .frame(width: Theme.posterWidth, alignment: .leading)
         }
-        .buttonStyle(.card)
     }
 }
 
@@ -112,12 +139,12 @@ struct MediaRow<Content: View>: View {
     @ViewBuilder let content: () -> Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: 16) {
             Text(title)
                 .font(.title2).fontWeight(.semibold)
                 .padding(.leading, Theme.gutter)
             ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: Theme.cardSpacing) {
+                LazyHStack(alignment: .top, spacing: Theme.cardSpacing) {
                     content()
                 }
                 .padding(.horizontal, Theme.gutter)
@@ -127,10 +154,12 @@ struct MediaRow<Content: View>: View {
     }
 }
 
-// Poster/backdrop loader with a graceful placeholder.
+// Poster/backdrop loader with a graceful placeholder. The placeholder carries
+// the title (web .ph) so an unenriched item is never a blank tile.
 struct ArtImage: View {
     let url: String?
     let aspect: CGFloat
+    var placeholderTitle: String? = nil
 
     var body: some View {
         AsyncImage(url: URL(string: url ?? "")) { phase in
@@ -140,7 +169,15 @@ struct ArtImage: View {
             default:
                 ZStack {
                     Rectangle().fill(Theme.posterFill)
-                    Image(systemName: "film").font(.system(size: 44)).foregroundStyle(Theme.muted)
+                    if let t = placeholderTitle, !t.isEmpty {
+                        Text(t)
+                            .font(.callout).fontWeight(.semibold)
+                            .foregroundStyle(Theme.muted)
+                            .multilineTextAlignment(.center)
+                            .padding(14)
+                    } else {
+                        Image(systemName: "film").font(.system(size: 44)).foregroundStyle(Theme.muted)
+                    }
                 }
                 .aspectRatio(aspect, contentMode: .fill)
             }

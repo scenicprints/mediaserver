@@ -43,14 +43,9 @@ struct ContentView: View {
                     NavTab { CollectionsView(route: $0) }.tabItem { Text("Collections") }.tag("collections")
                     SettingsView().tabItem { Text("Settings") }.tag("settings")
                 }
-                // The MARQUEE wordmark, top-left, like the web nav.
-                .overlay(alignment: .topLeading) {
-                    Text("MARQUEE")
-                        .font(.system(size: 32, weight: .heavy)).kerning(1)
-                        .foregroundStyle(Theme.grad)
-                        .padding(.leading, Theme.gutter).padding(.top, 28)
-                        .allowsHitTesting(false)
-                }
+                // (The MARQUEE wordmark lives at the top of each page's scroll
+                // content — see MarqueeWordmark — so it scrolls away with the
+                // page instead of shadowing every screen.)
                 }
             } else {
                 LoginView()

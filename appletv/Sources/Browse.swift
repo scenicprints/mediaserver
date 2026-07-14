@@ -172,16 +172,31 @@ struct BrowseScreen: View {
     private var scroll: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Theme.rowSpacing) {
-                if !heroItems.isEmpty { MarqueeHero(items: heroItems, route: $route) }
+                // The wordmark rides at the top of the PAGE (over the hero art)
+                // and scrolls away with it — it must not shadow the whole app.
+                if !heroItems.isEmpty {
+                    MarqueeHero(items: heroItems, route: $route)
+                        .overlay(alignment: .topLeading) {
+                            MarqueeWordmark()
+                                .padding(.leading, Theme.gutter).padding(.top, 46)
+                        }
+                } else {
+                    MarqueeWordmark()
+                        .padding(.leading, Theme.gutter).padding(.top, 46)
+                }
 
                 if !continueItems.isEmpty {
                     MediaRow(title: "Continue Watching") {
                         ForEach(continueItems) { item in
-                            ContinueCard(title: item.title, subtitle: item.subtitle,
-                                         posterURL: item.poster, progress: item.progressFraction) {
-                                if item.kind == "movie" { route.append(.movie(item.id)) }
-                                else if let sid = item.showId { route.append(.show(sid)) }
-                            }
+                            ContinueCard(title: item.displayTitle, subtitle: item.subtitle,
+                                         posterURL: item.poster, progress: item.progressFraction,
+                                         action: {
+                                             if item.kind == "movie" { route.append(.movie(item.id)) }
+                                             else if let sid = item.showId { route.append(.show(sid)) }
+                                         },
+                                         onMarkWatched: {
+                                             Task { await store.markContinueWatched(item) }
+                                         })
                         }
                     }
                 }
@@ -200,6 +215,9 @@ struct BrowseScreen: View {
         // Full-bleed: the hero art reaches every screen edge (no safe-area box);
         // row content keeps its gutter padding so posters aren't clipped.
         .ignoresSafeArea()
+        // Keep watch state fresh: Continue Watching appears/updates and
+        // marked-watched titles drop out when you come back to a browse page.
+        .onAppear { Task { await store.refreshHome() } }
     }
 }
 
@@ -299,6 +317,13 @@ enum Browse {
         return rows
     }
 
+    // Home's Recently Added mixes movies AND shows by added date (web mixedRecent).
+    static func mixedRecentCards(_ movies: [Movie], _ shows: [Show]) -> [BrowseCard] {
+        let m = movies.map { (at: $0.addedAt ?? 0, card: movieCard($0)) }
+        let s = shows.map { (at: $0.addedAt ?? 0, card: showCard($0)) }
+        return (m + s).sorted { $0.at > $1.at }.prefix(24).map { $0.card }
+    }
+
     static func homeRows(_ movies: [Movie], _ shows: [Show]) -> [BrowseRow] {
         var rows: [BrowseRow] = []
         func addM(_ id: String, _ t: String, _ list: [Movie]) {
@@ -307,7 +332,8 @@ enum Browse {
         func addS(_ id: String, _ t: String, _ list: [Show]) {
             if !list.isEmpty { rows.append(BrowseRow(id: id, title: t, cards: list.prefix(24).map(showCard))) }
         }
-        addM("recent", "Recently Added", movies.sorted { ($0.addedAt ?? 0) > ($1.addedAt ?? 0) })
+        let recent = mixedRecentCards(movies, shows)
+        if !recent.isEmpty { rows.append(BrowseRow(id: "recent", title: "Recently Added", cards: recent)) }
         addM("released", "Recently Released", movies.sorted { ($0.year ?? 0) > ($1.year ?? 0) })
         addM("rec", "Recommended", movies.filter { ($0.watched ?? 0) == 0 }.sorted { ($0.rating ?? 0) > ($1.rating ?? 0) })
         addM("movies", "Movies", movies.sorted { ($0.rating ?? 0) > ($1.rating ?? 0) })

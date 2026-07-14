@@ -8,6 +8,9 @@ struct CollectionsView: View {
 
     var body: some View {
         ScrollView {
+            MarqueeWordmark()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, Theme.gutter).padding(.top, 32)
             if store.collections.isEmpty {
                 VStack(spacing: 14) {
                     Text("No collections yet").font(.title2)

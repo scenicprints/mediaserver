@@ -3,15 +3,20 @@ import SwiftUI
 // The Library tab — the whole collection A→Z (matching the web Library): a clean
 // grouped grid with accent letter headers, a pill Movies/TV toggle, a sleek
 // search field, and a vertical A-Z rail on the right that jumps to any letter.
+// Includes streaming titles (provider badge; opens the service), like the web.
 struct LibraryView: View {
     @EnvironmentObject var store: Store
+    @Environment(\.openURL) private var openURL
     @Binding var route: [Route]
     @State private var kind = "movie"
     @State private var query = ""
     @FocusState private var searchFocused: Bool
     private let columns = [GridItem(.adaptive(minimum: Theme.posterWidth), spacing: Theme.cardSpacing)]
 
-    private struct LibItem: Identifiable { let id: String; let title: String; let poster: String?; let sub: String?; let progress: Double; let route: Route }
+    private struct LibItem: Identifiable {
+        let id: String; let title: String; let poster: String?; let sub: String?
+        let progress: Double; let badges: [CardBadge]; let stream: [String]?; let route: Route
+    }
 
     private func sortKey(_ t: String) -> String {
         t.replacingOccurrences(of: #"^(the|a|an) "#, with: "", options: [.regularExpression, .caseInsensitive])
@@ -20,23 +25,30 @@ struct LibraryView: View {
         let c = sortKey(t).uppercased().first.map(String.init) ?? "#"
         return (c >= "A" && c <= "Z") ? c : "#"
     }
+
+    private func movieItem(_ m: Movie) -> LibItem {
+        let c = Browse.movieCard(m)
+        return LibItem(id: c.id, title: m.title, poster: m.poster, sub: m.year.map(String.init),
+                       progress: m.progressFraction, badges: c.badges, stream: c.stream, route: c.route)
+    }
+    private func showItem(_ s: Show) -> LibItem {
+        let c = Browse.showCard(s)
+        return LibItem(id: c.id, title: s.title, poster: s.poster, sub: s.year.map(String.init),
+                       progress: 0, badges: c.badges, stream: c.stream, route: c.route)
+    }
+
+    // The A-Z browse list: the current kind, streaming included (like the web).
     private var items: [LibItem] {
-        let src: [LibItem]
-        if kind == "movie" {
-            src = store.movies.filter { !$0.isStream }.map {
-                LibItem(id: "m\($0.id)", title: $0.title, poster: $0.poster, sub: $0.year.map(String.init),
-                        progress: $0.progressFraction, route: .movie($0.localId ?? 0))
-            }
-        } else {
-            src = store.shows.filter { !$0.isStream }.map {
-                LibItem(id: "s\($0.id)", title: $0.title, poster: $0.poster, sub: $0.year.map(String.init),
-                        progress: 0, route: .show($0.localId ?? 0))
-            }
-        }
+        let src: [LibItem] = kind == "movie" ? store.movies.map(movieItem) : store.shows.map(showItem)
         return src.sorted { sortKey($0.title).localizedCaseInsensitiveCompare(sortKey($1.title)) == .orderedAscending }
     }
     private var trimmed: String { query.trimmingCharacters(in: .whitespaces) }
-    private var filtered: [LibItem] { items.filter { $0.title.range(of: trimmed, options: .caseInsensitive) != nil } }
+    // Search spans EVERYTHING — both kinds, owned and streaming.
+    private var filtered: [LibItem] {
+        let all = store.movies.map(movieItem) + store.shows.map(showItem)
+        return all.filter { $0.title.range(of: trimmed, options: .caseInsensitive) != nil }
+            .sorted { sortKey($0.title).localizedCaseInsensitiveCompare(sortKey($1.title)) == .orderedAscending }
+    }
     private var groups: [(String, [LibItem])] {
         Dictionary(grouping: items, by: { letter($0.title) }).sorted { $0.key < $1.key }
     }
@@ -46,6 +58,8 @@ struct LibraryView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
+                    MarqueeWordmark()
+
                     HStack(spacing: 20) {
                         toggle
                         searchField
@@ -78,11 +92,18 @@ struct LibraryView: View {
             }
         }
         .task { if store.movies.isEmpty { await store.loadHome() } }
+        .onAppear { Task { await store.refreshHome() } }
     }
 
     private func card(_ it: LibItem) -> some View {
-        PosterCard(title: it.title, posterURL: it.poster, subtitle: it.sub, progress: it.progress) {
-            route.append(it.route)
+        PosterCard(title: it.title, posterURL: it.poster, subtitle: it.sub,
+                   progress: it.progress, badges: it.badges) {
+            // Streaming titles open their service; owned ones push a detail page.
+            if let provs = it.stream, let slug = provs.first, let url = StreamProvider.url(slug, it.title) {
+                openURL(url)
+            } else {
+                route.append(it.route)
+            }
         }
     }
 

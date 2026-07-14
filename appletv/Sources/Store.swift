@@ -73,6 +73,7 @@ struct ContinueItem: Identifiable, Decodable, Hashable {
     let kind: String
     let id: Int
     let title: String
+    let showTitle: String?       // the show's name (episode rows)
     let poster: String?
     let resumePosition: Double?
     let duration: Double?
@@ -87,9 +88,12 @@ struct ContinueItem: Identifiable, Decodable, Hashable {
         guard let d = duration, d > 0, let p = resumePosition else { return 0 }
         return min(max(p / d, 0), 1)
     }
+    // Card title/sub match the web continueCards(): the SHOW's name headlines an
+    // episode; the sub carries S1·E01 (or "Movie").
+    var displayTitle: String { kind == "episode" ? (showTitle ?? title) : title }
     var subtitle: String? {
-        guard kind == "episode", let s = season, let e = episode else { return nil }
-        return String(format: "S%d · E%d", s, e)
+        guard kind == "episode", let s = season, let e = episode else { return "Movie" }
+        return String(format: "S%d·E%02d", s, e)
     }
 }
 
@@ -139,11 +143,25 @@ struct Show: Identifiable, Decodable, Hashable {
 }
 
 struct Collection: Identifiable, Decodable, Hashable {
+    // TMDB collections have numeric ids; curated meta collections use string ids
+    // like "meta:mcu" — decode either (a plain `String` decoder rejects the
+    // numeric ones and silently empties the whole Collections tab).
     let id: String
     let name: String
     let count: Int?
     let poster: String?
     let backdrop: String?
+
+    enum CodingKeys: String, CodingKey { case id, name, count, poster, backdrop }
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        if let i = try? c.decode(Int.self, forKey: .id) { id = String(i) }
+        else { id = (try? c.decode(String.self, forKey: .id)) ?? UUID().uuidString }
+        name = (try? c.decode(String.self, forKey: .name)) ?? "Collection"
+        count = try? c.decode(Int.self, forKey: .count)
+        poster = try? c.decode(String.self, forKey: .poster)
+        backdrop = try? c.decode(String.self, forKey: .backdrop)
+    }
 }
 
 // ---- Playback: /api/movies/:id returns the logical movie + its files ----
@@ -212,9 +230,9 @@ struct ShowDetail: Decodable {
     var genreList: [String] { Store.parseJSONStrings(genres) }
 }
 
-// ---- /api/shows/:id/extra : season posters etc. ----
+// ---- /api/shows/:id/extra : season posters + cast ----
 struct SeasonMeta: Decodable, Hashable { let season: Int; let poster: String? }
-struct ShowExtra: Decodable { let seasons: [SeasonMeta]? }
+struct ShowExtra: Decodable { let seasons: [SeasonMeta]?; let cast: [CastMember]? }
 
 // ---- /api/collections/:id : the collection's owned movies, in order ----
 struct CollectionDetail: Decodable {
@@ -490,7 +508,17 @@ final class Store: ObservableObject {
     }
 
     // ---- Data loading ----
+    // Screens call this on appear so watch state stays fresh (Continue Watching
+    // updates, watched titles drop out) without hammering the server.
+    private var lastHomeLoad = Date.distantPast
+    func refreshHome() async {
+        guard !previewMode else { return }   // never clobber the CI mock data
+        guard Date().timeIntervalSince(lastHomeLoad) > 15 else { return }
+        await loadHome()
+    }
+
     func loadHome() async {
+        lastHomeLoad = Date()
         loading = true; error = nil
         defer { loading = false }
         async let m: [Movie]? = get("api/movies", as: [Movie].self)
@@ -564,8 +592,9 @@ final class Store: ObservableObject {
     }
 
     // Pick the right URL for a file: AVPlayer plays mp4/m4v/mov containers
-    // directly (range streaming); anything else (mkv/avi/…) goes through the
-    // server's HLS transcode endpoint so it plays on the Apple TV.
+    // directly (range streaming); anything else (mkv/avi/…) — or a file with
+    // subtitle tracks, which AVPlayer only renders as an HLS WebVTT rendition —
+    // goes through the server's HLS endpoint (master.m3u8 lists the CC tracks).
     func playbackURL(kind: String, file: MovieFile) -> URL? {
         guard let t = token else { return nil }
         let ext = (file.filename as NSString?)?.pathExtension.lowercased() ?? ""
@@ -573,7 +602,89 @@ final class Store: ObservableObject {
         if native.contains(ext) {
             return kind == "episode" ? episodeStreamURL(fileId: file.id) : streamURL(fileId: file.id)
         }
-        return URL(string: "\(cleanBase)/api/hls/\(kind)/\(file.id)/index.m3u8?token=\(t)&\(audioQuery())")
+        return hlsURL(kind: kind, fileId: file.id)
+    }
+    func hlsURL(kind: String, fileId: Int) -> URL? {
+        guard let t = token else { return nil }
+        return URL(string: "\(cleanBase)/api/hls/\(kind)/\(fileId)/master.m3u8?token=\(t)&\(audioQuery())")
+    }
+    // Async variant: also routes native containers through HLS when the file has
+    // subtitle tracks (sidecar/embedded/AI) so the native CC picker can show them.
+    func resolvePlaybackURL(kind: String, file: MovieFile) async -> URL? {
+        let ext = (file.filename as NSString?)?.pathExtension.lowercased() ?? ""
+        let native: Set<String> = ["mp4", "m4v", "mov"]
+        if native.contains(ext) {
+            if await subtitleTracks(kind: kind, fileId: file.id).isEmpty {
+                return kind == "episode" ? episodeStreamURL(fileId: file.id) : streamURL(fileId: file.id)
+            }
+            return hlsURL(kind: kind, fileId: file.id)
+        }
+        return hlsURL(kind: kind, fileId: file.id)
+    }
+
+    struct SubtitleTrack: Decodable, Hashable { let label: String; let idx: Int }
+    func subtitleTracks(kind: String, fileId: Int) async -> [SubtitleTrack] {
+        if previewMode { return [] }
+        return await get("api/subtitles/list/\(kind)/\(fileId)", as: [SubtitleTrack].self) ?? []
+    }
+
+    // ---- /api/play: the server's playback decision + Skip Intro/chapter data ----
+    struct IntroRange: Decodable, Hashable { let start: Double; let end: Double }
+    struct PlayChapter: Decodable, Hashable { let start: Double; let end: Double; let title: String? }
+    struct PlayMeta: Decodable {
+        let mode: String?
+        let duration: Double?
+        let intro: IntroRange?
+        let chapters: [PlayChapter]?
+    }
+    // Also primes the server's playDecisions cache so the admin Now Playing
+    // monitor reports the authoritative direct/transcode engine for us.
+    func playMeta(kind: String, fileId: Int) async -> PlayMeta? {
+        if previewMode { return nil }
+        return await get("api/play/\(kind)/\(fileId)?\(audioQuery())", as: PlayMeta.self)
+    }
+
+    // ---- Session heartbeat (feeds the admin "Now Playing" monitor) ----
+    func sessionHeartbeat(sessionId: String, kind: String, fileId: Int?, title: String,
+                          subtitle: String?, mode: String, position: Double, duration: Double?,
+                          paused: Bool, live: Bool) async {
+        if previewMode { return }
+        var body: [String: Any] = [
+            "sessionId": sessionId, "kind": kind, "title": title, "mode": mode,
+            "position": position, "paused": paused, "live": live, "tv": true,
+            "audioMode": audioMode == "surround" ? "surround" : "stereo"
+        ]
+        if let fileId { body["fileId"] = fileId }
+        if let subtitle, !subtitle.isEmpty { body["subtitle"] = subtitle }
+        if let duration, duration.isFinite, duration > 0 { body["duration"] = duration }
+        _ = try? await request("api/session/heartbeat", method: "POST", body: body)
+    }
+    func sessionEnd(sessionId: String) async {
+        if previewMode { return }
+        _ = try? await request("api/session/end", method: "POST", body: ["sessionId": sessionId])
+    }
+
+    // ---- AI (Whisper) subtitle generation — background job + poll ----
+    struct SubJob: Decodable { let status: String; let pct: Int?; let phase: String?; let error: String? }
+    func generateSubtitles(kind: String, fileId: Int) async -> SubJob? {
+        do {
+            let (data, http) = try await request("api/subtitles/generate", method: "POST",
+                                                 body: ["kind": kind, "fileId": fileId, "target": "orig"])
+            guard (200..<300).contains(http.statusCode) else {
+                return SubJob(status: "error", pct: nil, phase: nil, error: serverError(data) ?? "Couldn't start.")
+            }
+            return try? decoder().decode(SubJob.self, from: data)
+        } catch { return SubJob(status: "error", pct: nil, phase: nil, error: "Couldn't reach the server.") }
+    }
+    func subtitleJobStatus(kind: String, fileId: Int) async -> SubJob? {
+        await get("api/subtitles/generate?kind=\(kind)&fileId=\(fileId)&target=orig", as: SubJob.self)
+    }
+
+    // Mark a Continue Watching entry watched (the web card's ✓) and drop it.
+    func markContinueWatched(_ item: ContinueItem) async {
+        let path = item.kind == "movie" ? "api/movies/\(item.id)/watched" : "api/episodes/\(item.id)/watched"
+        _ = try? await request(path, method: "POST", body: ["watched": true])
+        continueItems.removeAll { $0.kind == item.kind && $0.id == item.id }
     }
 
     // Pre-roll clip URL (plays before a movie), or nil if none configured.

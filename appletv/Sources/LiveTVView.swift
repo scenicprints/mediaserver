@@ -174,9 +174,9 @@ struct LiveTVView: View {
     @FocusState private var focusedChannel: Int?
     private let timer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
 
-    private let ppm: CGFloat = 13          // points per guide-minute
+    private let ppm: CGFloat = 12          // points per guide-minute
     private let windowMin: Double = 90
-    private let labelW: CGFloat = 230
+    private let labelW: CGFloat = 310      // room for full channel names
 
     var body: some View {
         ZStack {
@@ -210,6 +210,14 @@ struct LiveTVView: View {
     // Full-bleed hero for the focused channel's current program.
     @ViewBuilder private func preview(_ ch: LiveChannel) -> some View {
         let on = LiveTV.nowOn(ch, now.timeIntervalSince1970)
+        ZStack(alignment: .topLeading) {
+            previewArt(ch, on: on)
+            MarqueeWordmark()
+                .padding(.leading, Theme.gutter).padding(.top, 46)
+        }
+    }
+
+    @ViewBuilder private func previewArt(_ ch: LiveChannel, on: (item: LiveItem, offset: Double, endsIn: Double, idx: Int)) -> some View {
         ZStack(alignment: .bottomLeading) {
             ArtImage(url: on.item.backdrop ?? on.item.still ?? on.item.poster, aspect: 16.0 / 9.0)
                 .frame(height: 640).frame(maxWidth: .infinity).clipped()
@@ -257,10 +265,11 @@ struct LiveTVView: View {
 
     // The EPG grid: a shared timeline, programs positioned by their real air
     // time (so different lengths start at different points), with a live red
-    // playhead marking "now". The window opens 20 min in the past for context.
+    // playhead marking "now". The window starts on the half hour (web drawEpg
+    // floors to :00/:30) so the time axis reads 3:00 / 3:30 — not 2:53.
     private var guide: some View {
         let nowSec = now.timeIntervalSince1970
-        let winStart = nowSec - 20 * 60
+        let winStart = (nowSec / 1800).rounded(.down) * 1800   // floor to :00/:30
         let winEnd = winStart + windowMin * 60
         let nowX = Theme.gutter + labelW + CGFloat((nowSec - winStart) / 60) * ppm
         return VStack(alignment: .leading, spacing: 10) {
@@ -273,7 +282,7 @@ struct LiveTVView: View {
             // Time axis (every 30 min across the window).
             HStack(spacing: 0) {
                 Color.clear.frame(width: labelW)
-                ForEach(0..<4, id: \.self) { i in
+                ForEach(0..<Int(windowMin / 30), id: \.self) { i in
                     Text(clock(winStart + Double(i) * 30 * 60))
                         .font(.caption).foregroundStyle(.secondary)
                         .frame(width: 30 * ppm, alignment: .leading)
@@ -298,15 +307,26 @@ struct LiveTVView: View {
 
     private func channelRow(_ ch: LiveChannel, winStart: Double, winEnd: Double, nowSec: Double) -> some View {
         let progs = LiveTV.window(ch, from: winStart, to: winEnd)
+        let focused = focusedChannel == ch.id
         return Button {
             let on = LiveTV.nowOn(ch, now.timeIntervalSince1970)
             tuned = TunedLive(item: on.item, offset: on.offset)
         } label: {
             HStack(spacing: 0) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("\(ch.number)  \(ch.name)").font(.callout).fontWeight(.bold).lineLimit(1)
-                    Text(ch.sub).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                HStack(spacing: 10) {
+                    Text("\(ch.number)")
+                        .font(.callout).fontWeight(.heavy)
+                        .foregroundStyle(focused ? .white : Theme.muted)
+                        .frame(width: 44, alignment: .trailing)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(ch.name)
+                            .font(.callout).fontWeight(.bold).lineLimit(1)
+                            .minimumScaleFactor(0.75)
+                            .foregroundStyle(focused ? Theme.accent2 : .white)
+                        Text(ch.sub).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                    }
                 }
+                .padding(.trailing, 10)
                 .frame(width: labelW, alignment: .leading)
 
                 ZStack(alignment: .topLeading) {
@@ -329,9 +349,14 @@ struct LiveTVView: View {
                 .frame(width: windowMin * ppm, height: 66, alignment: .topLeading)
                 .clipped()
             }
+            .padding(.vertical, 6)
             .padding(.leading, Theme.gutter)
+            // Focus cue: a soft row tint + accent channel name — NOT the stock
+            // white platter, which read as a giant white bar across the guide.
+            .background(focused ? Color.white.opacity(0.07) : .clear,
+                        in: RoundedRectangle(cornerRadius: 10))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(GuideRowButtonStyle())
         .focused($focusedChannel, equals: ch.id)
     }
 
@@ -346,6 +371,15 @@ struct LiveTVView: View {
         episodes = await store.loadLiveEpisodes()
         channels = LiveTV.build(movies: store.movies, episodes: episodes)
         loading = false
+    }
+}
+
+// A no-chrome button style for guide rows: keeps tvOS focusability but draws
+// none of the stock focus platter (the row renders its own focus cue).
+struct GuideRowButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.99 : 1)
     }
 }
 
@@ -365,10 +399,13 @@ struct LivePlayer: View {
     @State private var dur: Double?
     @State private var failed = false
 
+    @State private var fileId: Int?
+
     var body: some View {
         Group {
             if let url, let ref {
-                PlayerView(url: url, startAt: offset, ref: ref, duration: dur, store: store)
+                PlayerView(url: url, startAt: offset, ref: ref, duration: dur, store: store,
+                           title: item.title, subtitle: item.sub, fileId: fileId, live: true)
             } else if failed {
                 ZStack { Color.black; Text("Can't play this right now.").foregroundStyle(.white) }
             } else {
@@ -380,11 +417,11 @@ struct LivePlayer: View {
 
     private func resolve() async {
         if let mid = item.movieLocalId, let d = await store.movieDetail(mid), let f = d.bestFile {
-            url = store.playbackURL(kind: "movie", file: f); ref = .movie(mid); dur = d.duration
+            url = store.playbackURL(kind: "movie", file: f); ref = .movie(mid); dur = d.duration; fileId = f.id
         } else if let sid = item.showId, let epId = item.epId, let d = await store.showDetail(sid) {
             let ep = d.seasons.flatMap { $0.episodes }.first { $0.id == epId }
             if let ep, let f = ep.bestFile {
-                url = store.playbackURL(kind: "episode", file: f); ref = .episode(epId); dur = ep.duration
+                url = store.playbackURL(kind: "episode", file: f); ref = .episode(epId); dur = ep.duration; fileId = f.id
             }
         }
         if url == nil { failed = true }

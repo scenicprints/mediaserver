@@ -511,7 +511,7 @@ app.get('/api/continue', async (req) => {
   ).all(uid);
   const episodes = db.prepare(
     `SELECT 'episode' AS kind, e.id, COALESCE(e.title, 'Episode ' || e.episode) AS title,
-            s.poster AS poster, w.resume_position, e.duration, w.last_played_at,
+            s.title AS show_title, s.poster AS poster, w.resume_position, e.duration, w.last_played_at,
             s.id AS show_id, e.season, e.episode
      FROM watch_state w JOIN episodes e ON e.id = w.item_id JOIN shows s ON s.id = e.show_id
      WHERE w.user_id = ? AND w.kind = 'episode' AND w.resume_position > 30 AND w.watched = 0 AND w.last_played_at IS NOT NULL`
@@ -563,6 +563,20 @@ app.get('/api/shows/:id/extra', async (req, reply) => {
   if (!s) return reply.code(404).send({ error: 'not found' });
   const extra = (await showExtra(config.tmdbApiKey, s.tmdb_id)) || { seasons: [] };
   extra.alsoOn = await alsoOnFor(req, 'tv', s.tmdb_id); // enabled services that also carry it
+  // Cast for the show detail page (movies get theirs via movieExtra) — the
+  // Apple TV's show "description window" renders it like the movie page.
+  if (config.tmdbApiKey && s.tmdb_id && !extra.cast) {
+    try {
+      const cr = await fetch(`https://api.themoviedb.org/3/tv/${s.tmdb_id}/credits?api_key=${config.tmdbApiKey}`);
+      if (cr.ok) {
+        const c = await cr.json();
+        extra.cast = (c.cast || []).slice(0, 16).map((p) => ({
+          name: p.name, character: p.character || null,
+          profile: p.profile_path ? `https://image.tmdb.org/t/p/w300${p.profile_path}` : null
+        }));
+      }
+    } catch { /* cast is optional enrichment */ }
+  }
   return extra;
 });
 
@@ -1574,7 +1588,7 @@ async function start() {
   // (walking 1000s of files off HDDs) and TMDB enrichment then run in the
   // background instead of holding the port closed. This fixes "the server takes
   // forever to come back after an update."
-  registerHls(app, db); // Apple TV HLS transcode routes (/api/hls/*)
+  registerHls(app, db, { allSubtitleTracks }); // Apple TV HLS transcode routes (/api/hls/*)
   await app.listen({ port: config.port, host: config.host });
   console.log(`\n  Media server running at http://localhost:${config.port}\n`);
 
