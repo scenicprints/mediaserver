@@ -125,7 +125,7 @@ private struct PlayerFor: View {
 
     var body: some View {
         Group {
-            if let d = detail, let f = d.bestFile, let url = store.streamURL(fileId: f.id) {
+            if let d = detail, let f = d.bestFile, let url = store.playbackURL(kind: "movie", file: f) {
                 PlayerView(url: url, startAt: offset, ref: .movie(d.id), duration: d.duration, store: store)
             } else {
                 ZStack { Color.black; ProgressView().tint(.white) }

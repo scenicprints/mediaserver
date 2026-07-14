@@ -386,6 +386,19 @@ final class Store: ObservableObject {
         return URL(string: "\(cleanBase)/api/stream/episode/\(fileId)?token=\(t)")
     }
 
+    // Pick the right URL for a file: AVPlayer plays mp4/m4v/mov containers
+    // directly (range streaming); anything else (mkv/avi/…) goes through the
+    // server's HLS transcode endpoint so it plays on the Apple TV.
+    func playbackURL(kind: String, file: MovieFile) -> URL? {
+        guard let t = token else { return nil }
+        let ext = (file.filename as NSString?)?.pathExtension.lowercased() ?? ""
+        let native: Set<String> = ["mp4", "m4v", "mov"]
+        if native.contains(ext) {
+            return kind == "episode" ? episodeStreamURL(fileId: file.id) : streamURL(fileId: file.id)
+        }
+        return URL(string: "\(cleanBase)/api/hls/\(kind)/\(file.id)/index.m3u8?token=\(t)&\(audioQuery())")
+    }
+
     // Pre-roll clip URL (plays before a movie), or nil if none configured.
     func prerollURL() async -> URL? {
         struct R: Decodable { let available: Bool; let url: String?; let mode: String? }

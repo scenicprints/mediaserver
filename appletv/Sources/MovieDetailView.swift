@@ -26,7 +26,7 @@ struct MovieDetailView: View {
         }
         .task { await load() }
         .fullScreenCover(isPresented: $playing) {
-            if let f = selectedFile ?? detail?.bestFile, let url = store.streamURL(fileId: f.id) {
+            if let f = selectedFile ?? detail?.bestFile, let url = store.playbackURL(kind: "movie", file: f) {
                 PlayerView(url: url, startAt: resumeFrom,
                            ref: .movie(movieId), duration: detail?.duration, store: store,
                            prerollURL: preroll)

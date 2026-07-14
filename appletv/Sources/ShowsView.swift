@@ -49,7 +49,7 @@ struct ShowDetailView: View {
         }
         .task { await load() }
         .fullScreenCover(item: $playing) { ep in
-            if let f = ep.bestFile, let url = store.episodeStreamURL(fileId: f.id) {
+            if let f = ep.bestFile, let url = store.playbackURL(kind: "episode", file: f) {
                 PlayerView(url: url, startAt: ep.resumePosition ?? 0,
                            ref: .episode(ep.id), duration: ep.duration, store: store)
                     .ignoresSafeArea()
