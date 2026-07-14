@@ -8,11 +8,11 @@ import AVKit
 struct PlayerView: UIViewControllerRepresentable {
     let url: URL
     let startAt: Double
-    let movieId: Int
+    let ref: Store.PlayRef
     let duration: Double?
     let store: Store
 
-    func makeCoordinator() -> Coordinator { Coordinator(store: store, movieId: movieId, duration: duration) }
+    func makeCoordinator() -> Coordinator { Coordinator(store: store, ref: ref, duration: duration) }
 
     func makeUIViewController(context: Context) -> AVPlayerViewController {
         let player = AVPlayer(url: url)
@@ -46,14 +46,14 @@ struct PlayerView: UIViewControllerRepresentable {
     @MainActor
     final class Coordinator {
         let store: Store
-        let movieId: Int
+        let ref: Store.PlayRef
         let duration: Double?
         var player: AVPlayer?
         var timeObserver: Any?
         private var lastSaved: Double = 0
 
-        init(store: Store, movieId: Int, duration: Double?) {
-            self.store = store; self.movieId = movieId; self.duration = duration
+        init(store: Store, ref: Store.PlayRef, duration: Double?) {
+            self.store = store; self.ref = ref; self.duration = duration
         }
 
         func report(position: Double, item: AVPlayerItem?) {
@@ -63,7 +63,7 @@ struct PlayerView: UIViewControllerRepresentable {
             let total = (dur?.isFinite == true) ? dur : nil
             // Mark watched once past ~92% so it drops out of Continue Watching.
             let watched = (total.map { position / $0 } ?? 0) > 0.92
-            Task { await store.saveProgress(movieId: movieId, position: position,
+            Task { await store.saveProgress(ref, position: position,
                                             duration: total, watched: watched ? true : nil) }
         }
 
@@ -71,7 +71,7 @@ struct PlayerView: UIViewControllerRepresentable {
             guard let p = finalPosition, p.isFinite, p > 1 else { return }
             let total = (duration?.isFinite == true) ? duration : nil
             let watched = (total.map { p / $0 } ?? 0) > 0.92
-            Task { await store.saveProgress(movieId: movieId, position: p,
+            Task { await store.saveProgress(ref, position: p,
                                             duration: total, watched: watched ? true : nil) }
         }
     }

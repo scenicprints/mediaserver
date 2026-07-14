@@ -19,6 +19,8 @@ struct MediaServerApp: App {
 // Navigation targets pushed within a tab's NavigationStack.
 enum Route: Hashable {
     case movie(Int)
+    case show(Int)
+    case collection(String)
 }
 
 struct ContentView: View {
@@ -30,11 +32,11 @@ struct ContentView: View {
                 TabView {
                     NavTab { HomeView(route: $0) }.tabItem { Text("Home") }
                     NavTab { MoviesView(route: $0) }.tabItem { Text("Movies") }
-                    ComingSoon(name: "TV Shows").tabItem { Text("TV") }
+                    NavTab { ShowsView(route: $0) }.tabItem { Text("TV") }
                     ComingSoon(name: "Live TV").tabItem { Text("Live TV") }
-                    ComingSoon(name: "Collections").tabItem { Text("Collections") }
+                    NavTab { CollectionsView(route: $0) }.tabItem { Text("Collections") }
                     ComingSoon(name: "Requests").tabItem { Text("Requests") }
-                    ComingSoon(name: "Search").tabItem { Text("Search") }
+                    NavTab { SearchView(route: $0) }.tabItem { Text("Search") }
                     SettingsView().tabItem { Text("Settings") }
                 }
             } else {
@@ -56,6 +58,8 @@ struct NavTab<Content: View>: View {
                 .navigationDestination(for: Route.self) { route in
                     switch route {
                     case .movie(let id): MovieDetailView(movieId: id)
+                    case .show(let id): ShowDetailView(showId: id)
+                    case .collection(let id): CollectionDetailView(route: $path, collectionId: id)
                     }
                 }
         }

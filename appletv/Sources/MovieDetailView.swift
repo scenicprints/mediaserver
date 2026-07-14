@@ -26,7 +26,7 @@ struct MovieDetailView: View {
         .fullScreenCover(isPresented: $playing) {
             if let d = detail, let f = d.bestFile, let url = store.streamURL(fileId: f.id) {
                 PlayerView(url: url, startAt: resumeFrom,
-                           movieId: d.id, duration: d.duration, store: store)
+                           ref: .movie(d.id), duration: d.duration, store: store)
                     .ignoresSafeArea()
             }
         }

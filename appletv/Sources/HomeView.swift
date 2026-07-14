@@ -22,6 +22,7 @@ struct HomeView: View {
                             ContinueCard(title: item.title, subtitle: item.subtitle,
                                          posterURL: item.poster, progress: item.progressFraction) {
                                 if item.kind == "movie" { route.append(.movie(item.id)) }
+                                else if let sid = item.showId { route.append(.show(sid)) }
                             }
                         }
                     }
@@ -43,7 +44,9 @@ struct HomeView: View {
                     MediaRow(title: "TV Shows") {
                         ForEach(store.shows.prefix(30)) { show in
                             PosterCard(title: show.title, posterURL: show.poster,
-                                       subtitle: show.year.map(String.init)) { /* show detail — next pass */ }
+                                       subtitle: show.year.map(String.init)) {
+                                route.append(.show(show.id))
+                            }
                         }
                     }
                 }
@@ -52,7 +55,9 @@ struct HomeView: View {
                     MediaRow(title: "Collections") {
                         ForEach(store.collections.prefix(20)) { col in
                             PosterCard(title: col.name, posterURL: col.poster,
-                                       subtitle: col.count.map { "\($0) films" }) { /* collection — next pass */ }
+                                       subtitle: col.count.map { "\($0) films" }) {
+                                route.append(.collection(col.id))
+                            }
                         }
                     }
                 }

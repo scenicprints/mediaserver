@@ -98,6 +98,53 @@ struct MovieDetail: Decodable {
     var bestFile: MovieFile? { files.first }   // server sorts highest quality first
 }
 
+// ---- TV: /api/shows/:id returns the show + seasons -> episodes -> files ----
+struct Episode: Identifiable, Decodable, Hashable {
+    let id: Int
+    let season: Int?
+    let episode: Int?
+    let title: String?
+    let overview: String?
+    let still: String?
+    let duration: Double?
+    let resumePosition: Double?
+    let watched: Int?
+    let files: [MovieFile]
+
+    var bestFile: MovieFile? { files.first }
+    var displayTitle: String { title ?? "Episode \(episode ?? 0)" }
+    var tag: String { "S\(season ?? 0) · E\(episode ?? 0)" }
+    var progressFraction: Double {
+        guard let d = duration, d > 0, let p = resumePosition else { return 0 }
+        return min(max(p / d, 0), 1)
+    }
+}
+struct Season: Decodable, Hashable {
+    let season: Int
+    let episodes: [Episode]
+}
+struct ShowDetail: Decodable {
+    let id: Int
+    let title: String
+    let year: Int?
+    let poster: String?
+    let backdrop: String?
+    let overview: String?
+    let rating: Double?
+    let genres: String?
+    let seasons: [Season]
+
+    var genreList: [String] { Store.parseJSONStrings(genres) }
+}
+
+// ---- /api/collections/:id : the collection's owned movies, in order ----
+struct CollectionDetail: Decodable {
+    let name: String?
+    let poster: String?
+    let backdrop: String?
+    let items: [Movie]
+}
+
 struct User: Decodable { let username: String; let role: String }
 private struct LoginResponse: Decodable { let token: String; let user: User }
 private struct MeResponse: Decodable { let user: User }
@@ -234,22 +281,44 @@ final class Store: ObservableObject {
     func movieDetail(_ id: Int) async -> MovieDetail? {
         await get("api/movies/\(id)", as: MovieDetail.self)
     }
-
-    // ---- Playback ----
-    // AVPlayer can't set an Authorization header, so it streams via ?token= on
-    // the URL (the server accepts that). Highest-quality file is files.first.
-    func streamURL(fileId: Int) -> URL? {
-        guard let t = token else { return nil }
-        let base = serverURL.trimmingCharacters(in: .whitespaces).hasSuffix("/")
-            ? String(serverURL.dropLast()) : serverURL
-        return URL(string: "\(base)/api/stream/\(fileId)?token=\(t)")
+    func showDetail(_ id: Int) async -> ShowDetail? {
+        await get("api/shows/\(id)", as: ShowDetail.self)
+    }
+    func collectionDetail(_ id: String) async -> CollectionDetail? {
+        let enc = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
+        return await get("api/collections/\(enc)", as: CollectionDetail.self)
     }
 
-    func saveProgress(movieId: Int, position: Double, duration: Double?, watched: Bool? = nil) async {
+    // ---- Playback ----
+    // A movie or a TV episode — they stream and save progress at different paths.
+    enum PlayRef: Hashable { case movie(Int), episode(Int) }
+
+    private var cleanBase: String {
+        let s = serverURL.trimmingCharacters(in: .whitespaces)
+        return s.hasSuffix("/") ? String(s.dropLast()) : s
+    }
+
+    // AVPlayer can't set an Authorization header, so it streams via ?token= on
+    // the URL (the server accepts that). Pass the best file's id.
+    func streamURL(fileId: Int) -> URL? {
+        guard let t = token else { return nil }
+        return URL(string: "\(cleanBase)/api/stream/\(fileId)?token=\(t)")
+    }
+    func episodeStreamURL(fileId: Int) -> URL? {
+        guard let t = token else { return nil }
+        return URL(string: "\(cleanBase)/api/stream/episode/\(fileId)?token=\(t)")
+    }
+
+    func saveProgress(_ ref: PlayRef, position: Double, duration: Double?, watched: Bool? = nil) async {
         var body: [String: Any] = ["position": position]
         if let duration { body["duration"] = duration }
         if let watched { body["watched"] = watched }
-        _ = try? await request("api/movies/\(movieId)/progress", method: "POST", body: body)
+        let path: String
+        switch ref {
+        case .movie(let id):   path = "api/movies/\(id)/progress"
+        case .episode(let id): path = "api/episodes/\(id)/progress"
+        }
+        _ = try? await request(path, method: "POST", body: body)
     }
 
     private func serverError(_ data: Data) -> String? {
