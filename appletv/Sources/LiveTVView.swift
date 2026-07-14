@@ -1,173 +1,363 @@
 import SwiftUI
 
-// Live TV: synthesize genre "channels" from the library and air them on a
-// wall-clock schedule, like the web app — tune in and you join whatever is
-// "currently playing" partway through. Built from loaded movies (which carry
-// durations and are directly playable).
-struct LiveChannel: Identifiable, Hashable {
-    let id: Int
-    let name: String
-    let sub: String
-    let movies: [Movie]
+// ============================================================================
+// Live TV — a DirecTV-style guide synthesized from the library. Genre channels
+// air movies AND TV episodes on a deterministic wall-clock schedule (seeded by
+// LT_EPOCH so every device shows the same thing), with a hero preview and an EPG
+// grid. Mirrors the web Live TV view.
+// ============================================================================
+
+struct LiveItem: Hashable {
+    let kind: String            // "movie" | "episode"
+    let title: String
+    let sub: String?
+    let genres: [String]
+    let year: Int?
+    let rating: Double?
+    let duration: Double        // seconds (already resolved)
+    let backdrop: String?
+    let poster: String?
+    let still: String?
+    let overview: String?
+    let movieLocalId: Int?
+    let showId: Int?
+    let epId: Int?
 }
 
+struct LiveChannel: Identifiable, Hashable {
+    let id: Int
+    let number: Int
+    let name: String
+    let sub: String
+    let playlist: [LiveItem]
+    let total: Double
+}
+
+struct LiveProgram: Identifiable {
+    let id = UUID()
+    let item: LiveItem
+    let start: Double
+    let end: Double
+}
+
+enum LiveTV {
+    static let epoch: Double = 1704067200   // matches web LT_EPOCH
+
+    static func tier(_ g: [String]) -> String {
+        let mature = ["Horror", "War"], soft = ["Thriller", "Crime"], family = ["Family", "Kids"]
+        if g.contains(where: mature.contains) { return "mature" }
+        if g.contains(where: soft.contains) && !g.contains(where: family.contains) { return "mature" }
+        if g.contains(where: family.contains) { return "family" }
+        if g.contains("Animation") && !g.contains(where: (mature + soft).contains) { return "family" }
+        return "general"
+    }
+    static func audOk(_ it: LiveItem, mature: Bool) -> Bool {
+        mature ? tier(it.genres) != "family" : tier(it.genres) != "mature"
+    }
+
+    static func pool(movies: [Movie], episodes: [LiveEpisode]) -> [LiveItem] {
+        let mv = movies.filter { !$0.isStream && ($0.backdrop != nil || $0.poster != nil) }.map {
+            LiveItem(kind: "movie", title: $0.title, sub: $0.year.map(String.init), genres: $0.genreList,
+                     year: $0.year, rating: $0.rating,
+                     duration: $0.runtime.map { Double($0) * 60 } ?? $0.duration ?? 6300,
+                     backdrop: $0.backdrop, poster: $0.poster, still: nil, overview: $0.overview,
+                     movieLocalId: $0.localId, showId: nil, epId: nil)
+        }
+        let ep = episodes.map { e -> LiveItem in
+            let g = Store.parseJSONStrings(e.genres)
+            let tag = "S\(e.season ?? 0)·E\(e.episode ?? 0)"
+            return LiveItem(kind: "episode", title: e.showTitle ?? "Episode",
+                            sub: [tag, e.epTitle].compactMap { $0 }.joined(separator: " · "),
+                            genres: g, year: e.year, rating: e.rating, duration: e.duration ?? 1800,
+                            backdrop: e.backdrop, poster: e.poster, still: e.still, overview: e.overview,
+                            movieLocalId: nil, showId: e.showId, epId: e.epId)
+        }
+        return mv + ep
+    }
+
+    struct Def { let name: String; let sub: String; let mature: Bool; let pick: (LiveItem) -> Bool; let sort: ((LiveItem, LiveItem) -> Bool)? }
+    static func defs() -> [Def] {
+        func has(_ it: LiveItem, _ g: String) -> Bool { it.genres.contains(g) }
+        func hasAny(_ it: LiveItem, _ gs: [String]) -> Bool { it.genres.contains(where: gs.contains) }
+        let byRating: (LiveItem, LiveItem) -> Bool = { ($0.rating ?? 0) > ($1.rating ?? 0) }
+        let byYear: (LiveItem, LiveItem) -> Bool = { ($0.year ?? 0) > ($1.year ?? 0) }
+        func decade(_ it: LiveItem, _ d: Int) -> Bool { let y = it.year ?? 0; return y >= d && y < d + 10 }
+        return [
+            Def(name: "PRIME", sub: "Feature Films", mature: false, pick: { $0.kind == "movie" }, sort: byRating),
+            Def(name: "BINGE TV", sub: "Series Marathon", mature: false, pick: { $0.kind == "episode" }, sort: nil),
+            Def(name: "ADRENALINE", sub: "Action", mature: false, pick: { has($0, "Action") }, sort: byRating),
+            Def(name: "THE LAUGH TRACK", sub: "Comedy", mature: false, pick: { has($0, "Comedy") }, sort: nil),
+            Def(name: "NIGHTMARE", sub: "Horror", mature: true, pick: { has($0, "Horror") }, sort: nil),
+            Def(name: "PRESTIGE", sub: "Drama", mature: false, pick: { has($0, "Drama") }, sort: byRating),
+            Def(name: "FAMILY ROOM", sub: "Family & Kids", mature: false, pick: { tier($0.genres) == "family" }, sort: nil),
+            Def(name: "NEBULA", sub: "Science Fiction", mature: false, pick: { has($0, "Science Fiction") }, sort: nil),
+            Def(name: "PRECINCT", sub: "Crime", mature: true, pick: { has($0, "Crime") }, sort: nil),
+            Def(name: "MYTHOS", sub: "Fantasy", mature: false, pick: { has($0, "Fantasy") }, sort: nil),
+            Def(name: "PULSE", sub: "Thrillers", mature: true, pick: { has($0, "Thriller") }, sort: nil),
+            Def(name: "TRAILBLAZER", sub: "Adventure", mature: false, pick: { has($0, "Adventure") }, sort: nil),
+            Def(name: "HEARTLINE", sub: "Romance", mature: false, pick: { has($0, "Romance") }, sort: nil),
+            Def(name: "TOP SHELF", sub: "Top Rated", mature: false, pick: { ($0.rating ?? 0) >= 7.5 }, sort: byRating),
+            Def(name: "TOON CITY", sub: "Animation", mature: false, pick: { has($0, "Animation") }, sort: nil),
+            Def(name: "AFTER DARK", sub: "Late Night", mature: true, pick: { hasAny($0, ["Horror", "Thriller", "Crime"]) }, sort: byRating),
+            Def(name: "FRESH", sub: "New Releases", mature: false, pick: { ($0.year ?? 0) >= 2020 }, sort: byYear),
+            Def(name: "REWIND 90s", sub: "1990s", mature: false, pick: { decade($0, 1990) }, sort: nil),
+            Def(name: "FLASHBACK 00s", sub: "2000s", mature: false, pick: { decade($0, 2000) }, sort: nil),
+            Def(name: "SITCOM CENTRAL", sub: "TV Comedies", mature: false, pick: { $0.kind == "episode" && has($0, "Comedy") }, sort: nil),
+            Def(name: "THE SERIAL", sub: "TV Dramas", mature: false, pick: { $0.kind == "episode" && has($0, "Drama") }, sort: byRating),
+        ]
+    }
+
+    static func build(movies: [Movie], episodes: [LiveEpisode]) -> [LiveChannel] {
+        let all = pool(movies: movies, episodes: episodes)
+        guard !all.isEmpty else { return [] }
+        var out: [LiveChannel] = []
+        for d in defs() {
+            if out.count >= 25 { break }
+            var items = all.filter { d.pick($0) && audOk($0, mature: d.mature) }
+            if items.count < 3 { continue }
+            if let s = d.sort { items.sort(by: s) }
+            let playlist = seededShuffle(items, seed: fnv(d.name))
+            let total = playlist.reduce(0) { $0 + $1.duration }
+            out.append(LiveChannel(id: out.count, number: out.count + 2, name: d.name, sub: d.sub,
+                                   playlist: playlist, total: total))
+        }
+        return out
+    }
+
+    static func nowOn(_ ch: LiveChannel, _ atSec: Double) -> (item: LiveItem, offset: Double, endsIn: Double, idx: Int) {
+        guard ch.total > 0 else { return (ch.playlist[0], 0, ch.playlist[0].duration, 0) }
+        var pos = (atSec - epoch).truncatingRemainder(dividingBy: ch.total)
+        if pos < 0 { pos += ch.total }
+        for (i, it) in ch.playlist.enumerated() {
+            if pos < it.duration { return (it, pos, it.duration - pos, i) }
+            pos -= it.duration
+        }
+        return (ch.playlist[0], 0, ch.playlist[0].duration, 0)
+    }
+
+    static func window(_ ch: LiveChannel, from: Double, to: Double) -> [LiveProgram] {
+        let first = nowOn(ch, from)
+        var start = from - first.offset
+        var idx = first.idx
+        var out: [LiveProgram] = []
+        var guardN = 0
+        while start < to && guardN < 40 {
+            let it = ch.playlist[idx % ch.playlist.count]
+            out.append(LiveProgram(item: it, start: start, end: start + it.duration))
+            start += it.duration; idx += 1; guardN += 1
+        }
+        return out
+    }
+
+    private static func fnv(_ s: String) -> UInt32 {
+        var h: UInt32 = 2166136261
+        for b in s.utf8 { h ^= UInt32(b); h = h &* 16777619 }
+        return h
+    }
+    private static func seededShuffle(_ arr: [LiveItem], seed: UInt32) -> [LiveItem] {
+        var a = arr, s = seed == 0 ? 1 : seed
+        func rnd() -> Double { s = s &* 1103515245 &+ 12345; return Double(s & 0x7fffffff) / Double(0x7fffffff) }
+        for i in stride(from: a.count - 1, to: 0, by: -1) { a.swapAt(i, Int(rnd() * Double(i + 1))) }
+        return a
+    }
+}
+
+// ---- The view ----
 struct LiveTVView: View {
     @EnvironmentObject var store: Store
-    @State private var tuned: TunedItem?
-    // Re-render the "now airing" line every 30s so the guide stays current.
-    @State private var tick = Date()
+    @State private var channels: [LiveChannel] = []
+    @State private var episodes: [LiveEpisode] = []
+    @State private var loading = true
+    @State private var selected = 0
+    @State private var tuned: TunedLive?
+    @State private var now = Date()
+    @FocusState private var focusedChannel: Int?
     private let timer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
 
-    private var channels: [LiveChannel] { Self.build(from: store.movies.filter { !$0.isStream }) }
+    private let ppm: CGFloat = 13          // points per guide-minute
+    private let windowMin: Double = 90
+    private let labelW: CGFloat = 230
 
     var body: some View {
         ZStack {
             Theme.bg.ignoresSafeArea()
-            if channels.isEmpty {
+            if loading {
+                ProgressView("Tuning in…").scaleEffect(1.4)
+            } else if channels.isEmpty {
                 VStack(spacing: 14) {
                     Image(systemName: "dot.radiowaves.left.and.right").font(.system(size: 60)).foregroundStyle(Theme.accent)
-                    Text("Add some movies to start broadcasting.").foregroundStyle(.secondary)
+                    Text("Add movies or shows to start broadcasting.").foregroundStyle(.secondary)
                 }
             } else {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack(spacing: 14) {
-                            Circle().fill(.red).frame(width: 18, height: 18)
-                            Text("LIVE GUIDE").font(.title).fontWeight(.heavy).kerning(2)
-                        }
-                        .padding(.horizontal, Theme.gutter).padding(.top, 40).padding(.bottom, 12)
-
-                        LazyVStack(spacing: 20) {
-                            ForEach(channels) { ch in
-                                if let (movie, offset) = nowAiring(ch) {
-                                    ChannelRow(channel: ch, movie: movie,
-                                               progress: progress(movie, offset)) {
-                                        tuned = TunedItem(movie: movie, offset: offset)
-                                    }
-                                }
-                            }
-                        }
-                        .padding(.horizontal, Theme.gutter).padding(.bottom, Theme.gutter)
+                    VStack(alignment: .leading, spacing: 24) {
+                        if channels.indices.contains(selected) { preview(channels[selected]) }
+                        guide
                     }
+                    .padding(.bottom, Theme.gutter)
                 }
-                .onReceive(timer) { tick = $0 }
             }
         }
-        .task { if store.movies.isEmpty { await store.loadHome() } }
-        .fullScreenCover(item: $tuned) { item in
-            PlayerFor(movie: item.movie, offset: item.offset)
-                .environmentObject(store)
-                .ignoresSafeArea()
+        .task { await load() }
+        .onReceive(timer) { now = $0 }
+        .onChange(of: focusedChannel) { if let f = focusedChannel { selected = f } }
+        .fullScreenCover(item: $tuned) { t in
+            LivePlayer(item: t.item, offset: t.offset).environmentObject(store).ignoresSafeArea()
         }
     }
 
-    // The item + in-item offset "airing now" on a channel, from wall-clock time.
-    private func nowAiring(_ ch: LiveChannel) -> (Movie, Double)? {
-        _ = tick
-        let durs = ch.movies.map { runtimeSeconds($0) }
-        let total = durs.reduce(0, +)
-        guard total > 0 else { return nil }
-        // Offset each channel's timeline so they're not all in sync.
-        var t = Int(Date().timeIntervalSince1970 + Double(ch.id) * 1234).quotientAndRemainder(dividingBy: Int(total)).remainder
-        for (i, d) in durs.enumerated() {
-            if Double(t) < d { return (ch.movies[i], Double(t)) }
-            t -= Int(d)
+    // Full-bleed hero for the focused channel's current program.
+    @ViewBuilder private func preview(_ ch: LiveChannel) -> some View {
+        let on = LiveTV.nowOn(ch, now.timeIntervalSince1970)
+        ZStack(alignment: .bottomLeading) {
+            ArtImage(url: on.item.backdrop ?? on.item.still ?? on.item.poster, aspect: 16.0 / 9.0)
+                .frame(height: 560).frame(maxWidth: .infinity).clipped()
+                .overlay {
+                    LinearGradient(stops: [
+                        .init(color: Theme.bg, location: 0.0),
+                        .init(color: Theme.bg.opacity(0.35), location: 0.5),
+                        .init(color: .clear, location: 0.9)
+                    ], startPoint: .bottom, endPoint: .top)
+                }
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 14) {
+                    Text("\(ch.number)").font(.headline).fontWeight(.heavy)
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .background(Theme.accent, in: RoundedRectangle(cornerRadius: 8))
+                    Text(ch.name).font(.title3).fontWeight(.heavy).kerning(2)
+                    HStack(spacing: 6) { Circle().fill(.red).frame(width: 12, height: 12); Text("LIVE").font(.caption).fontWeight(.bold) }
+                }
+                Text(on.item.title).font(.system(size: 52, weight: .bold)).shadow(radius: 10).lineLimit(1)
+                HStack(spacing: 14) {
+                    if let y = on.item.year { Chip(String(y)) }
+                    if let r = on.item.rating, r > 0 { Chip(String(format: "★ %.1f", r)) }
+                    if let s = on.item.sub { Chip(s) }
+                }
+                ProgressView(value: min(on.offset / on.item.duration, 1))
+                    .tint(Theme.accent).frame(maxWidth: 560)
+                Text("\(Int(on.offset / 60)) min in · Up next \(clock(now.timeIntervalSince1970 + on.endsIn))")
+                    .font(.callout).foregroundStyle(.secondary)
+                Button { tuned = TunedLive(item: on.item, offset: on.offset) } label: {
+                    Label("Tune In", systemImage: "play.fill").font(.headline).padding(.horizontal, 18)
+                }
+                .buttonStyle(.borderedProminent).tint(Theme.accent).padding(.top, 4)
+            }
+            .padding(.horizontal, Theme.gutter).padding(.bottom, 36)
         }
-        return (ch.movies[0], 0)
-    }
-    private func progress(_ m: Movie, _ offset: Double) -> Double {
-        let d = runtimeSeconds(m); return d > 0 ? min(offset / d, 1) : 0
-    }
-    private func runtimeSeconds(_ m: Movie) -> Double {
-        if let d = m.duration, d > 0 { return d }
-        if let r = m.runtime, r > 0 { return Double(r) * 60 }
-        return 6000
     }
 
-    // Channel definitions mirroring the web app's live line-up (movie-applicable).
-    static func build(from movies: [Movie]) -> [LiveChannel] {
-        func has(_ m: Movie, _ g: String) -> Bool { m.genreList.contains(g) }
-        let defs: [(String, String, (Movie) -> Bool)] = [
-            ("PRIME", "Feature Films", { _ in true }),
-            ("ADRENALINE", "Action", { has($0, "Action") }),
-            ("THE LAUGH TRACK", "Comedy", { has($0, "Comedy") }),
-            ("NIGHTMARE", "Horror", { has($0, "Horror") }),
-            ("PRESTIGE", "Drama", { has($0, "Drama") }),
-            ("NEBULA", "Science Fiction", { has($0, "Science Fiction") }),
-            ("MYTHOS", "Fantasy", { has($0, "Fantasy") }),
-            ("TRAILBLAZER", "Adventure", { has($0, "Adventure") }),
-            ("HEARTLINE", "Romance", { has($0, "Romance") }),
-            ("TOON CITY", "Animation", { has($0, "Animation") }),
-            ("TOP SHELF", "Top Rated", { ($0.rating ?? 0) >= 7.5 }),
-            ("FRESH", "New Releases", { ($0.year ?? 0) >= 2020 }),
-        ]
-        var out: [LiveChannel] = []
-        for (i, def) in defs.enumerated() {
-            let items = movies.filter(def.2)
-            if items.count >= 3 { out.append(LiveChannel(id: i, name: def.0, sub: def.1, movies: items)) }
+    // The EPG grid: a shared timeline with a program row per channel.
+    private var guide: some View {
+        let nowSec = now.timeIntervalSince1970
+        let winEnd = nowSec + windowMin * 60
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 14) {
+                Circle().fill(.red).frame(width: 14, height: 14)
+                Text("GUIDE").font(.title3).fontWeight(.heavy).kerning(2)
+            }
+            .padding(.horizontal, Theme.gutter)
+
+            // Time axis
+            HStack(spacing: 0) {
+                Color.clear.frame(width: labelW)
+                ForEach(0..<3, id: \.self) { i in
+                    Text(clock(nowSec + Double(i) * 30 * 60))
+                        .font(.caption).foregroundStyle(.secondary)
+                        .frame(width: 30 * ppm, alignment: .leading)
+                }
+            }
+            .padding(.leading, Theme.gutter)
+
+            ForEach(channels) { ch in
+                channelRow(ch, nowSec: nowSec, winEnd: winEnd)
+            }
         }
-        return out
+    }
+
+    private func channelRow(_ ch: LiveChannel, nowSec: Double, winEnd: Double) -> some View {
+        let progs = LiveTV.window(ch, from: nowSec, to: winEnd)
+        return Button {
+            let on = LiveTV.nowOn(ch, now.timeIntervalSince1970)
+            tuned = TunedLive(item: on.item, offset: on.offset)
+        } label: {
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("\(ch.number)  \(ch.name)").font(.callout).fontWeight(.bold).lineLimit(1)
+                    Text(ch.sub).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                }
+                .frame(width: labelW, alignment: .leading)
+
+                ForEach(progs) { p in
+                    let w = max(90, CGFloat(min(p.end, winEnd) - max(p.start, nowSec)) / 60 * ppm)
+                    let isNow = p.start <= nowSec && p.end > nowSec
+                    Text(p.item.title)
+                        .font(.callout).fontWeight(isNow ? .semibold : .regular).lineLimit(1)
+                        .padding(.horizontal, 14)
+                        .frame(width: w, height: 66, alignment: .leading)
+                        .background(isNow ? Theme.accent.opacity(0.28) : Color.white.opacity(0.06))
+                        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(isNow ? Theme.accent : Color.white.opacity(0.12), lineWidth: isNow ? 3 : 1))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.leading, Theme.gutter)
+        }
+        .buttonStyle(.plain)
+        .focused($focusedChannel, equals: ch.id)
+    }
+
+    private func clock(_ sec: Double) -> String {
+        let f = DateFormatter(); f.dateFormat = "h:mm a"
+        return f.string(from: Date(timeIntervalSince1970: sec))
+    }
+
+    private func load() async {
+        loading = true
+        if store.movies.isEmpty { await store.loadHome() }
+        episodes = await store.loadLiveEpisodes()
+        channels = LiveTV.build(movies: store.movies, episodes: episodes)
+        loading = false
     }
 }
 
-// Identifiable wrapper so fullScreenCover(item:) can drive playback.
-private struct TunedItem: Identifiable, Hashable {
-    let movie: Movie; let offset: Double
-    var id: String { movie.id }
+struct TunedLive: Identifiable, Hashable {
+    let item: LiveItem; let offset: Double
+    var id: String { "\(item.kind)-\(item.movieLocalId ?? item.epId ?? 0)" }
 }
 
-// Resolves the movie's best file and plays it at the live offset.
-private struct PlayerFor: View {
+// Resolves a Live TV item's playable file (movie or episode) and plays at the
+// live offset.
+struct LivePlayer: View {
     @EnvironmentObject var store: Store
-    let movie: Movie
+    let item: LiveItem
     let offset: Double
-    @State private var detail: MovieDetail?
+    @State private var url: URL?
+    @State private var ref: Store.PlayRef?
+    @State private var dur: Double?
+    @State private var failed = false
 
     var body: some View {
         Group {
-            if let d = detail, let f = d.bestFile, let url = store.playbackURL(kind: "movie", file: f) {
-                PlayerView(url: url, startAt: offset, ref: .movie(d.id), duration: d.duration, store: store)
+            if let url, let ref {
+                PlayerView(url: url, startAt: offset, ref: ref, duration: dur, store: store)
+            } else if failed {
+                ZStack { Color.black; Text("Can't play this right now.").foregroundStyle(.white) }
             } else {
                 ZStack { Color.black; ProgressView().tint(.white) }
             }
         }
-        .task { detail = await store.movieDetail(movie.localId ?? 0) }
+        .task { await resolve() }
     }
-}
 
-struct ChannelRow: View {
-    let channel: LiveChannel
-    let movie: Movie
-    let progress: Double
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 28) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(channel.name).font(.title3).fontWeight(.heavy).kerning(1)
-                    Text(channel.sub).font(.caption).foregroundStyle(.secondary)
-                }
-                .frame(width: 260, alignment: .leading)
-
-                ArtImage(url: movie.backdrop ?? movie.poster, aspect: 16.0 / 9.0)
-                    .frame(width: 300, height: 169)
-                    .clipShape(RoundedRectangle(cornerRadius: Theme.posterRadius))
-                    .overlay(alignment: .bottom) { ProgressBar(progress: progress) }
-
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("NOW AIRING").font(.caption2).fontWeight(.bold)
-                        .foregroundStyle(Theme.accentSoft).kerning(1.5)
-                    Text(movie.title).font(.title3).fontWeight(.semibold).lineLimit(1)
-                    if let o = movie.overview {
-                        Text(o).font(.body).foregroundStyle(.secondary).lineLimit(2)
-                    }
-                }
-                Spacer()
-                Image(systemName: "play.circle.fill").font(.system(size: 44)).foregroundStyle(.white.opacity(0.85))
+    private func resolve() async {
+        if let mid = item.movieLocalId, let d = await store.movieDetail(mid), let f = d.bestFile {
+            url = store.playbackURL(kind: "movie", file: f); ref = .movie(mid); dur = d.duration
+        } else if let sid = item.showId, let epId = item.epId, let d = await store.showDetail(sid) {
+            let ep = d.seasons.flatMap { $0.episodes }.first { $0.id == epId }
+            if let ep, let f = ep.bestFile {
+                url = store.playbackURL(kind: "episode", file: f); ref = .episode(epId); dur = ep.duration
             }
-            .padding(20)
         }
-        .buttonStyle(.card)
+        if url == nil { failed = true }
     }
 }

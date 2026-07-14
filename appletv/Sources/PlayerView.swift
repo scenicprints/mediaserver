@@ -67,6 +67,7 @@ struct PlayerView: UIViewControllerRepresentable {
         var timeObserver: Any?
         var onMain = false
         private var endObserver: NSObjectProtocol?
+        private var failObserver: NSObjectProtocol?
         private var lastSaved: Double = 0
 
         init(store: Store, ref: Store.PlayRef, duration: Double?, startAt: Double) {
@@ -76,13 +77,20 @@ struct PlayerView: UIViewControllerRepresentable {
         // When the pre-roll finishes, the queue advances to the feature; seek it
         // to the resume point and start counting progress.
         func observePrerollEnd(_ preroll: AVPlayerItem, player: AVPlayer) {
-            endObserver = NotificationCenter.default.addObserver(
-                forName: .AVPlayerItemDidPlayToEndTime, object: preroll, queue: .main) { [weak self] _ in
-                guard let self else { return }
+            let advance: (Notification) -> Void = { [weak self] _ in
+                guard let self, !self.onMain else { return }
                 if self.startAt > 1 {
                     player.seek(to: CMTime(seconds: self.startAt, preferredTimescale: 600))
                 }
                 self.onMain = true
+            }
+            let nc = NotificationCenter.default
+            endObserver = nc.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: preroll, queue: .main, using: advance)
+            // If the pre-roll can't be played, skip straight to the feature.
+            failObserver = nc.addObserver(forName: .AVPlayerItemFailedToPlayToEndTime, object: preroll, queue: .main) { [weak self] n in
+                if let q = player as? AVQueuePlayer { q.advanceToNextItem() }
+                advance(n)
+                _ = self
             }
         }
 
@@ -105,6 +113,7 @@ struct PlayerView: UIViewControllerRepresentable {
 
         func teardown() {
             if let e = endObserver { NotificationCenter.default.removeObserver(e); endObserver = nil }
+            if let e = failObserver { NotificationCenter.default.removeObserver(e); failObserver = nil }
         }
     }
 }

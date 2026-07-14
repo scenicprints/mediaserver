@@ -168,11 +168,16 @@ struct MovieDetailView: View {
 
     private func load() async {
         loading = true
-        detail = await store.movieDetail(movieId)
+        // Fetch the detail and the pre-roll in parallel so the pre-roll URL is
+        // ready by the time the Play button appears (else tapping Play early
+        // skipped it).
+        async let d = store.movieDetail(movieId)
+        async let pr = store.prerollURL()
+        detail = await d
+        preroll = await pr
         favorite = detail?.favorite == 1
         watched = detail?.watched == 1
         loading = false
         extra = await store.movieExtra(movieId)   // enrich after the core loads
-        preroll = await store.prerollURL()
     }
 }

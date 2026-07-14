@@ -270,6 +270,24 @@ struct AdminSession: Identifiable, Decodable, Hashable {
 }
 struct SessionsResponse: Decodable { let sessions: [AdminSession] }
 
+// One playable episode for Live TV (/api/livetv/episodes).
+struct LiveEpisode: Decodable, Hashable {
+    let epId: Int
+    let showId: Int
+    let season: Int?
+    let episode: Int?
+    let epTitle: String?
+    let still: String?
+    let duration: Double?
+    let showTitle: String?
+    let poster: String?
+    let backdrop: String?
+    let overview: String?
+    let genres: String?
+    let year: Int?
+    let rating: Double?
+}
+
 struct User: Decodable { let username: String; let role: String }
 private struct LoginResponse: Decodable { let token: String; let user: User }
 private struct MeResponse: Decodable { let user: User }
@@ -567,6 +585,11 @@ final class Store: ObservableObject {
     func runIntroDetect() async { _ = try? await request("api/intro/run", method: "POST") }
     func loadSessions() async -> [AdminSession] {
         (await get("api/admin/sessions", as: SessionsResponse.self))?.sessions ?? []
+    }
+
+    // Flat playable-episode list for Live TV channels.
+    func loadLiveEpisodes() async -> [LiveEpisode] {
+        await get("api/livetv/episodes", as: [LiveEpisode].self) ?? []
     }
     func serverVersion() async -> String? {
         struct R: Decodable { let version: String?; let commit: String? }
