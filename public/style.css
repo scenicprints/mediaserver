@@ -279,13 +279,11 @@ button { font-family: inherit; }
 .req-input:focus { border-color: var(--accent); }
 .req-controls { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; margin-top: 14px; }
 .req-controls .req-input { flex: 1; min-width: 260px; margin-top: 0; }
-.req-quality { display: flex; gap: 10px; flex-wrap: wrap; }
-.req-qsel { display: flex; flex-direction: column; gap: 4px; font-size: 11px; font-weight: 700; letter-spacing: 0.3px; color: var(--muted); text-transform: uppercase; }
-.req-qsel select {
-  background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 10px;
-  padding: 12px 12px; font-size: 14px; font-weight: 600; cursor: pointer; outline: none;
-}
-.req-qsel select:focus { border-color: var(--accent); }
+.req-quality { display: flex; gap: 18px; flex-wrap: wrap; }
+.req-qgroup { display: flex; flex-direction: column; gap: 6px; }
+.req-qlabel { font-size: 11px; font-weight: 700; letter-spacing: 0.3px; color: var(--muted); text-transform: uppercase; }
+.req-qsegs { display: flex; gap: 8px; flex-wrap: wrap; }
+.req-qbtn { font-size: 13px; padding: 9px 14px; }
 
 /* Downloading queue */
 .req-queue { margin: 22px 0 8px; }
@@ -794,7 +792,7 @@ body.tv-nav .card:hover { transform: none; }
 .btn.tv-focus, .nav-link.tv-focus, .see-all.tv-focus, .tab.tv-focus,
 .az.tv-focus, .close.tv-focus, .detail-close.tv-focus, .icon-btn.tv-focus,
 .rm.tv-focus, .hero-dot.tv-focus, #update-pill.tv-focus,
-.nav-search.tv-focus, .req-input.tv-focus, .dp-select.tv-focus, .req-qsel select.tv-focus {
+.nav-search.tv-focus, .req-input.tv-focus, .dp-select.tv-focus {
   box-shadow: 0 0 0 3px var(--accent), 0 0 0 6px rgba(108, 92, 255, 0.32), 0 0 22px rgba(108, 92, 255, 0.55);
 }
 .nav-link.tv-focus { color: var(--text); background: rgba(108, 92, 255, 0.16); }

@@ -470,21 +470,26 @@ async function renderRequests() {
 
 function renderQualityPicker(radarrOk, sonarrOk) {
   const wrap = document.getElementById('req-quality'); if (!wrap) return;
-  const sel = (label, data, chosen, onPick) => {
-    if (!data || !data.profiles || !data.profiles.length) return '';
-    const cur = chosen || data.default;
-    return `<label class="req-qsel"><span>${label}</span><select data-role="${label}">${
-      data.profiles.map((p) => `<option value="${p.id}"${p.id === cur ? ' selected' : ''}>${escapeHtml(p.name)}</option>`).join('')
-    }</select></label>`;
-  };
   reqMovieProfile = reqMovieProfile || (reqProfiles.radarr && reqProfiles.radarr.default) || null;
   reqTvProfile = reqTvProfile || (reqProfiles.sonarr && reqProfiles.sonarr.default) || null;
+  // Segmented buttons, NOT a native <select> — a TV remote can't operate the OS
+  // dropdown a <select> pops up. One .btn per quality profile (same pattern as the
+  // Audio settings); .btn is already in the remote focus engine, so the D-pad can
+  // land on and pick a quality. Selected profile carries `.primary`.
+  const group = (label, data, chosen, role) => {
+    if (!data || !data.profiles || !data.profiles.length) return '';
+    const cur = chosen || data.default;
+    return `<div class="req-qgroup"><span class="req-qlabel">${label}</span>
+      <div class="req-qsegs seg">${data.profiles.map((p) =>
+        `<button class="btn req-qbtn${p.id === cur ? ' primary' : ''}" data-role="${role}" data-pid="${p.id}">${escapeHtml(p.name)}</button>`
+      ).join('')}</div></div>`;
+  };
   wrap.innerHTML =
-    (radarrOk ? sel('Movie quality', reqProfiles.radarr, reqMovieProfile) : '') +
-    (sonarrOk ? sel('Show quality', reqProfiles.sonarr, reqTvProfile) : '');
-  const sels = wrap.querySelectorAll('select');
-  sels.forEach((s) => s.addEventListener('change', () => {
-    if (s.dataset.role === 'Movie quality') reqMovieProfile = +s.value; else reqTvProfile = +s.value;
+    (radarrOk ? group('Movie quality', reqProfiles.radarr, reqMovieProfile, 'movie') : '') +
+    (sonarrOk ? group('Show quality', reqProfiles.sonarr, reqTvProfile, 'tv') : '');
+  wrap.querySelectorAll('.req-qbtn').forEach((b) => b.addEventListener('click', () => {
+    if (b.dataset.role === 'movie') reqMovieProfile = +b.dataset.pid; else reqTvProfile = +b.dataset.pid;
+    b.parentElement.querySelectorAll('.req-qbtn').forEach((x) => x.classList.toggle('primary', x === b));
   }));
 }
 
