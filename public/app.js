@@ -2108,11 +2108,19 @@ function openPlayer(ctx) {
   // ---- Session heartbeat (feeds the admin "Now Playing" monitor) ----
   // Report our live state every ~10s (and on play/pause) so an admin can see who's
   // watching what, whether it's transcoding, and buffer/health for troubleshooting.
+  let stallCount = 0; // network stalls (involuntary 'waiting'), surfaced in the monitor
+  video.addEventListener('waiting', () => { if (!video.seeking) stallCount++; });
   function sessionHeartbeat() {
     if (!current) return;
     let bufAhead = 0;
     try { const bb = video.buffered; if (bb.length) bufAhead = Math.max(0, bb.end(bb.length - 1) - video.currentTime); } catch (_e) {}
     const sub = currentSubIdx >= 0 ? (current.subtitles || [])[currentSubIdx] : null;
+    // Extra troubleshooting signals: stall count (network starvation), dropped vs
+    // decoded frames (a decode/render bottleneck vs a delivery one), and the browser's
+    // own estimate of the downlink — together they say network-bound vs decode-bound.
+    let dropped = null, decoded = null;
+    try { const q = video.getVideoPlaybackQuality && video.getVideoPlaybackQuality(); if (q) { dropped = q.droppedVideoFrames; decoded = q.totalVideoFrames; } } catch (_e) {}
+    const conn = navigator.connection || {};
     const body = {
       sessionId,
       kind: ctx.searchKind,
@@ -2129,6 +2137,9 @@ function openPlayer(ctx) {
       networkState: video.networkState,
       videoWidth: video.videoWidth,
       videoHeight: video.videoHeight,
+      stalls: stallCount,
+      dropped, decoded,
+      downlinkMbps: Number.isFinite(conn.downlink) ? conn.downlink : null,
       live,
       subtitleTrack: sub ? (sub.label || sub.lang || 'on') : 'off',
       audioMode: audioGet('audioMode') === 'surround' ? 'surround' : 'stereo',
@@ -2790,10 +2801,12 @@ function deviceLabel(ua, tv) {
 }
 function engineText(s) {
   const e = s.engine;
-  if (s.mode !== 'transcode') return 'Direct play' + (e && e.video ? ` · ${e.video.codec} ${e.video.height}p` : '');
+  const mbps = (kbps) => kbps ? ` @ ${(kbps / 1000).toFixed(kbps < 10000 ? 1 : 0)} Mbps` : '';
+  const vSrc = (ev) => `${ev.codec} ${ev.width ? ev.width + '×' : ''}${ev.height}p${mbps(e.srcKbps)}`;
+  if (s.mode !== 'transcode') return 'Direct play' + (e && e.video ? ` · ${vSrc(e.video)}` : '');
   if (!e) return 'Transcoding';
   const chLbl = (c) => (c === 1 ? 'mono' : c === 2 ? 'stereo' : c + 'ch');
-  const v = e.video ? `${e.video.codec} ${e.video.height}p → ${e.videoAction || '?'}` : '';
+  const v = e.video ? `${vSrc(e.video)} → ${e.videoAction || '?'}` : '';
   const a = e.audio ? `${e.audio.codec} ${chLbl(e.audio.channels)} → ${e.audioAction || '?'}` : '';
   return `Transcoding · V ${v} · A ${a}`;
 }
@@ -2826,11 +2839,23 @@ async function loadSessions() {
       (s.videoW && s.videoH) ? `${s.videoW}×${s.videoH}` : null
     ].filter(Boolean).join(' · ');
     const low = (s.bufferedAhead || 0) < 3 && !s.paused && !s.live; // possible buffering/stall
+    // Troubleshooting line: is the cushion draining (network-bound) or is the client
+    // dropping frames (decode-bound)? Plus stall count and the browser's link estimate.
+    const bd = s.bufferDelta;
+    const trend = bd != null ? `buffer ${bd > 0.05 ? '↑' : bd < -0.05 ? '↓ draining' : '→ flat'} ${bd >= 0 ? '+' : ''}${bd}/s` : null;
+    const dropPct = (s.dropped != null && s.decoded) ? (s.dropped / s.decoded) * 100 : null;
+    const diag = [
+      trend,
+      s.stalls ? `${s.stalls} stall${s.stalls === 1 ? '' : 's'}` : null,
+      dropPct != null ? `${dropPct.toFixed(dropPct < 10 ? 1 : 0)}% frames dropped` : null,
+      s.downlinkMbps != null ? `~${s.downlinkMbps} Mbps link` : null
+    ].filter(Boolean).join(' · ');
     return `
       <div class="sess-card${stale ? ' sess-stale' : ''}">
         <div class="sess-top">
           <span class="sess-user">${escapeHtml(s.username)}</span>
           <span class="sess-badges">
+            <span class="sess-badge ${s.remote ? 'b-remote' : 'b-local'}">${s.remote ? '🌐 Remote' : '🏠 Local'}</span>
             <span class="sess-badge ${transcoding ? 'b-transcode' : 'b-direct'}">${transcoding ? '⚙ Transcode' : '▶ Direct'}</span>
             ${s.live ? '<span class="sess-badge b-live">LIVE</span>' : ''}
             <span class="sess-badge ${s.paused ? 'b-paused' : 'b-playing'}">${s.paused ? '⏸ Paused' : '▶ Playing'}</span>
@@ -2845,6 +2870,7 @@ async function loadSessions() {
           · watching ${fmtDur(s.watchingForSec)}
         </div>
         <div class="sess-eng muted">${escapeHtml(engineText(s))}</div>
+        ${diag ? `<div class="sess-diag muted">${escapeHtml(diag)}</div>` : ''}
         <div class="sess-dev muted">${escapeHtml(deviceLabel(s.userAgent, s.tv))} · ${escapeHtml(s.ip || '')} · ${escapeHtml(health)}${s.subtitleTrack && s.subtitleTrack !== 'off' ? ' · CC ' + escapeHtml(s.subtitleTrack) : ''} · ${escapeHtml(s.audioMode || '')}</div>
       </div>`;
   }).join('');

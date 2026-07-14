@@ -284,9 +284,11 @@ export async function playInfo(filePath, { forceStereo = false, night = false, n
   // Engine summary for the admin playback badge: what each stream is and what the
   // server will do with it, plus the source per-stream start offset — a non-zero
   // gap here is the usual culprit for a constant A/V (lip-sync) offset.
+  const srcKbps = Math.round((+(p.format && p.format.bit_rate) || 0) / 1000) || null; // source overall bitrate
   const src = {
     video: v ? { codec: v.codec_name, width: +v.width || 0, height: srcH } : null,
     audio: a ? { codec: a.codec_name, channels: +a.channels || 0 } : null,
+    srcKbps,
     startV: v ? +v.start_time || 0 : 0,
     startA: a ? +a.start_time || 0 : 0
   };

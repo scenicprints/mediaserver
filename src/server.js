@@ -1112,6 +1112,14 @@ app.post('/api/session/heartbeat', async (req, reply) => {
   const kind = b.live ? 'live' : (b.kind === 'episode' ? 'episode' : 'movie');
   const fileId = b.fileId != null ? String(b.fileId) : null;
   const dec = playDecisions.get(`${req.user.id}:${kind}:${fileId}`);
+  const buffAhead = numOr(b.bufferedAhead, 0);
+  // Buffer trend: seconds of cushion gained/lost per wall-second since the last
+  // beat. Negative = the buffer is draining → heading for a stall (network-bound).
+  let bufferDelta = null;
+  if (prev && prev.bufferedAhead != null && prev.lastSeen) {
+    const dt = (now - prev.lastSeen) / 1000;
+    if (dt > 0.5) bufferDelta = +((buffAhead - prev.bufferedAhead) / dt).toFixed(2);
+  }
   sessions.set(id, {
     id,
     userId: req.user.id,
@@ -1126,16 +1134,22 @@ app.post('/api/session/heartbeat', async (req, reply) => {
     position: numOr(b.position, 0),
     duration: numOr(b.duration, 0),
     paused: !!b.paused,
-    bufferedAhead: numOr(b.bufferedAhead, 0),
+    bufferedAhead: buffAhead,
+    bufferDelta,
     readyState: numOr(b.readyState, null),
     networkState: numOr(b.networkState, null),
     videoW: numOr(b.videoWidth, null),
     videoH: numOr(b.videoHeight, null),
+    stalls: numOr(b.stalls, null),
+    dropped: numOr(b.dropped, null),
+    decoded: numOr(b.decoded, null),
+    downlinkMbps: numOr(b.downlinkMbps, null),
     live: !!b.live,
     subtitleTrack: String(b.subtitleTrack || '').slice(0, 160),
     audioMode: String(b.audioMode || '').slice(0, 40),
     tv: !!b.tv,
     ip: req.ip,
+    remote: isRemote(req),
     userAgent: String(req.headers['user-agent'] || '').slice(0, 300),
     startedAt: prev ? prev.startedAt : now,
     lastSeen: now
