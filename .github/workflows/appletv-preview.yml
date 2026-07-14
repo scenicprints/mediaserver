@@ -57,25 +57,33 @@ jobs:
           echo "app=$APP"
           xcrun simctl install "$DEV" "$APP"
           mkdir -p shots
+          # One screenshot with retries. The sim resprings on the FIRST
+          # terminate+relaunch after install, so whichever tab is captured
+          # second used to deterministically photograph the tvOS boot screen.
+          # Real app frames (mock posters everywhere) are >300 KB; the boot
+          # screen is ~175 KB — retry small shots with a fresh relaunch.
+          snap() { # $1 = output name, $2 = env var name, $3 = env var value
+            for A in 1 2 3; do
+              env "SIMCTL_CHILD_PREVIEW_TMDB=${{ secrets.MARQUEE_PREVIEW_TMDB }}" \
+                  "SIMCTL_CHILD_$2=$3" \
+                  xcrun simctl launch --terminate-running-process "$DEV" "$BUNDLE"
+              sleep 24
+              xcrun simctl io "$DEV" screenshot "shots/$1.png" || true
+              SZ=$(stat -f%z "shots/$1.png" 2>/dev/null || echo 0)
+              [ "$SZ" -ge 300000 ] && break
+              echo "shot $1 looks like the boot screen ($SZ bytes) — retrying"
+            done
+          }
           for T in home movies tv livetv library settings; do
             # --terminate-running-process guarantees a clean relaunch that
             # re-reads PREVIEW_TAB (a plain launch just foregrounds the old
             # process, leaving it on the previous tab). Mock mode pulls sample
             # titles + real posters from TMDB's public CDN, so previews work
             # even when the media server is offline.
-            SIMCTL_CHILD_PREVIEW_TMDB="${{ secrets.MARQUEE_PREVIEW_TMDB }}" \
-            SIMCTL_CHILD_PREVIEW_TAB="$T" \
-            xcrun simctl launch --terminate-running-process "$DEV" "$BUNDLE"
-            sleep 24
-            xcrun simctl io "$DEV" screenshot "shots/$T.png" || true
-            md5 -q "shots/$T.png" 2>/dev/null || true
+            snap "$T" PREVIEW_TAB "$T"
           done
           # The show-detail (seasons) screen, reached via PREVIEW_ROUTE.
-          SIMCTL_CHILD_PREVIEW_TMDB="${{ secrets.MARQUEE_PREVIEW_TMDB }}" \
-          SIMCTL_CHILD_PREVIEW_ROUTE="show" \
-          xcrun simctl launch --terminate-running-process "$DEV" "$BUNDLE"
-          sleep 24
-          xcrun simctl io "$DEV" screenshot "shots/showdetail.png" || true
+          snap showdetail PREVIEW_ROUTE show
           ls -la shots
 
       - uses: actions/upload-artifact@v4
