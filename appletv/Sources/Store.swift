@@ -138,7 +138,7 @@ final class Store: ObservableObject {
         let d = JSONDecoder(); d.keyDecodingStrategy = .convertFromSnakeCase; return d
     }
 
-    static func parseJSONStrings(_ s: String?) -> [String] {
+    nonisolated static func parseJSONStrings(_ s: String?) -> [String] {
         guard let s, let data = s.data(using: .utf8),
               let arr = try? JSONSerialization.jsonObject(with: data) as? [String] else { return [] }
         return arr
