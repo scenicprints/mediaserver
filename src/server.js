@@ -16,7 +16,7 @@ import { detectFfmpeg, status as ffmpegStatus, installFfmpeg, playInfo, transcod
 import { detectWhisper, status as whisperStatus, installWhisper, generate as generateSubs } from './whisper.js';
 import { translateVttFile } from './translate.js';
 import { radarrEnabled, sonarrEnabled, testConn, radarrSearch, radarrAdd, sonarrSearch, sonarrAdd, getProfiles, radarrQueue, sonarrQueue } from './arr.js';
-import { runIntroDetection, introForFile } from './introdetect.js';
+import { runIntroDetection, introForFile, fpcalcReady } from './introdetect.js';
 import { hashPassword, verifyPassword, newToken, tokenFromReq, cookieHeader } from './auth.js';
 import { PROVIDERS, providersList, refreshCatalog, catalogFor, catalogProviderMap, titleProviders, watchLink, status as streamingStatus } from './streaming.js';
 
@@ -468,7 +468,9 @@ app.post('/api/movies/:id/watched', async (req, reply) => {
 // Trigger a rescan of all libraries on demand (admin only).
 app.post('/api/scan', async (req, reply) => {
   if (!requireAdmin(req, reply)) return;
-  return scanLibraries(db);
+  const result = await scanLibraries(db);
+  if (config.introDetection !== false) runIntroJob(); // analyze any new episodes (background)
+  return result;
 });
 
 // Trigger TMDB enrichment on demand (movies + shows) — admin only.
@@ -705,6 +707,7 @@ app.post('/api/libraries', async (req, reply) => {
       .then(() => backfillGenres(db, config.tmdbApiKey))
       .catch((e) => console.error('Enrichment error:', e.message));
   }
+  if (config.introDetection !== false) runIntroJob(); // fingerprint the new show's intros (background)
   return { library: lib, scan };
 });
 
@@ -720,6 +723,42 @@ app.delete('/api/libraries/:id', async (req, reply) => {
   db.prepare('DELETE FROM shows WHERE id NOT IN (SELECT DISTINCT show_id FROM episodes)').run();
   db.prepare('DELETE FROM libraries WHERE id = ?').run(req.params.id);
   return { ok: true };
+});
+
+// ---- Skip Intro detection: status + manual trigger (admin) ----
+// The detection background job, wrapped so it can't overlap itself and so the
+// admin UI can show progress and re-run it on demand (e.g. after tuning, or if
+// the boot run hasn't reached a show yet).
+let introJobRunning = false;
+async function runIntroJob(force = false) {
+  if (introJobRunning) return;
+  introJobRunning = true;
+  try {
+    if (force) db.prepare('UPDATE episodes SET intro_checked = 0').run(); // re-analyze everything
+    await runIntroDetection(db, ROOT, config, { log: (x) => console.log(x) });
+  } catch (e) { console.error('Intro detection error:', e.message); }
+  finally { introJobRunning = false; }
+}
+
+app.get('/api/intro/status', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const one = (sql) => db.prepare(sql).get().n;
+  return {
+    fpcalc: fpcalcReady(ROOT, config),
+    running: introJobRunning,
+    totalEpisodes: one('SELECT COUNT(*) AS n FROM episodes'),
+    checked: one('SELECT COUNT(*) AS n FROM episodes WHERE intro_checked = 1'),
+    found: one('SELECT COUNT(*) AS n FROM episodes WHERE intro_start IS NOT NULL AND intro_end IS NOT NULL')
+  };
+});
+
+// Trigger detection now (fire-and-forget). `?force=1` re-analyzes every episode
+// (clears intro_checked) — use after changing thresholds.
+app.post('/api/intro/run', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  if (introJobRunning) return { ok: true, started: false, running: true };
+  runIntroJob(req.query.force === '1');
+  return { ok: true, started: true };
 });
 
 // Admin: permanently delete one media file from the server — the physical file
@@ -1476,15 +1515,15 @@ async function start() {
   }
 
   // Intro (theme-song) detection + episode-duration probing. Rebuilt with
-  // consensus matching (src/introdetect.js) and now ON by default — set
-  // `"introDetection": false` in config.json to disable. It's a background job:
-  // runs once per episode (guarded by intro_checked), fully async and paced, so
-  // it never blocks playback even churning through a big library on first pass.
+  // consensus matching (src/introdetect.js) and ON by default — set
+  // `"introDetection": false` in config.json to disable the automatic boot run.
+  // It's a background job: runs once per episode (guarded by intro_checked),
+  // fully async and paced, so it never blocks playback even on first pass.
   if (config.introDetection !== false) {
     (async () => {
       await new Promise((r) => setTimeout(r, 45000)); // let boot/scan settle before the heavy job
-      await runIntroDetection(db, ROOT, config, { log: (x) => console.log(x) });
-    })().catch((e) => console.error('Intro detection error:', e.message));
+      await runIntroJob();
+    })();
   }
 }
 

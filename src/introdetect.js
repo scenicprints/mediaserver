@@ -207,6 +207,14 @@ export async function runIntroDetection(db, root, config = {}, { log = () => {} 
   return done;
 }
 
+// Is the fingerprint tool present? (For the admin status readout — the detection
+// job installs it on first run, so this can be false until then.)
+export function fpcalcReady(root, config = {}) {
+  if (fpcalcPath && fs.existsSync(fpcalcPath)) return true;
+  if (config.fpcalcPath && fs.existsSync(config.fpcalcPath)) return true;
+  return !!findExe(path.join(root, 'tools', 'fpcalc'), 'fpcalc.exe');
+}
+
 // The stored intro range for a single episode file (for the player).
 export function introForFile(db, fileId) {
   const row = db.prepare(

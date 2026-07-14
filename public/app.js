@@ -2401,7 +2401,7 @@ settingsBtn.addEventListener('click', openSettings);
 async function openSettings() {
   settingsModal.classList.remove('hidden');
   paintAudio();
-  loadVersion(); checkForUpdate(); loadSettings(); loadFfmpeg(); loadWhisper(); loadArr(); loadSources(); loadPreroll();
+  loadVersion(); checkForUpdate(); loadSettings(); loadFfmpeg(); loadWhisper(); loadIntro(); loadArr(); loadSources(); loadPreroll();
   await renderLibraries();
 }
 
@@ -2594,6 +2594,34 @@ ffInstall.addEventListener('click', async () => {
   ffInstall.disabled = true;
   try { await fetch('/api/ffmpeg/install', { method: 'POST' }); } catch (_e) {}
   loadFfmpeg();
+});
+
+// ---- Skip Intro detection status + manual re-run (admin) ----
+const introStatusEl = document.getElementById('intro-status');
+const introRunBtn = document.getElementById('intro-run');
+let introTimer = null;
+async function loadIntro() {
+  if (!introStatusEl) return;
+  clearTimeout(introTimer); introTimer = null;
+  let s;
+  try { s = await (await fetch('/api/intro/status')).json(); } catch (_e) { return; }
+  if (s.error) return; // non-admin
+  if (!s.totalEpisodes) { introStatusEl.textContent = 'No TV episodes in the library yet — Skip Intro is TV-only (movies have no intro).'; introRunBtn.classList.add('hidden'); return; }
+  const parts = [`${s.checked}/${s.totalEpisodes} episodes analyzed`, `${s.found} intros found`];
+  if (!s.fpcalc) parts.unshift('fingerprint tool installs on first run');
+  introStatusEl.textContent = (s.running ? '⚙ Analyzing… ' : '') + parts.join(' · ')
+    + (s.running ? '' : (s.checked < s.totalEpisodes ? ' — runs in the background.' : ' — done.'));
+  introRunBtn.classList.remove('hidden');
+  introRunBtn.disabled = s.running;
+  introRunBtn.textContent = s.running ? 'Analyzing…' : (s.checked >= s.totalEpisodes ? 'Re-detect all intros' : 'Detect intros now');
+  if (s.running || s.checked < s.totalEpisodes) introTimer = setTimeout(loadIntro, 4000); // poll while it works
+}
+if (introRunBtn) introRunBtn.addEventListener('click', async () => {
+  // Re-detect all = force (clear intro_checked); otherwise just process the unchecked.
+  const force = introRunBtn.textContent.startsWith('Re-detect');
+  introRunBtn.disabled = true; introRunBtn.textContent = 'Starting…';
+  try { await fetch('/api/intro/run' + (force ? '?force=1' : ''), { method: 'POST' }); } catch (_e) {}
+  setTimeout(loadIntro, 800);
 });
 
 async function renderLibraries() {
