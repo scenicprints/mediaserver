@@ -678,6 +678,10 @@ button { font-family: inherit; }
 .vp-upnext .un-label { color: var(--muted); font-size: 12px; }
 .vp-upnext .un-title { font-weight: 700; margin: 3px 0 10px; }
 .vp-upnext .un-actions { display: flex; gap: 8px; }
+/* Remote/keyboard focus ring on the Up Next buttons (same language as .pfocus). */
+.vp-upnext .un-focus { transform: scale(1.06); box-shadow: 0 0 0 3px #fff, 0 0 0 6px var(--accent), 0 0 24px rgba(108, 92, 255, 0.65); }
+/* While it's up, the card reads as the active surface. */
+.vp-upnext:has(.un-focus) { border-color: var(--accent); }
 
 /* player buttons — big, round, 10-ft friendly, with a visible focus ring */
 .vp-ctrls button {

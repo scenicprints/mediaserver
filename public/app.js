@@ -1300,7 +1300,7 @@ function playEpisodeAt(show, flat, i, opts = {}) {
     streamBase: '/api/stream/episode/', subtitleBase: '/api/subtitle/episode/', searchKind: 'episode',
     startAt: opts.startAt != null ? opts.startAt : (ep.resume_position > 5 ? ep.resume_position : 0),
     progressUrl: `/api/episodes/${ep.id}/progress`,
-    upNext: next ? { label: 'Up Next', still: next.ep.still, title: episodeSub(next.ep), play: () => playEpisodeAt(show, flat, i + 1) } : null,
+    upNext: next ? { label: 'Up Next', still: next.ep.still || show.backdrop || show.poster || '', title: episodeSub(next.ep), play: () => playEpisodeAt(show, flat, i + 1) } : null,
     onEnded: next ? () => playEpisodeAt(show, flat, i + 1) : null
   });
 }
@@ -2066,7 +2066,17 @@ function openPlayer(ctx) {
     menu.querySelector('#gen-back').addEventListener('click', buildMenu);
   }
 
-  // up next
+  // Up Next. While it's showing it OWNS the remote/keyboard: playback controls
+  // are disabled and the arrows move only between its two buttons (Enter picks),
+  // so it's actually reachable on a remote (the buttons used to be mouse-only).
+  // Back still exits the episode. See the key handler for the input takeover.
+  let unFocus = 0; // which card button is focused: 0 = Play Now, 1 = Dismiss
+  const upNextActive = () => !upnext.classList.contains('hidden');
+  function paintUpNext() {
+    const btns = [...upnext.querySelectorAll('button')];
+    btns.forEach((b, i) => b.classList.toggle('un-focus', vp.classList.contains('vp-keys') && i === unFocus));
+  }
+  function hideUpNext() { upnext.classList.add('hidden'); paintUpNext(); }
   function maybeUpNext() {
     if (!ctx.upNext || upnextShown || !dur()) return;
     if (dur() - cur() <= 22) {
@@ -2078,7 +2088,8 @@ function openPlayer(ctx) {
           <div class="un-actions"><button class="btn btn-play sm" id="un-play">▶ Play Now</button><button class="btn sm" id="un-dismiss">Dismiss</button></div></div>`;
       upnext.classList.remove('hidden');
       upnext.querySelector('#un-play').addEventListener('click', () => ctx.upNext.play());
-      upnext.querySelector('#un-dismiss').addEventListener('click', () => upnext.classList.add('hidden'));
+      upnext.querySelector('#un-dismiss').addEventListener('click', hideUpNext);
+      unFocus = 0; vp.classList.add('vp-keys'); showUI(); paintUpNext(); // pre-seat remote focus on Play Now
     }
   }
 
@@ -2101,7 +2112,7 @@ function openPlayer(ctx) {
   // auto-hide chrome
   let hideTimer;
   function showUI() { vp.classList.remove('hide-ui'); clearTimeout(hideTimer); hideTimer = setTimeout(() => { if (!video.paused && menu.classList.contains('hidden')) vp.classList.add('hide-ui'); }, 3500); }
-  vp.addEventListener('mousemove', () => { vp.classList.remove('vp-keys'); paintPf(); showUI(); });
+  vp.addEventListener('mousemove', () => { vp.classList.remove('vp-keys'); paintPf(); paintUpNext(); showUI(); });
   showUI();
 
   // ---- Visible key/remote focus over the player controls ----
@@ -2167,6 +2178,18 @@ function openPlayer(ctx) {
         const b = menu.querySelector(`.vp-offset button[data-o="${e.key === 'ArrowLeft' ? '-0.25' : '0.25'}"]`);
         if (b) b.click(); // Left/Right nudge caption delay while the menu is up
       }
+      return;
+    }
+    // Up Next card is showing: it takes over input. Arrows pick a button, Enter
+    // activates it, and every other key (seek, play/pause, skip) is swallowed so
+    // playback can't be driven. Back already exited above, so you can still leave
+    // the episode.
+    if (upNextActive()) {
+      if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) {
+        e.preventDefault(); vp.classList.add('vp-keys'); unFocus = unFocus ? 0 : 1; paintUpNext();
+      } else if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault(); const b = upnext.querySelector(unFocus ? '#un-dismiss' : '#un-play'); if (b) b.click();
+      } else { e.preventDefault(); } // no playback control while the card is up
       return;
     }
     const nav = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Enter'].includes(e.key);
