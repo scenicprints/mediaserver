@@ -25,26 +25,40 @@ enum Route: Hashable {
 
 struct ContentView: View {
     @EnvironmentObject var store: Store
+    @State private var tab = "home"
 
     var body: some View {
         Group {
             if store.isLoggedIn {
-                TabView {
-                    NavTab { HomeView(route: $0) }.tabItem { Text("Home") }
-                    NavTab { MoviesView(route: $0) }.tabItem { Text("Movies") }
-                    NavTab { ShowsView(route: $0) }.tabItem { Text("TV") }
-                    LiveTVView().tabItem { Text("Live TV") }
-                    NavTab { LibraryView(route: $0) }.tabItem { Text("Library") }
-                    NavTab { CollectionsView(route: $0) }.tabItem { Text("Collections") }
-                    RequestsView().tabItem { Text("Requests") }
-                    NavTab { SearchView(route: $0) }.tabItem { Text("Search") }
-                    SettingsView().tabItem { Text("Settings") }
+                TabView(selection: $tab) {
+                    NavTab { HomeView(route: $0) }.tabItem { Text("Home") }.tag("home")
+                    NavTab { MoviesView(route: $0) }.tabItem { Text("Movies") }.tag("movies")
+                    NavTab { ShowsView(route: $0) }.tabItem { Text("TV") }.tag("tv")
+                    LiveTVView().tabItem { Text("Live TV") }.tag("livetv")
+                    NavTab { LibraryView(route: $0) }.tabItem { Text("Library") }.tag("library")
+                    NavTab { CollectionsView(route: $0) }.tabItem { Text("Collections") }.tag("collections")
+                    RequestsView().tabItem { Text("Requests") }.tag("requests")
+                    NavTab { SearchView(route: $0) }.tabItem { Text("Search") }.tag("search")
+                    SettingsView().tabItem { Text("Settings") }.tag("settings")
                 }
             } else {
                 LoginView()
             }
         }
-        .task { await store.checkSession() }
+        .task { await preview(); await store.checkSession() }
+    }
+
+    // CI "preview" hook: when launched with PREVIEW_* env vars (the screenshot
+    // workflow), point at the given server, auto-login, and open a tab — so the
+    // cloud Mac can screenshot real screens without TestFlight.
+    private func preview() async {
+        let env = ProcessInfo.processInfo.environment
+        guard let server = env["PREVIEW_SERVER"], !server.isEmpty else { return }
+        store.serverURL = server
+        if let t = env["PREVIEW_TAB"] { tab = t }
+        if let u = env["PREVIEW_USER"], let p = env["PREVIEW_PASS"], !store.isLoggedIn {
+            await store.login(username: u, password: p)
+        }
     }
 }
 

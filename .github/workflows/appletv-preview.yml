@@ -1,0 +1,72 @@
+name: Apple TV preview shots
+
+# Renders the REAL app in the tvOS Simulator on a cloud Mac and screenshots each
+# tab — a true preview without shipping to TestFlight. Manual trigger.
+# Needs secrets: MARQUEE_PREVIEW_SERVER / _USER / _PASS (auto-login in the sim).
+on:
+  workflow_dispatch:
+
+jobs:
+  shots:
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: appletv
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select newest Xcode
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"; xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate project
+        run: xcodegen generate
+
+      - name: Build for tvOS Simulator
+        run: |
+          xcodebuild \
+            -project MarqueeTV.xcodeproj \
+            -scheme MarqueeTV \
+            -sdk appletvsimulator \
+            -configuration Debug \
+            -destination 'generic/platform=tvOS Simulator' \
+            -derivedDataPath build/dd \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            build
+
+      - name: Boot simulator, install, screenshot each tab
+        env:
+          BUNDLE: com.scenicprints.marqueetv
+        run: |
+          set -x
+          DEV=$(xcrun simctl list devices available | grep -m1 "Apple TV" | sed -E 's/.*\(([0-9A-Fa-f-]{36})\).*/\1/')
+          if [ -z "$DEV" ]; then
+            RT=$(xcrun simctl list runtimes | grep -m1 tvOS | sed -E 's/.* - (com[^ ]*) .*/\1/')
+            DEV=$(xcrun simctl create "Preview ATV" "Apple TV 4K (3rd generation)" "$RT")
+          fi
+          echo "device=$DEV"
+          xcrun simctl boot "$DEV" || true
+          xcrun simctl bootstatus "$DEV" -b
+          APP=$(find build/dd/Build/Products -name "MarqueeTV.app" -type d | head -1)
+          echo "app=$APP"
+          xcrun simctl install "$DEV" "$APP"
+          mkdir -p shots
+          for T in home movies tv livetv library settings; do
+            xcrun simctl terminate "$DEV" "$BUNDLE" || true
+            SIMCTL_CHILD_PREVIEW_SERVER="${{ secrets.MARQUEE_PREVIEW_SERVER }}" \
+            SIMCTL_CHILD_PREVIEW_USER="${{ secrets.MARQUEE_PREVIEW_USER }}" \
+            SIMCTL_CHILD_PREVIEW_PASS="${{ secrets.MARQUEE_PREVIEW_PASS }}" \
+            SIMCTL_CHILD_PREVIEW_TAB="$T" \
+            xcrun simctl launch "$DEV" "$BUNDLE"
+            sleep 15
+            xcrun simctl io "$DEV" screenshot "shots/$T.png" || true
+          done
+          ls -la shots
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: preview-shots
+          path: appletv/shots/*.png
+          if-no-files-found: warn
