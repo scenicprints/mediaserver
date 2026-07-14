@@ -145,6 +145,20 @@ struct CollectionDetail: Decodable {
     let items: [Movie]
 }
 
+// ---- Requests: /api/requests/search results (Radarr/Sonarr) ----
+struct RequestResult: Identifiable, Decodable, Hashable {
+    let type: String        // "movie" | "tv"
+    let tmdbId: Int?
+    let tvdbId: Int?
+    let title: String
+    let year: Int?
+    let overview: String?
+    let poster: String?
+    var id: String { "\(type)-\(tmdbId ?? tvdbId ?? title.hashValue)" }
+}
+struct ArrProfile: Decodable, Hashable { let id: Int; let name: String? }
+struct ProfilesResponse: Decodable { let radarr: [ArrProfile]?; let sonarr: [ArrProfile]? }
+
 struct User: Decodable { let username: String; let role: String }
 private struct LoginResponse: Decodable { let token: String; let user: User }
 private struct MeResponse: Decodable { let user: User }
@@ -319,6 +333,34 @@ final class Store: ObservableObject {
         case .episode(let id): path = "api/episodes/\(id)/progress"
         }
         _ = try? await request(path, method: "POST", body: body)
+    }
+
+    // ---- Requests (Radarr/Sonarr) ----
+    func requestsSearch(_ q: String) async -> (results: [RequestResult], error: String?) {
+        let enc = q.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? q
+        do {
+            let (data, http) = try await request("api/requests/search?q=\(enc)")
+            if http.statusCode == 400 { return ([], serverError(data) ?? "Requests aren't set up. Add Radarr/Sonarr on the web app.") }
+            guard (200..<300).contains(http.statusCode) else { return ([], "Search failed (\(http.statusCode)).") }
+            return ((try? decoder().decode([RequestResult].self, from: data)) ?? [], nil)
+        } catch { return ([], "Couldn't reach the server.") }
+    }
+
+    private func qualityProfileId(for type: String) async -> Int? {
+        guard let p = await get("api/requests/profiles", as: ProfilesResponse.self) else { return nil }
+        return (type == "movie" ? p.radarr : p.sonarr)?.first?.id
+    }
+
+    func requestAdd(_ r: RequestResult) async -> String {
+        var body: [String: Any] = ["type": r.type]
+        if let t = r.tmdbId { body["tmdbId"] = t }
+        if let t = r.tvdbId { body["tvdbId"] = t }
+        if let pid = await qualityProfileId(for: r.type) { body["qualityProfileId"] = pid }
+        do {
+            let (data, http) = try await request("api/requests/add", method: "POST", body: body)
+            if (200..<300).contains(http.statusCode) { return "Requested “\(r.title)”." }
+            return serverError(data) ?? "Couldn't add (\(http.statusCode))."
+        } catch { return "Couldn't reach the server." }
     }
 
     private func serverError(_ data: Data) -> String? {

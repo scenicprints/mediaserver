@@ -33,9 +33,9 @@ struct ContentView: View {
                     NavTab { HomeView(route: $0) }.tabItem { Text("Home") }
                     NavTab { MoviesView(route: $0) }.tabItem { Text("Movies") }
                     NavTab { ShowsView(route: $0) }.tabItem { Text("TV") }
-                    ComingSoon(name: "Live TV").tabItem { Text("Live TV") }
+                    LiveTVView().tabItem { Text("Live TV") }
                     NavTab { CollectionsView(route: $0) }.tabItem { Text("Collections") }
-                    ComingSoon(name: "Requests").tabItem { Text("Requests") }
+                    RequestsView().tabItem { Text("Requests") }
                     NavTab { SearchView(route: $0) }.tabItem { Text("Search") }
                     SettingsView().tabItem { Text("Settings") }
                 }
