@@ -847,6 +847,10 @@ function streamFile(filePath, req, reply) {
       .header('Content-Range', `bytes ${start}-${end}/${total}`)
       .header('Accept-Ranges', 'bytes')
       .header('Content-Length', end - start + 1)
+      // Media bytes are immutable per file id, so let the browser cache them. This
+      // makes seeking/re-watch cheaper and, crucially, lets the client PREFETCH the
+      // opening of the next episode into cache so it starts warm (see prefetchNext).
+      .header('Cache-Control', 'private, max-age=3600')
       .header('Content-Type', type);
     return reply.send(fs.createReadStream(filePath, { start, end }));
   }
@@ -854,6 +858,7 @@ function streamFile(filePath, req, reply) {
   reply
     .header('Content-Length', total)
     .header('Accept-Ranges', 'bytes')
+    .header('Cache-Control', 'private, max-age=3600')
     .header('Content-Type', type);
   return reply.send(fs.createReadStream(filePath));
 }
@@ -903,12 +908,14 @@ app.get('/api/play/:kind/:fileId', async (req, reply) => {
   if (!row) return reply.code(404).send({ error: 'not found' });
   const info = await playInfo(row.path, audioOpts(req));
   const directUrl = (kind === 'episode' ? '/api/stream/episode/' : '/api/stream/') + fileId;
+  let fileSize = null; try { fileSize = fs.statSync(row.path).size; } catch {} // lets the client estimate throughput (size×8/duration = avg bitrate)
   // Remember the server's authoritative engine decision so the admin monitor can
   // report accurate direct/transcode details for this viewer (see /api/session/*).
   playDecisions.set(`${req.user.id}:${kind}:${fileId}`, { mode: info.mode, engine: info.engine || null, at: Date.now() });
   return {
     mode: info.mode,
     duration: info.duration,
+    size: fileSize,
     reason: info.reason || null,
     chapters: info.chapters || [],
     intro: kind === 'episode' ? introForFile(db, fileId) : null, // fingerprinted theme-song range

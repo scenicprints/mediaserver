@@ -1321,7 +1321,10 @@ function playEpisodeAt(show, flat, i, opts = {}) {
     streamBase: '/api/stream/episode/', subtitleBase: '/api/subtitle/episode/', searchKind: 'episode',
     startAt: opts.startAt != null ? opts.startAt : (ep.resume_position > 5 ? ep.resume_position : 0),
     progressUrl: `/api/episodes/${ep.id}/progress`,
-    upNext: next ? { label: 'Up Next', still: next.ep.still || show.backdrop || show.poster || '', title: episodeSub(next.ep), play: () => playEpisodeAt(show, flat, i + 1) } : null,
+    upNext: next ? { label: 'Up Next', still: next.ep.still || show.backdrop || show.poster || '', title: episodeSub(next.ep), play: () => playEpisodeAt(show, flat, i + 1),
+      // For the idle-bandwidth prefetch: the next episode's chosen file id (same
+      // streamBase as the current episode). Null if that episode has no file yet.
+      prefetch: (next.ep.files && next.ep.files.length) ? { kind: 'episode', fileId: preferredFile(next.ep.files, 'e' + next.ep.id).id } : null } : null,
     onEnded: next ? () => playEpisodeAt(show, flat, i + 1) : null
   });
 }
@@ -1706,6 +1709,7 @@ function openPlayer(ctx) {
     <button class="vp-skipbtn vp-skipcredits hidden" data-pf>Skip Credits ${ICONS.skipnext}</button>
     <div class="vp-menu hidden"></div>
     <div class="vp-upnext hidden"></div>
+    <div class="vp-buffering hidden"><div class="vp-spinner"></div><div class="vp-buftext">Buffering…</div></div>
     <div class="vp-error hidden"></div>`;
   const live = !!ctx.live;             // Live TV: a real broadcast — no time-travel controls
   if (live) vp.classList.add('vp-live');
@@ -1800,21 +1804,145 @@ function openPlayer(ctx) {
     });
   }
 
+  // Tracks a deliberate pause (user pressed pause) vs. an involuntary browser stall,
+  // so the rebuffer watermark below never resumes a video the viewer paused on purpose.
+  let userPaused = false;
+
+  // ---- Head-start prebuffer + rebuffer watermark (direct play only) ----
+  // A remote viewer pulling a big file over a thin uplink stutters if we start the
+  // instant one frame decodes. Instead we hold playback until a cushion of already-
+  // downloaded video sits ahead of the playhead (HEAD_START), and after a mid-play
+  // stall we wait for a smaller cushion (RESUME_BUFFER) before resuming — turning a
+  // stutter loop into one clean wait. This can't beat a permanently-too-fast bitrate
+  // (only transcoding-down does), but it smooths the marginal/jittery case that
+  // remote watching usually hits. Transcode is a live ~1× pipe that can't get ahead
+  // of real time, and Live TV must stay at the edge, so both skip all of this.
+  const HEAD_START = 25;      // seconds of cushion to gather before the first frame plays
+  const HEAD_MAX_WAIT = 15000; // …but never spin longer than this before starting anyway
+  const RESUME_BUFFER = 10;   // cushion to rebuild after a stall before resuming
+  const RESUME_MAX_WAIT = 20000;
+  const gated = () => play && play.mode === 'direct' && !live;
+  function bufAheadSec() {
+    try {
+      const b = video.buffered, t = video.currentTime;
+      for (let i = 0; i < b.length; i++) if (t >= b.start(i) - 0.5 && t <= b.end(i) + 0.5) return b.end(i) - t;
+    } catch (_e) {}
+    return 0;
+  }
+  const bufOverlay = vp.querySelector('.vp-buffering');
+  const bufText = vp.querySelector('.vp-buftext');
+  function showBuffering(pct) { bufText.textContent = pct == null ? 'Buffering…' : `Buffering… ${pct}%`; bufOverlay.classList.remove('hidden'); }
+  function hideBuffering() { bufOverlay.classList.add('hidden'); }
+  // Resolve once `target` seconds are buffered ahead, or the file has buffered to its
+  // end, or we hit `maxWaitMs` — whichever comes first (a slow link still starts).
+  function waitForBuffer(target, maxWaitMs, onTick) {
+    return new Promise((resolve) => {
+      const started = Date.now();
+      const done = () => { clearInterval(iv); resolve(); };
+      const check = () => {
+        const ahead = bufAheadSec();
+        if (onTick) onTick(Math.min(100, Math.round((ahead / target) * 100)));
+        const d = dur();
+        const atEnd = d && video.buffered.length && video.buffered.end(video.buffered.length - 1) >= d - 0.5;
+        if (ahead >= target || atEnd || Date.now() - started >= maxWaitMs) done();
+      };
+      const iv = setInterval(check, 250);
+      check();
+    });
+  }
+  // ---- Passive throughput meter ----
+  // While a cushion is filling the browser downloads at full tilt, so the rate the
+  // buffer FRONTIER advances (content-seconds gained per wall-second) is the real
+  // delivered throughput as a multiple of playback speed: >1 = headroom (buffering
+  // will keep full quality), ~1 = on the edge, <1 = the link genuinely can't carry
+  // this file (only transcoding-down fixes that). ×avg-bitrate gives Mbps. Surfaced
+  // in the admin badge so we can SEE which files are over the wall — no speedtests.
+  let netRatio = null, netMbps = null, netInfo = '', lastEng = null;
+  const bufEnd = () => { try { const b = video.buffered; return b.length ? b.end(b.length - 1) : 0; } catch (_e) { return 0; } };
+  function recordFill(be0, t0) {
+    const gained = bufEnd() - be0, secs = (performance.now() - t0) / 1000;
+    if (gained <= 2 || secs <= 0.4) return; // too little to be a reliable sample
+    netRatio = gained / secs;
+    netMbps = (play && play.size && dur()) ? netRatio * (play.size * 8 / dur() / 1e6) : null;
+    const grade = netRatio >= 1.25 ? 'healthy' : netRatio >= 1.0 ? 'marginal' : 'DEFICIT';
+    netInfo = ` · net ${netMbps != null ? '~' + netMbps.toFixed(0) + ' Mbps · ' : ''}${netRatio.toFixed(2)}× ${grade}`;
+    renderEngineBadge(lastEng);
+  }
+  // Gate the very first play of a direct file on the head-start cushion.
+  async function playWithHeadStart() {
+    if (!gated()) { attemptPlay(); return; }
+    const be0 = bufEnd(), t0 = performance.now();
+    showBuffering(0);
+    await waitForBuffer(HEAD_START, HEAD_MAX_WAIT, (pct) => showBuffering(pct));
+    recordFill(be0, t0);
+    hideBuffering();
+    attemptPlay();
+  }
+  // Mid-playback stall: show the spinner and, once a healthy cushion is back, nudge
+  // playback to resume. Guarded so it never fights a user pause or an active seek.
+  let rebuffering = false;
+  video.addEventListener('waiting', async () => {
+    if (!gated() || rebuffering || seeking || video.seeking) return;
+    if (video.paused && !video.ended && video.currentTime > 0 && userPaused) return; // honor a deliberate pause
+    rebuffering = true;
+    const be0 = bufEnd(), t0 = performance.now();
+    showBuffering();
+    await waitForBuffer(RESUME_BUFFER, RESUME_MAX_WAIT);
+    recordFill(be0, t0);
+    hideBuffering();
+    if (!userPaused) attemptPlay();
+    rebuffering = false;
+  });
+  video.addEventListener('playing', hideBuffering);
+
+  // ---- Prefetch the next episode's opening into cache ----
+  // Spends the CURRENT stream's idle bandwidth (a full-cushion direct stream leaves
+  // the link idle most of the time) to pull the start of the next episode, so it
+  // begins warm — a head start with no quality cost. Hard-guarded so it only runs
+  // while the current cushion is full and backs off the instant it dips, and only
+  // for a next file that itself direct-plays (a live transcode can't be pre-warmed).
+  const PREFETCH_BYTES = 64 * 1024 * 1024; // ~cap; enough for a real head start, bounded so it can't hog the link
+  let prefetchStarted = false, prefetchAbort = null;
+  async function prefetchNext() {
+    const pf = ctx.upNext && ctx.upNext.prefetch;
+    if (prefetchStarted || !pf || !pf.fileId) return;
+    if (!gated() || bufAheadSec() < HEAD_START - 3) return; // only when we have idle headroom to spare
+    prefetchStarted = true;
+    try {
+      const info = await (await fetch(`/api/play/${pf.kind}/${pf.fileId}?${audioQuery()}`)).json();
+      if (!info || info.mode !== 'direct') return; // can't meaningfully pre-warm a live transcode pipe
+      prefetchAbort = new AbortController();
+      const res = await fetch(withToken(ctx.streamBase + pf.fileId), {
+        headers: { Range: `bytes=0-${PREFETCH_BYTES - 1}` }, signal: prefetchAbort.signal, priority: 'low'
+      });
+      const reader = res.body.getReader();
+      // Read-and-discard populates the browser cache (the stream is Cache-Control:
+      // private now). Yield the link back to live playback the moment its cushion dips.
+      for (;;) {
+        if (bufAheadSec() < RESUME_BUFFER + 3) { prefetchAbort.abort(); break; }
+        const { done } = await reader.read();
+        if (done) break;
+      }
+    } catch (_e) { /* prefetch is best-effort; never disturb playback */ }
+  }
+
   // Admin-only playback badge: is this file direct-playing or transcoding, and
   // exactly what's being converted — plus the source per-stream start offset,
   // which is the usual cause of a constant audio-ahead/behind (lip-sync) gap.
   function renderEngineBadge(eng) {
     const el = vp.querySelector('.vp-engine');
     if (!el) return;
-    if (!eng || !document.body.classList.contains('is-admin')) { el.classList.add('hidden'); return; }
+    if (eng) lastEng = eng; // remember so the live net-meter can re-render the badge
+    const e = eng || lastEng;
+    if (!e || !document.body.classList.contains('is-admin')) { el.classList.add('hidden'); return; }
     const chLbl = (c) => (c === 1 ? 'mono' : c === 2 ? 'stereo' : c + 'ch');
-    const vTxt = eng.video ? `${eng.video.codec} ${eng.video.height}p` : '—';
-    const aTxt = eng.audio ? `${eng.audio.codec} ${chLbl(eng.audio.channels)}` : '—';
-    const off = Math.abs((eng.startV || 0) - (eng.startA || 0));
-    const offTxt = off > 0.01 ? ` · src A/V start ${(eng.startV || 0).toFixed(2)}/${(eng.startA || 0).toFixed(2)}s ⚠` : '';
-    el.innerHTML = eng.mode === 'direct'
+    const vTxt = e.video ? `${e.video.codec} ${e.video.height}p` : '—';
+    const aTxt = e.audio ? `${e.audio.codec} ${chLbl(e.audio.channels)}` : '—';
+    const off = Math.abs((e.startV || 0) - (e.startA || 0));
+    const offTxt = off > 0.01 ? ` · src A/V start ${(e.startV || 0).toFixed(2)}/${(e.startA || 0).toFixed(2)}s ⚠` : '';
+    el.innerHTML = (e.mode === 'direct'
       ? `▶ Direct play · ${escapeHtml(vTxt)} · ${escapeHtml(aTxt)}${offTxt}`
-      : `⚙ Transcoding · V ${escapeHtml(vTxt)} → ${escapeHtml(eng.videoAction)} · A ${escapeHtml(aTxt)} → ${escapeHtml(eng.audioAction)}${offTxt}`;
+      : `⚙ Transcoding · V ${escapeHtml(vTxt)} → ${escapeHtml(e.videoAction)} · A ${escapeHtml(aTxt)} → ${escapeHtml(e.audioAction)}${offTxt}`) + netInfo;
     el.classList.remove('hidden');
     el.title = 'Click to diagnose A/V sync';
   }
@@ -1866,7 +1994,7 @@ function openPlayer(ctx) {
     try { info = await (await fetch(`/api/play/${ctx.searchKind}/${f.id}?${audioQuery()}`)).json(); } catch (_e) {}
     play = info && info.mode === 'transcode'
       ? { mode: 'transcode', duration: info.duration || null, url: info.url, reason: null }
-      : { mode: 'direct', duration: (info && info.duration) || null, url: ctx.streamBase + f.id, reason: (info && info.reason) || null };
+      : { mode: 'direct', duration: (info && info.duration) || null, url: ctx.streamBase + f.id, reason: (info && info.reason) || null, size: (info && info.size) || null };
     curEngine = (info && info.engine) || null;
     renderEngineBadge(info && info.engine); // admin-only: shows direct-play vs what's being transcoded
     // Chapter-based Skip Intro / Skip Credits (precise when the file has named
@@ -1887,8 +2015,9 @@ function openPlayer(ctx) {
       playWhenReady(() => attemptPlay());
     } else {
       if (video.src) resetPipeline();
+      video.preload = 'auto'; // let the browser fill its forward buffer for the head start
       video.src = withToken(play.url);
-      video.addEventListener('loadedmetadata', () => { if (at) video.currentTime = at; attemptPlay(); }, { once: true });
+      video.addEventListener('loadedmetadata', () => { if (at) video.currentTime = at; playWithHeadStart(); }, { once: true });
     }
     // The detail payload only knows sidecar files; ask for the FULL track list
     // (embedded mkv subtitles included) now that we're actually playing this file.
@@ -1937,10 +2066,11 @@ function openPlayer(ctx) {
   // same trick attemptPlay() uses, so a remote's Play never silently no-ops.
   function playNow() {
     if (live) return;
+    userPaused = false;
     const p = video.play();
     if (p && p.catch) p.catch(() => { video.muted = true; video.play().then(() => { video.muted = false; }).catch(() => {}); });
   }
-  function pauseNow() { if (!live) video.pause(); } // can't pause live TV
+  function pauseNow() { if (!live) { userPaused = true; video.pause(); } } // can't pause live TV
   function togglePlay() { if (live) return; video.paused ? playNow() : pauseNow(); }
   playBtns.forEach((b) => b.addEventListener('click', togglePlay));
   video.addEventListener('click', togglePlay);
@@ -2020,6 +2150,7 @@ function openPlayer(ctx) {
     updateSkipButtons();
     renderSub();
     maybeUpNext();
+    if (d && cur() > d * 0.4) prefetchNext(); // past the mid-point, warm the next episode (self-guards on idle bandwidth)
     throttledSave();
   });
   // Skip Intro / Skip Credits visibility. Chapters are authoritative (and work
@@ -2410,6 +2541,7 @@ function openPlayer(ctx) {
   vp.remove = () => {
     clearInterval(subTimer);
     clearInterval(hbTimer);
+    try { prefetchAbort && prefetchAbort.abort(); } catch (_e) {} // stop any idle prefetch in flight
     // Drop our session from the admin monitor at once (sendBeacon so it still
     // goes out if the page is unloading), rather than waiting for it to time out.
     try {
