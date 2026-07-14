@@ -6,5 +6,9 @@
   "tmdbApiKey": "",
   "openSubtitles": { "apiKey": "", "username": "", "password": "" },
   "_maxTranscodeHeight": "optional: cap re-encoded video height (e.g. 1080) if 4K transcodes still can't keep up on this box. Omit/0 = auto (keep source res when a GPU encoder is present, else 1080p).",
-  "maxTranscodeHeight": 0
+  "maxTranscodeHeight": 0,
+  "_remoteMaxHeight": "optional: for REMOTE viewers (over the internet, behind the proxy) cap video to this height and re-encode down to fit their uplink. Local viewers are never touched. Default 1080. Set 0 to disable.",
+  "remoteMaxHeight": 1080,
+  "_remoteMaxBitrateKbps": "optional: hard bitrate ceiling (kbps) for remote transcodes so a busy scene can't spike above the uplink. Default 6000 (~6 Mbps). Set 0 to disable.",
+  "remoteMaxBitrateKbps": 6000
 }

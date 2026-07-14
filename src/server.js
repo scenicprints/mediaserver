@@ -43,7 +43,37 @@ const MIME = {
   '.3gp': 'video/3gpp', '.3g2': 'video/3gpp2'
 };
 
-const app = Fastify({ logger: false });
+// `trustProxy: 'loopback'` → trust X-Forwarded-For only from the local Caddy hop,
+// so `req.ip` is the real client IP for internet viewers (and their true LAN IP for
+// devices hitting the server directly). That's what lets isRemote() tell a remote
+// session from a local one, to cap only remote transcodes. Spoofing is a non-issue:
+// only Caddy (loopback) is trusted, and it's used purely for a quality decision.
+const app = Fastify({ logger: false, trustProxy: 'loopback' });
+
+// Loopback / private-LAN / link-local address → NOT on the public internet.
+function isPrivateAddr(a) {
+  a = String(a || '').replace(/^::ffff:/, '').toLowerCase();
+  if (!a || a === 'localhost' || a === '127.0.0.1' || a === '::1' || a.startsWith('127.')) return true;
+  if (/^10\./.test(a) || /^192\.168\./.test(a) || /^172\.(1[6-9]|2\d|3[01])\./.test(a) || /^169\.254\./.test(a)) return true;
+  if (/^(fe80:|fc|fd)/.test(a)) return true; // IPv6 link-local / unique-local
+  return false;
+}
+
+// A session is "remote" when it came in over the public internet — used to apply the
+// remote transcode ceiling (local always stays full quality). Layered so it works
+// whether or not the proxy forwards the client IP:
+//   1. Real private LAN client IP (device hitting the server directly) → local.
+//   2. Real public client IP (proxy forwarded X-Forwarded-For)          → remote.
+//   3. IP is just the loopback proxy hop (no XFF): fall back to the Host header —
+//      a public hostname (marqu33.duckdns.org) means it arrived over the internet.
+// Fails safe toward "local" only when both signals say private.
+function isRemote(req) {
+  const ip = String(req.ip || '').replace(/^::ffff:/, '');
+  const loopback = !ip || ip === '127.0.0.1' || ip === '::1' || ip.startsWith('127.');
+  if (!loopback) return !isPrivateAddr(ip); // we have a real client IP — trust it
+  const host = String(req.headers.host || '').split(':')[0]; // e.g. "marqu33.duckdns.org"
+  return !isPrivateAddr(host);
+}
 
 // Accept POSTs with an empty or unusual content-type (e.g. action buttons that
 // send no body) without a 415. JSON bodies still use the built-in parser.
@@ -939,7 +969,7 @@ app.get('/api/play/:kind/:fileId', async (req, reply) => {
   const { kind, fileId } = req.params;
   const row = fileRow(kind, fileId);
   if (!row) return reply.code(404).send({ error: 'not found' });
-  const info = await playInfo(row.path, audioOpts(req));
+  const info = await playInfo(row.path, { ...audioOpts(req), remote: isRemote(req) });
   const directUrl = (kind === 'episode' ? '/api/stream/episode/' : '/api/stream/') + fileId;
   let fileSize = null; try { fileSize = fs.statSync(row.path).size; } catch {} // lets the client estimate throughput (size×8/duration = avg bitrate)
   // Remember the server's authoritative engine decision so the admin monitor can
@@ -968,7 +998,7 @@ app.get('/api/seekpoint/:kind/:fileId', async (req, reply) => {
   const row = fileRow(kind, fileId);
   if (!row) return reply.code(404).send({ error: 'not found' });
   const start = Math.max(0, parseFloat(req.query.start) || 0);
-  const info = await playInfo(row.path, audioOpts(req));
+  const info = await playInfo(row.path, { ...audioOpts(req), remote: isRemote(req) });
   const snap = info.mode === 'transcode' && info.vcopy && start > 0;
   if (!snap) return { start };
   // Skip Intro (`after=1`): ideally land on the keyframe just PAST the intro so
@@ -993,7 +1023,7 @@ app.get('/api/transcode/:kind/:fileId', async (req, reply) => {
   const row = fileRow(kind, fileId);
   if (!row) return reply.code(404).send({ error: 'not found' });
   const opts = audioOpts(req);
-  const info = await playInfo(row.path, opts);
+  const info = await playInfo(row.path, { ...opts, remote: isRemote(req) });
   if (info.mode !== 'transcode') return reply.code(400).send({ error: 'file does not need transcoding' });
   let start = Math.max(0, parseFloat(req.query.start) || 0);
   // Snap copy-path starts to the keyframe ffmpeg will actually use. The player
@@ -1001,7 +1031,7 @@ app.get('/api/transcode/:kind/:fileId', async (req, reply) => {
   // snapping a keyframe time returns itself); this guards direct API callers.
   if (start > 0 && info.vcopy && req.query.snapped !== '1') start = await keyframeBefore(row.path, start);
   const proc = transcodeStream(row.path, {
-    start, vcopy: info.vcopy, acopy: info.acopy, downmix: info.downmix, scaleH: info.scaleH,
+    start, vcopy: info.vcopy, acopy: info.acopy, downmix: info.downmix, scaleH: info.scaleH, maxKbps: info.maxKbps || 0,
     forceStereo: opts.forceStereo, dboost: opts.dboost, night: opts.night, norm: opts.norm
   });
   proc.stderr.on('data', (d) => console.error('[ffmpeg]', String(d).trim()));

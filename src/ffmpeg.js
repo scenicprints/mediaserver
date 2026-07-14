@@ -16,6 +16,11 @@ let ffmpegPath = null;
 let ffprobePath = null;
 let hasNvenc = false;
 let maxTranscodeHeight = 0; // config cap on re-encoded video height (0 = auto/off)
+// Remote ceiling: a viewer coming in over the internet (behind Caddy) can't carry
+// a full-bitrate 4K stream, so remote sessions are capped to this height/bitrate and
+// re-encoded to fit. LOCAL sessions are never touched (full quality). 0 = disabled.
+let remoteMaxHeight = 1080;
+let remoteMaxKbps = 6000;
 const probeCache = new Map(); // path+mtime -> probe json
 
 function tryRun(cmd, args) {
@@ -45,6 +50,8 @@ function findInTools(toolsDir, exe) {
 
 export async function detectFfmpeg(root, config = {}) {
   maxTranscodeHeight = Number(config.maxTranscodeHeight) || 0; // e.g. 1080 to force a cap
+  remoteMaxHeight = config.remoteMaxHeight != null ? Number(config.remoteMaxHeight) : 1080; // 0 disables the remote cap
+  remoteMaxKbps = config.remoteMaxBitrateKbps != null ? Number(config.remoteMaxBitrateKbps) : 6000;
   const toolsDir = path.join(root, 'tools');
   const candidates = [
     config.ffmpegPath,
@@ -243,7 +250,7 @@ function chaptersOf(p) {
 // channel); `night` compresses dynamic range; `norm` normalizes loudness. Any of
 // these needs the audio re-encoded, so the file can no longer direct-play or
 // audio-copy — that's what `needAudio` reflects.
-export async function playInfo(filePath, { forceStereo = false, night = false, norm = false } = {}) {
+export async function playInfo(filePath, { forceStereo = false, night = false, norm = false, remote = false } = {}) {
   const ext = path.extname(filePath).toLowerCase();
   if (!ffmpegPath || !ffprobePath) {
     return { mode: 'direct', duration: null, reason: 'no-ffmpeg', chapters: [] };
@@ -283,14 +290,32 @@ export async function playInfo(filePath, { forceStereo = false, night = false, n
     startV: v ? +v.start_time || 0 : 0,
     startA: a ? +a.start_time || 0 : 0
   };
+  const acopy = aOK && !needAudio;
+  // Remote ceiling: a viewer over the internet can't carry a full-bitrate 4K stream,
+  // so if the source is bigger than the remote cap we re-encode it down to fit — even
+  // if it would otherwise direct-play or video-copy (neither can shrink bitrate). This
+  // is the ONLY place quality is reduced, and only for remote; local is untouched.
+  if (remote && (remoteMaxHeight || remoteMaxKbps)) {
+    let srcKbps = Math.round((+(p.format && p.format.bit_rate) || 0) / 1000);
+    if (!srcKbps && duration) { try { srcKbps = Math.round(fs.statSync(filePath).size * 8 / duration / 1000); } catch {} }
+    const overRes = remoteMaxHeight && srcH > remoteMaxHeight;
+    const overRate = remoteMaxKbps && srcKbps > Math.round(remoteMaxKbps * 1.15); // small headroom before we bother
+    if (overRes || overRate) {
+      const rScaleH = overRes ? remoteMaxHeight : 0;
+      const aAction = acopy ? 'copy' : (downmix ? 'downmix → stereo' : (a ? `${String(a.codec_name || '').toUpperCase()} → AAC` : 'none'));
+      return {
+        mode: 'transcode', duration, vcopy: false, acopy, downmix, scaleH: rScaleH, maxKbps: remoteMaxKbps, chapters,
+        engine: { ...src, mode: 'transcode', videoAction: `transcode → ${rScaleH || srcH}p ≤${remoteMaxKbps}k (remote)`, audioAction: aAction, remote: true }
+      };
+    }
+  }
   if (DIRECT_EXT.has(ext) && vOK && aOK && !needAudio) {
     return { mode: 'direct', duration, chapters, engine: { ...src, mode: 'direct', videoAction: 'direct play', audioAction: 'direct play' } };
   }
-  const acopy = aOK && !needAudio;
   const videoAction = vcopy ? 'copy (remux)' : (scaleH ? `transcode → ${scaleH}p` : (bf > 0 ? 'transcode (de-B-frame)' : 'transcode'));
   const audioAction = acopy ? 'copy' : (downmix ? 'downmix → stereo' : (a ? `${String(a.codec_name || '').toUpperCase()} → AAC` : 'none'));
   return {
-    mode: 'transcode', duration, vcopy, acopy, downmix, scaleH, chapters,
+    mode: 'transcode', duration, vcopy, acopy, downmix, scaleH, maxKbps: 0, chapters,
     engine: { ...src, mode: 'transcode', videoAction, audioAction }
   };
 }
@@ -340,7 +365,8 @@ function downmixFilter(level) {
 const NIGHT_FILTER = 'acompressor=threshold=-24dB:ratio=4:attack=20:release=250,alimiter=limit=0.95';
 const NORM_FILTER = 'loudnorm=I=-16:TP=-1.5:LRA=11';
 
-export function transcodeStream(filePath, { start = 0, vcopy = false, acopy = false, downmix = false, forceStereo = false, dboost = 'normal', night = false, norm = false, scaleH = 0, duration = 0 } = {}) {
+export function transcodeStream(filePath, { start = 0, vcopy = false, acopy = false, downmix = false, forceStereo = false, dboost = 'normal', night = false, norm = false, scaleH = 0, maxKbps = 0, duration = 0 } = {}) {
+  if (maxKbps > 0) vcopy = false; // can't cap a copied stream's bitrate — must re-encode
   // First line of defense against A/V drift (applied regardless of resolution):
   // `+genpts` regenerates missing timestamps up front, and `aresample=async=1`
   // (below) keeps audio locked to the video timeline.
@@ -376,8 +402,19 @@ export function transcodeStream(filePath, { start = 0, vcopy = false, acopy = fa
     if (scaleH) args.push('-vf', `scale=-2:${scaleH}`); // downscale 4K/UHD so it transcodes in real time
     // `-bf 0` = no B-frames in our output, so the re-encoded video starts at t=0
     // (a B-frame reorder delay would push it late → audio ahead).
-    if (hasNvenc) args.push('-c:v', 'h264_nvenc', '-preset', 'p4', '-cq', '23', '-bf', '0', '-pix_fmt', 'yuv420p');
-    else args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21', '-bf', '0', '-pix_fmt', 'yuv420p');
+    // `maxKbps` caps the delivered bitrate for a remote viewer: quality-targeted
+    // (cq/crf) but with a hard `-maxrate`/`-bufsize` ceiling so a busy scene can't
+    // spike above what the uplink can carry (the remote-lag fix). 0 = uncapped (local).
+    const cap = maxKbps > 0;
+    if (hasNvenc) {
+      args.push('-c:v', 'h264_nvenc', '-preset', 'p4', '-bf', '0', '-pix_fmt', 'yuv420p');
+      if (cap) args.push('-rc', 'vbr', '-cq', '25', '-maxrate', `${maxKbps}k`, '-bufsize', `${maxKbps * 2}k`);
+      else args.push('-cq', '23');
+    } else {
+      args.push('-c:v', 'libx264', '-preset', 'veryfast', '-bf', '0', '-pix_fmt', 'yuv420p');
+      if (cap) args.push('-crf', '23', '-maxrate', `${maxKbps}k`, '-bufsize', `${maxKbps * 2}k`);
+      else args.push('-crf', '21');
+    }
   }
   if (acopy) {
     args.push('-c:a', 'copy');
