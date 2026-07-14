@@ -52,9 +52,15 @@ button { font-family: inherit; }
 .brand {
   font-size: 21px; font-weight: 800; letter-spacing: 0.3px; margin: 0;
   background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent;
-  white-space: nowrap;
+  white-space: nowrap; flex-shrink: 0;
 }
-.nav-links { display: flex; gap: 6px; }
+/* The tab strip is the ONLY flexible part of the bar: it takes the leftover
+   middle and scrolls its own overflow, so however narrow the screen (or however
+   much a TV overscans), the pinned brand/search/settings never get shoved off —
+   the tabs just scroll instead. This is what makes the bar fit any width without
+   per-device breakpoints. */
+.nav-links { display: flex; gap: 6px; flex: 1 1 0; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.nav-links::-webkit-scrollbar { display: none; }
 .nav-link {
   background: none; border: none; color: var(--muted); cursor: pointer;
   font-size: 15px; font-weight: 600; padding: 8px 12px; border-radius: 8px;
@@ -65,10 +71,14 @@ button { font-family: inherit; }
 .nav-link.active::after {
   content: ''; display: block; height: 2px; margin-top: 5px; border-radius: 2px; background: var(--grad);
 }
-.nav .spacer { flex: 1; }
+/* The tab strip (flex:1) now owns the middle, so the old flex spacer is redundant. */
+.nav .spacer { display: none; }
+/* Pinned right-hand controls: never shrink the settings icon or update pill off
+   the edge; let search yield first if the bar gets truly tight. */
+.nav .icon-btn, .nav .pill-update { flex-shrink: 0; }
 .nav-search {
   background: rgba(20, 22, 30, 0.7); border: 1px solid var(--line); color: var(--text);
-  padding: 9px 15px; border-radius: 999px; width: 210px; outline: none; transition: border-color 0.15s ease, width 0.2s ease;
+  padding: 9px 15px; border-radius: 999px; width: 210px; min-width: 0; flex-shrink: 1; outline: none; transition: border-color 0.15s ease, width 0.2s ease;
 }
 .nav-search:focus { border-color: var(--accent); width: 260px; }
 .icon-btn {
