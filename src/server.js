@@ -722,6 +722,34 @@ app.delete('/api/libraries/:id', async (req, reply) => {
   return { ok: true };
 });
 
+// Admin: permanently delete one media file from the server — the physical file
+// on disk AND its DB row, then prune the now-empty logical movie/episode/show.
+// Destructive and irreversible, so it's admin-only and addressed by file id
+// (never an arbitrary path — you can only delete a file that's already in a
+// library). The UI confirms before calling this.
+app.delete('/api/file/:kind/:fileId', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const { kind, fileId } = req.params;
+  const table = kind === 'episode' ? 'episode_files' : 'movie_files';
+  const row = fileRow(kind, fileId);
+  if (!row) return reply.code(404).send({ error: 'not found' });
+  try {
+    fs.rmSync(row.path, { force: true }); // force: don't error if already gone
+  } catch (e) {
+    return reply.code(500).send({ error: 'could not delete file: ' + e.message });
+  }
+  db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(fileId);
+  // Drop the logical movie/episode/show if that was its last file.
+  if (kind === 'episode') {
+    db.prepare('DELETE FROM episodes WHERE id NOT IN (SELECT DISTINCT episode_id FROM episode_files)').run();
+    db.prepare('DELETE FROM shows WHERE id NOT IN (SELECT DISTINCT show_id FROM episodes)').run();
+  } else {
+    db.prepare('DELETE FROM movies WHERE id NOT IN (SELECT DISTINCT movie_id FROM movie_files)').run();
+  }
+  dirListCache.clear(); // subtitle-discovery listings for that folder are now stale
+  return { ok: true, deleted: row.path };
+});
+
 // ---- Server-side folder browser (for the in-app folder picker) ----
 
 app.get('/api/fs', async (req, reply) => {

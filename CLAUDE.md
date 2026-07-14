@@ -83,6 +83,7 @@ node C:\Users\jkevi\mediaserver\src\server.js
 - **Streaming (HTTP Range / seeking):** `GET /stream/:fileId`, `GET /stream/episode/:fileId`
 - **Subtitles:** `GET /subtitle/:fileId` & `/subtitle/episode/:fileId` (serves a sidecar `.srt` as WebVTT); `GET /subtitles/search`, `POST /subtitles/download` (OpenSubtitles)
 - **Libraries/setup:** `GET/POST/DELETE /libraries`, `GET /fs` (folder browser), `POST /scan`, `POST /enrich`
+- **Delete a file (admin):** `DELETE /file/:kind/:fileId` — permanently removes the physical file from disk + its DB row, then prunes the now-empty logical movie/episode/show. Admin-only, by file id (never an arbitrary path). The 🗑 button in the movie/episode detail (admin-only) confirms first.
 - **Settings:** `GET /settings`, `POST /settings/opensubtitles`
 - **Prefs (cross-device playback memory):** `GET /prefs` (all), `POST /prefs` `{key, value}`
   (null/empty value deletes). Keys: `verid:m<id>`/`verid:e<id>` preferred file per title,

@@ -45,6 +45,12 @@ APK to the **`marquee-tv-latest`** release for sideloading onto the friend's TCL
 ---
 
 ## ✅ Done
+- **Admin: delete files from the server (2026-07-13).** Admins get a 🗑 **Delete file**
+  button in the movie/episode detail (per selected version) that permanently removes the
+  physical file from disk + its library entry (pruning the now-empty logical movie/episode/
+  show), after a confirm. New `DELETE /api/file/:kind/:fileId` — admin-only, addressed by file
+  id (never an arbitrary path, so it can only ever delete a file already in a library).
+  Verified end-to-end (button admin-gated, confirm, disk + DB removal, 401 for non-admins).
 - **A/V lip-sync on seek: `-noaccurate_seek` (Plex's mechanism) (2026-07-13).** Owner captured
   Plex's own ffmpeg command for the same file and it uses `-ss <t> -noaccurate_seek`. Root of the
   remaining desync: default (accurate) seek decode-and-trims each stream to the exact requested

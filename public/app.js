@@ -1148,6 +1148,17 @@ function playTrailer(key) {
   document.body.appendChild(ov);
 }
 
+// Admin: permanently delete a file from the server (physical file + library
+// entry), after a clear confirmation. Used by the movie and episode detail pages.
+async function deleteFileFromServer(kind, file, onDone) {
+  if (!file) return;
+  if (!confirm(`Delete this file from the server?\n\n${file.filename}\n\nThis permanently removes it from disk and cannot be undone.`)) return;
+  const r = await fetch(`/api/file/${kind}/${file.id}`, { method: 'DELETE' });
+  if (!r.ok) { const d = await r.json().catch(() => ({})); alert('Delete failed: ' + (d.error || r.status)); return; }
+  if (onDone) onDone();
+}
+const isAdmin = () => document.body.classList.contains('is-admin');
+
 async function openDetail(id, autoplay = true) {
   const [m, extra] = await Promise.all([
     fetch('/api/movies/' + id).then((r) => r.json()),
@@ -1182,6 +1193,7 @@ async function openDetail(id, autoplay = true) {
             <button class="btn" id="watchedBtn">${m.watched ? '✓ Watched' : 'Mark watched'}</button>
             ${(extra.alsoOn || []).map((slug) => { const p = STREAM_PROVIDERS[slug]; return p ? `<button class="btn btn-stream" data-slug="${slug}" style="--c:${p.color}">${escapeHtml(p.name)} ▸</button>` : ''; }).join('')}
             ${versionControl}
+            ${isAdmin() && current ? `<button class="btn btn-danger" id="del-file" title="Delete this file from the server">🗑 Delete file</button>` : ''}
           </div>
         </div>
       </div>
@@ -1201,6 +1213,12 @@ async function openDetail(id, autoplay = true) {
   const sel = document.getElementById('ver-select');
   if (sel && current) sel.value = String(current.id); // reflect the remembered version
   if (sel) sel.addEventListener('change', () => { const f = files.find((x) => String(x.id) === sel.value); if (f) { current = f; rememberVersion('m' + m.id, f); } });
+
+  // Admin: delete the currently-selected version's file from the server, then
+  // close the detail and refresh the library (the movie vanishes if that was its
+  // last version).
+  const delBtn = document.getElementById('del-file');
+  if (delBtn) delBtn.addEventListener('click', () => deleteFileFromServer('movie', current, closeDetail));
 
   function play(at) {
     openPlayer({
@@ -1334,6 +1352,7 @@ async function openEpisodeDetail(show, flat, i) {
             <span id="ep-playbtns"></span>
             <button class="btn" id="ep-watched">${ep.watched ? '✓ Watched' : 'Mark watched'}</button>
             ${versionControl}
+            ${isAdmin() && current ? `<button class="btn btn-danger" id="ep-del-file" title="Delete this file from the server">🗑 Delete file</button>` : ''}
           </div>
         </div>
       </div>
@@ -1358,6 +1377,10 @@ async function openEpisodeDetail(show, flat, i) {
   const sel = document.getElementById('ep-ver');
   if (sel && current) sel.value = String(current.id); // reflect the remembered version
   if (sel) sel.addEventListener('change', () => { const f = files.find((x) => String(x.id) === sel.value); if (f) { current = f; rememberVersion('e' + ep.id, f); } });
+  // Admin: delete this episode file from the server, then reopen the show (the
+  // episode drops off if that was its last version).
+  const epDelBtn = document.getElementById('ep-del-file');
+  if (epDelBtn) epDelBtn.addEventListener('click', () => deleteFileFromServer('episode', current, () => { closeDetail(); }));
   const playAt = (at) => playEpisodeAt(show, flat, i, { fileId: current.id, startAt: at });
   let resumeAt = resume;
   const epPlayBtns = document.getElementById('ep-playbtns');
