@@ -19,6 +19,7 @@ import { radarrEnabled, sonarrEnabled, testConn, radarrSearch, radarrAdd, sonarr
 import { runIntroDetection, introForFile, fpcalcReady } from './introdetect.js';
 import { hashPassword, verifyPassword, newToken, tokenFromReq, cookieHeader } from './auth.js';
 import { PROVIDERS, providersList, refreshCatalog, catalogFor, catalogProviderMap, titleProviders, watchLink, status as streamingStatus } from './streaming.js';
+import { registerHls } from './hls.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -1566,6 +1567,7 @@ async function start() {
   // (walking 1000s of files off HDDs) and TMDB enrichment then run in the
   // background instead of holding the port closed. This fixes "the server takes
   // forever to come back after an update."
+  registerHls(app, db); // Apple TV HLS transcode routes (/api/hls/*)
   await app.listen({ port: config.port, host: config.host });
   console.log(`\n  Media server running at http://localhost:${config.port}\n`);
 
