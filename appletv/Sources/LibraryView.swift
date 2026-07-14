@@ -1,125 +1,131 @@
 import SwiftUI
 
-// The Library tab — the whole collection A→Z, toggled Movies/TV, with an
-// alphabet rail that jumps to any letter (matching the web Library view).
+// The Library tab — the whole collection A→Z (matching the web Library): a clean
+// grouped grid with accent letter headers, a pill Movies/TV toggle, a sleek
+// search field, and a vertical A-Z rail on the right that jumps to any letter.
 struct LibraryView: View {
     @EnvironmentObject var store: Store
     @Binding var route: [Route]
     @State private var kind = "movie"
     @State private var query = ""
+    @FocusState private var searchFocused: Bool
     private let columns = [GridItem(.adaptive(minimum: Theme.posterWidth), spacing: Theme.cardSpacing)]
-    private var trimmed: String { query.trimmingCharacters(in: .whitespaces) }
-    private var filtered: [LibItem] {
-        items.filter { $0.title.range(of: trimmed, options: .caseInsensitive) != nil }
-    }
 
     private struct LibItem: Identifiable { let id: String; let title: String; let poster: String?; let sub: String?; let progress: Double; let route: Route }
 
-    private func sortKey(_ title: String) -> String {
-        title.replacingOccurrences(of: #"^(the|a|an) "#, with: "", options: [.regularExpression, .caseInsensitive])
+    private func sortKey(_ t: String) -> String {
+        t.replacingOccurrences(of: #"^(the|a|an) "#, with: "", options: [.regularExpression, .caseInsensitive])
     }
-    private func letter(_ title: String) -> String {
-        let c = sortKey(title).uppercased().first.map(String.init) ?? "#"
+    private func letter(_ t: String) -> String {
+        let c = sortKey(t).uppercased().first.map(String.init) ?? "#"
         return (c >= "A" && c <= "Z") ? c : "#"
     }
-
     private var items: [LibItem] {
+        let src: [LibItem]
         if kind == "movie" {
-            return store.movies.filter { !$0.isStream }.map {
-                LibItem(id: "m\($0.id)", title: $0.title, poster: $0.poster,
-                        sub: $0.year.map(String.init), progress: $0.progressFraction,
-                        route: .movie($0.localId ?? 0))
-            }.sorted { sortKey($0.title).localizedCaseInsensitiveCompare(sortKey($1.title)) == .orderedAscending }
+            src = store.movies.filter { !$0.isStream }.map {
+                LibItem(id: "m\($0.id)", title: $0.title, poster: $0.poster, sub: $0.year.map(String.init),
+                        progress: $0.progressFraction, route: .movie($0.localId ?? 0))
+            }
         } else {
-            return store.shows.filter { !$0.isStream }.map {
-                LibItem(id: "s\($0.id)", title: $0.title, poster: $0.poster,
-                        sub: $0.year.map(String.init), progress: 0, route: .show($0.localId ?? 0))
-            }.sorted { sortKey($0.title).localizedCaseInsensitiveCompare(sortKey($1.title)) == .orderedAscending }
+            src = store.shows.filter { !$0.isStream }.map {
+                LibItem(id: "s\($0.id)", title: $0.title, poster: $0.poster, sub: $0.year.map(String.init),
+                        progress: 0, route: .show($0.localId ?? 0))
+            }
         }
+        return src.sorted { sortKey($0.title).localizedCaseInsensitiveCompare(sortKey($1.title)) == .orderedAscending }
     }
+    private var trimmed: String { query.trimmingCharacters(in: .whitespaces) }
+    private var filtered: [LibItem] { items.filter { $0.title.range(of: trimmed, options: .caseInsensitive) != nil } }
     private var groups: [(String, [LibItem])] {
-        Dictionary(grouping: items, by: { letter($0.title) })
-            .sorted { $0.key < $1.key }
+        Dictionary(grouping: items, by: { letter($0.title) }).sorted { $0.key < $1.key }
     }
-    private var presentLetters: Set<String> { Set(items.map { letter($0.title) }) }
-    private let alphabet: [String] = ["#"] + (65...90).map { String(UnicodeScalar($0)) }
+    private var letters: [String] { groups.map { $0.0 } }
 
     var body: some View {
         ScrollViewReader { proxy in
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(spacing: 16) {
-                    Text("Library").font(.system(size: 46, weight: .bold))
-                    Spacer()
-                    ForEach(["movie", "tv"], id: \.self) { k in
-                        Button(k == "movie" ? "Movies" : "TV Shows") { kind = k }
-                            .buttonStyle(.borderedProminent)
-                            .tint(kind == k ? Theme.accent : Color.gray.opacity(0.4))
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    HStack(spacing: 20) {
+                        toggle
+                        searchField
+                        Spacer(minLength: 0)
+                        Text("\(items.count)").font(.title3).foregroundStyle(Theme.muted)
                     }
-                }
-                .padding(.horizontal, Theme.gutter).padding(.top, 40).padding(.bottom, 14)
 
-                TextField("Search \(kind == "movie" ? "movies" : "shows")", text: $query)
-                    .textFieldStyle(.plain).font(.title3)
-                    .padding(14).background(Theme.card, in: RoundedRectangle(cornerRadius: 10))
-                    .padding(.horizontal, Theme.gutter).padding(.bottom, 8)
-
-                if !trimmed.isEmpty {
-                    // Search results (flat grid).
-                    ScrollView {
-                        if filtered.isEmpty {
-                            Text("No matches for “\(trimmed)”.").foregroundStyle(.secondary).padding(Theme.gutter)
-                        }
+                    if !trimmed.isEmpty {
                         LazyVGrid(columns: columns, spacing: Theme.rowSpacing) {
-                            ForEach(filtered) { it in
-                                PosterCard(title: it.title, posterURL: it.poster, subtitle: it.sub,
-                                           progress: it.progress) { route.append(it.route) }
-                            }
+                            ForEach(filtered) { card($0) }
                         }
-                        .padding(Theme.gutter)
-                    }
-                } else {
-                // Alphabet rail — jump to a letter.
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(alphabet, id: \.self) { L in
-                            let has = presentLetters.contains(L)
-                            Button(L) { if has { withAnimation { proxy.scrollTo(L, anchor: .top) } } }
-                                .buttonStyle(.bordered)
-                                .tint(Theme.accent)
-                                .disabled(!has)
-                                .opacity(has ? 1 : 0.3)
+                        if filtered.isEmpty {
+                            Text("No matches for “\(trimmed)”.").foregroundStyle(Theme.muted).padding(.top, 20)
                         }
-                    }
-                    .padding(.horizontal, Theme.gutter).padding(.vertical, 6)
-                }
-
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 30, pinnedViews: [.sectionHeaders]) {
+                    } else {
                         ForEach(groups, id: \.0) { L, list in
-                            Section {
-                                LazyVGrid(columns: columns, spacing: Theme.rowSpacing) {
-                                    ForEach(list) { it in
-                                        PosterCard(title: it.title, posterURL: it.poster,
-                                                   subtitle: it.sub, progress: it.progress) {
-                                            route.append(it.route)
-                                        }
-                                    }
-                                }
-                                .padding(.horizontal, Theme.gutter)
-                            } header: {
-                                Text(L).font(.title).fontWeight(.heavy).foregroundStyle(Theme.accentSoft)
-                                    .padding(.horizontal, Theme.gutter).padding(.vertical, 8)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .background(Theme.bg.opacity(0.95))
-                                    .id(L)
+                            Text(L).font(.system(size: 30, weight: .heavy)).foregroundStyle(Theme.accent2)
+                                .padding(.top, 8).id("L-\(L)")
+                            LazyVGrid(columns: columns, spacing: Theme.rowSpacing) {
+                                ForEach(list) { card($0) }
                             }
                         }
                     }
-                    .padding(.bottom, Theme.gutter)
                 }
-                }
+                .padding(.leading, Theme.gutter).padding(.trailing, 96)
+                .padding(.top, 32).padding(.bottom, Theme.gutter)
+            }
+            .overlay(alignment: .trailing) {
+                if trimmed.isEmpty && !letters.isEmpty { azRail(proxy) }
             }
         }
         .task { if store.movies.isEmpty { await store.loadHome() } }
+    }
+
+    private func card(_ it: LibItem) -> some View {
+        PosterCard(title: it.title, posterURL: it.poster, subtitle: it.sub, progress: it.progress) {
+            route.append(it.route)
+        }
+    }
+
+    // Sleek pill segmented control (web .lib-head .tabs).
+    private var toggle: some View {
+        HStack(spacing: 4) {
+            ForEach(["movie", "tv"], id: \.self) { k in
+                Button { kind = k } label: {
+                    Text(k == "movie" ? "Movies" : "TV Shows")
+                        .font(.headline).padding(.horizontal, 22).padding(.vertical, 10)
+                        .foregroundStyle(kind == k ? .white : Theme.muted)
+                        .background { if kind == k { Capsule().fill(Theme.grad) } }
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(5).background(Theme.card, in: Capsule())
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "magnifyingglass").foregroundStyle(searchFocused ? Theme.accent : Theme.muted)
+            TextField("Search", text: $query).textFieldStyle(.plain).font(.title3).focused($searchFocused)
+        }
+        .padding(.horizontal, 22).padding(.vertical, 12)
+        .frame(maxWidth: 520)
+        .background(Theme.card, in: Capsule())
+        .overlay(Capsule().strokeBorder(searchFocused ? Theme.accent : .clear, lineWidth: 2))
+    }
+
+    // Vertical A-Z rail on the right edge — jump to a letter.
+    private func azRail(_ proxy: ScrollViewProxy) -> some View {
+        VStack(spacing: 2) {
+            ForEach(letters, id: \.self) { L in
+                Button { withAnimation { proxy.scrollTo("L-\(L)", anchor: .top) } } label: {
+                    Text(L).font(.caption).fontWeight(.heavy).foregroundStyle(Theme.accent2)
+                        .frame(width: 46, height: 30)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.vertical, 14)
+        .background(Theme.card.opacity(0.65), in: Capsule())
+        .padding(.trailing, 24)
     }
 }

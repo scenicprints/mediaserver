@@ -196,6 +196,7 @@ struct LiveTVView: View {
                     }
                     .padding(.bottom, Theme.gutter)
                 }
+                .ignoresSafeArea()
             }
         }
         .task { await load() }
@@ -211,13 +212,21 @@ struct LiveTVView: View {
         let on = LiveTV.nowOn(ch, now.timeIntervalSince1970)
         ZStack(alignment: .bottomLeading) {
             ArtImage(url: on.item.backdrop ?? on.item.still ?? on.item.poster, aspect: 16.0 / 9.0)
-                .frame(height: 560).frame(maxWidth: .infinity).clipped()
+                .frame(height: 640).frame(maxWidth: .infinity).clipped()
                 .overlay {
                     LinearGradient(stops: [
                         .init(color: Theme.bg, location: 0.0),
-                        .init(color: Theme.bg.opacity(0.35), location: 0.5),
-                        .init(color: .clear, location: 0.9)
+                        .init(color: Theme.bg.opacity(0.55), location: 0.28),
+                        .init(color: .clear, location: 0.62),
+                        .init(color: .clear, location: 0.82),
+                        .init(color: Theme.bg.opacity(0.5), location: 1.0)
                     ], startPoint: .bottom, endPoint: .top)
+                }
+                .overlay {
+                    LinearGradient(stops: [
+                        .init(color: Theme.bg.opacity(0.9), location: 0.0),
+                        .init(color: .clear, location: 0.55)
+                    ], startPoint: .leading, endPoint: .trailing)
                 }
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 14) {

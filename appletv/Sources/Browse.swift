@@ -28,12 +28,15 @@ struct MarqueeHero: View {
         ZStack(alignment: .bottomLeading) {
             ArtImage(url: it.backdrop, aspect: 16.0 / 9.0)
                 .frame(height: 840).frame(maxWidth: .infinity).clipped()
-                // Vertical fade to the page background (web .hero::after, 0deg).
+                // Vertical fade — melt into the page at the bottom AND soften the
+                // top so there's no hard edge under the tab bar.
                 .overlay {
                     LinearGradient(stops: [
                         .init(color: Theme.bg, location: 0.0),
-                        .init(color: Theme.bg.opacity(0.4), location: 0.34),
-                        .init(color: .clear, location: 0.68)
+                        .init(color: Theme.bg.opacity(0.55), location: 0.26),
+                        .init(color: .clear, location: 0.58),
+                        .init(color: .clear, location: 0.82),
+                        .init(color: Theme.bg.opacity(0.5), location: 1.0)
                     ], startPoint: .bottom, endPoint: .top)
                 }
                 // Horizontal scrim so the title reads over bright art (web 90deg).
