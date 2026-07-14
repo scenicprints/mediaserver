@@ -112,6 +112,14 @@ struct ArtImage: View {
     }
 }
 
+// Seconds -> H:MM:SS or M:SS timecode.
+func timecode(_ seconds: Double) -> String {
+    let s = Int(seconds)
+    let h = s / 3600, m = (s % 3600) / 60, sec = s % 60
+    return h > 0 ? String(format: "%d:%02d:%02d", h, m, sec)
+                 : String(format: "%d:%02d", m, sec)
+}
+
 // A small rounded metadata pill (year, rating, genre, quality…).
 struct Chip: View {
     let text: String

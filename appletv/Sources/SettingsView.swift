@@ -7,15 +7,23 @@ struct SettingsView: View {
 
     // Form state
     @State private var serverField = ""
-    @State private var osKey = "", osUser = "", osPass = ""
-    @State private var radarrURL = "", radarrKey = "", sonarrURL = "", sonarrKey = ""
-    @State private var prerollPath = "", prerollAvail = false
-    @State private var newUser = "", newPass = ""
+    @State private var osKey = ""
+    @State private var osUser = ""
+    @State private var osPass = ""
+    @State private var radarrURL = ""
+    @State private var radarrKey = ""
+    @State private var sonarrURL = ""
+    @State private var sonarrKey = ""
+    @State private var prerollPath = ""
+    @State private var prerollAvail = false
+    @State private var newUser = ""
+    @State private var newPass = ""
     // Loaded data
     @State private var providers: ProvidersResponse?
     @State private var users: [UserRow] = []
     @State private var sessions: [AdminSession] = []
-    @State private var ffmpeg: EngineStatus?, whisper: EngineStatus?
+    @State private var ffmpeg: EngineStatus?
+    @State private var whisper: EngineStatus?
     @State private var version = ""
     @State private var toast: String?
 
