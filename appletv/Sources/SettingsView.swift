@@ -26,6 +26,7 @@ struct SettingsView: View {
     @State private var whisper: EngineStatus?
     @State private var version = ""
     @State private var toast: String?
+    @State private var showRequests = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -36,6 +37,7 @@ struct SettingsView: View {
                         .padding(.horizontal, Theme.gutter).padding(.top, 40)
 
                     account
+                    requests
                     audio
                     subtitles
                     streaming
@@ -53,6 +55,26 @@ struct SettingsView: View {
         }
         .onAppear { serverField = store.serverURL }
         .task { await loadAll() }
+        .fullScreenCover(isPresented: $showRequests) {
+            ZStack(alignment: .topTrailing) {
+                RequestsView()
+                Button { showRequests = false } label: {
+                    Label("Done", systemImage: "xmark").padding(.horizontal, 10)
+                }
+                .buttonStyle(.bordered).padding(Theme.gutter)
+            }
+            .onExitCommand { showRequests = false }
+        }
+    }
+
+    private var requests: some View {
+        SettingsCard("Requests") {
+            Text("Search Radarr/Sonarr and add movies & shows to your library.")
+                .font(.callout).foregroundStyle(.secondary)
+            Button { showRequests = true } label: {
+                Label("Open Requests", systemImage: "plus.magnifyingglass")
+            }.buttonStyle(.borderedProminent).tint(Theme.accent)
+        }
     }
 
     // ---- Viewer sections ----

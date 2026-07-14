@@ -37,7 +37,6 @@ struct ContentView: View {
                     LiveTVView().tabItem { Text("Live TV") }.tag("livetv")
                     NavTab { LibraryView(route: $0) }.tabItem { Text("Library") }.tag("library")
                     NavTab { CollectionsView(route: $0) }.tabItem { Text("Collections") }.tag("collections")
-                    RequestsView().tabItem { Text("Requests") }.tag("requests")
                     SettingsView().tabItem { Text("Settings") }.tag("settings")
                 }
             } else {

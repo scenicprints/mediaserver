@@ -6,7 +6,12 @@ struct LibraryView: View {
     @EnvironmentObject var store: Store
     @Binding var route: [Route]
     @State private var kind = "movie"
+    @State private var query = ""
     private let columns = [GridItem(.adaptive(minimum: Theme.posterWidth), spacing: Theme.cardSpacing)]
+    private var trimmed: String { query.trimmingCharacters(in: .whitespaces) }
+    private var filtered: [LibItem] {
+        items.filter { $0.title.range(of: trimmed, options: .caseInsensitive) != nil }
+    }
 
     private struct LibItem: Identifiable { let id: String; let title: String; let poster: String?; let sub: String?; let progress: Double; let route: Route }
 
@@ -51,8 +56,28 @@ struct LibraryView: View {
                             .tint(kind == k ? Theme.accent : Color.gray.opacity(0.4))
                     }
                 }
-                .padding(.horizontal, Theme.gutter).padding(.top, 40).padding(.bottom, 18)
+                .padding(.horizontal, Theme.gutter).padding(.top, 40).padding(.bottom, 14)
 
+                TextField("Search \(kind == "movie" ? "movies" : "shows")", text: $query)
+                    .textFieldStyle(.plain).font(.title3)
+                    .padding(14).background(Theme.card, in: RoundedRectangle(cornerRadius: 10))
+                    .padding(.horizontal, Theme.gutter).padding(.bottom, 8)
+
+                if !trimmed.isEmpty {
+                    // Search results (flat grid).
+                    ScrollView {
+                        if filtered.isEmpty {
+                            Text("No matches for “\(trimmed)”.").foregroundStyle(.secondary).padding(Theme.gutter)
+                        }
+                        LazyVGrid(columns: columns, spacing: Theme.rowSpacing) {
+                            ForEach(filtered) { it in
+                                PosterCard(title: it.title, posterURL: it.poster, subtitle: it.sub,
+                                           progress: it.progress) { route.append(it.route) }
+                            }
+                        }
+                        .padding(Theme.gutter)
+                    }
+                } else {
                 // Alphabet rail — jump to a letter.
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
@@ -91,6 +116,7 @@ struct LibraryView: View {
                         }
                     }
                     .padding(.bottom, Theme.gutter)
+                }
                 }
             }
         }
