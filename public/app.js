@@ -1923,12 +1923,43 @@ function openPlayer(ctx) {
     playBtns.forEach((b) => (b.innerHTML = i));
     vp.classList.toggle('vp-ispaused', video.paused);
   }
-  function togglePlay() { if (live) return; video.paused ? video.play() : video.pause(); } // can't pause live TV
+  // Resume robustly: video.play() returns a promise that a TV WebView can reject
+  // (transient-activation quirks); fall back to a muted start then unmute, the
+  // same trick attemptPlay() uses, so a remote's Play never silently no-ops.
+  function playNow() {
+    if (live) return;
+    const p = video.play();
+    if (p && p.catch) p.catch(() => { video.muted = true; video.play().then(() => { video.muted = false; }).catch(() => {}); });
+  }
+  function pauseNow() { if (!live) video.pause(); } // can't pause live TV
+  function togglePlay() { if (live) return; video.paused ? playNow() : pauseNow(); }
   playBtns.forEach((b) => b.addEventListener('click', togglePlay));
   video.addEventListener('click', togglePlay);
   video.addEventListener('play', setPlayIcons);
   video.addEventListener('pause', setPlayIcons);
   setPlayIcons();
+
+  // MediaSession: the reliable route for a TV remote's dedicated ▶⏸ button (and
+  // OS/lock-screen media keys). Without registered handlers, a WebView pauses on
+  // the hardware key but has no wired way to resume — the reported "can't pause
+  // then play again". Registering play/pause/seek handlers makes those keys drive
+  // OUR player, and keeping playbackState synced tells the OS which action is next.
+  if ('mediaSession' in navigator && !live) {
+    const ms = navigator.mediaSession;
+    try {
+      ms.setActionHandler('play', () => { playNow(); showUI(); });
+      ms.setActionHandler('pause', () => { pauseNow(); showUI(); });
+      ms.setActionHandler('stop', () => { pauseNow(); showUI(); });
+      ms.setActionHandler('seekbackward', (d) => { seekTo(cur() - (d && d.seekOffset ? d.seekOffset : 10)); showUI(); });
+      ms.setActionHandler('seekforward', (d) => { seekTo(cur() + (d && d.seekOffset ? d.seekOffset : 10)); showUI(); });
+      try { ms.setActionHandler('metadata', null); } catch (_e) {}
+      ms.metadata = new MediaMetadata({ title: ctx.title || '', artist: ctx.subtitle || '' });
+    } catch (_e) { /* older WebViews: some actions unsupported — ignore */ }
+    const syncMs = () => { try { ms.playbackState = video.paused ? 'paused' : 'playing'; } catch (_e) {} };
+    video.addEventListener('play', syncMs);
+    video.addEventListener('pause', syncMs);
+    syncMs();
+  }
   vp.querySelectorAll('.vp-skip').forEach((b) => b.addEventListener('click', () => { seekTo(cur() + +b.dataset.d); }));
 
   // scrub + time (all through cur()/dur() so transcode's virtual timeline works)
@@ -2229,6 +2260,12 @@ function openPlayer(ctx) {
     if (vp.classList.contains('vp-prerolling') && e.key !== 'Escape' && e.key !== 'Backspace') { e.preventDefault(); return; }
     const a = document.activeElement;
     if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA')) return; // typing (subtitle search)
+    // Hardware media keys (some TV WebViews deliver the remote's ▶⏸ as a keydown
+    // rather than via MediaSession) — handle them here too so pause/resume works
+    // no matter which path fires. Kept above the menu/up-next guards on purpose.
+    if (e.key === 'MediaPlayPause') { e.preventDefault(); togglePlay(); showUI(); return; }
+    if (e.key === 'MediaPlay') { e.preventDefault(); playNow(); showUI(); return; }
+    if (e.key === 'MediaPause' || e.key === 'MediaStop') { e.preventDefault(); pauseNow(); showUI(); return; }
     const menuOpen = !menu.classList.contains('hidden');
     const subsOpen = !document.getElementById('subs').classList.contains('hidden');
     if (e.key === 'Escape' || e.key === 'Backspace') {
@@ -2269,12 +2306,21 @@ function openPlayer(ctx) {
     if (nav) {
       e.preventDefault();
       vp.classList.add('vp-keys');
-      // Controls hidden? The first press only reveals them, focused on the bar.
-      if (vp.classList.contains('hide-ui')) { showUI(); pfSet(0); return; }
+      // Controls hidden? Arrows just reveal them (focused on the bar). The OK/center
+      // button (Enter) is the remote's primary play/pause — reveal AND toggle in one
+      // press, so pausing/resuming never takes two presses from a clean screen.
+      if (vp.classList.contains('hide-ui')) { showUI(); pfSet(0); if (e.key === 'Enter') togglePlay(); return; }
       showUI();
       const { rows, r, c } = pfLocate();
       const onBar = rows[r] && rows[r][c] && rows[r][c].classList.contains('vp-scrub');
-      if (e.key === 'Enter') { if (onBar) togglePlay(); else (rows[r][c] || pfEls()[0]).click(); }
+      // Enter on the scrub bar (the home position) is play/pause; on an explicit
+      // control it activates that control. Focus already on the ▶ transport button
+      // also toggles, so OK reliably pauses/resumes wherever the ring naturally sits.
+      if (e.key === 'Enter') {
+        const el = rows[r] && rows[r][c];
+        if (onBar || (el && el.classList.contains('vp-play'))) togglePlay();
+        else (el || pfEls()[0]).click();
+      }
       else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
         // Step to the adjacent row, keeping the remembered horizontal position.
         const nr = e.key === 'ArrowUp' ? r - 1 : r + 1;
