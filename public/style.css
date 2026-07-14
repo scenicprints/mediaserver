@@ -571,10 +571,10 @@ button { font-family: inherit; }
    plays, the player chrome is hidden so it can't be skipped or scrubbed. */
 .vp-preroll-vid { z-index: 3; }
 .vp.vp-prerolling .vp-top, .vp.vp-prerolling .vp-bottom, .vp.vp-prerolling .vp-engine,
-.vp.vp-prerolling .vp-pausedbadge, .vp.vp-prerolling .vp-skipbtn { display: none !important; }
+.vp.vp-prerolling .vp-transport, .vp.vp-prerolling .vp-skipbtn { display: none !important; }
 .vp ::cue { background: rgba(0,0,0,0.55); color: #fff; font-size: 1.05em; line-height: 1.35; }
 .vp-fade { transition: opacity 0.25s ease; }
-.vp.hide-ui .vp-top, .vp.hide-ui .vp-bottom { opacity: 0; pointer-events: none; }
+.vp.hide-ui .vp-top, .vp.hide-ui .vp-bottom, .vp.hide-ui .vp-transport { opacity: 0; pointer-events: none; }
 /* The admin badge stays visible (doesn't fade with the controls) so it's easy to
    find and click for diagnostics. It's admin-only, so regular viewers never see it. */
 /* Admin-only diagnostic badge: direct-play vs transcode + what's being converted. */
@@ -593,22 +593,31 @@ button { font-family: inherit; }
 .vp-back { background: none; border: none; color: #fff; font-size: 16px; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 6px; }
 .vp-titles .vp-t { font-size: 18px; font-weight: 700; }
 .vp-titles .vp-st { font-size: 13px; color: #c7ccda; }
-/* paused badge — a single, calm center indicator instead of the old floating
-   button cluster (the video itself and the bottom bar are the controls) */
-.vp-pausedbadge {
-  position: absolute; inset: 0; margin: auto; width: 110px; height: 110px; z-index: 3;
-  display: flex; align-items: center; justify-content: center; border-radius: 50%;
-  background: rgba(8, 9, 13, 0.55); backdrop-filter: blur(4px); pointer-events: none;
-  opacity: 0; transform: scale(0.85); transition: opacity 0.18s ease, transform 0.18s ease;
+/* Center transport: the big play/pause flanked by ±10s skips, floated in the
+   middle of the screen (the primary controls for lean-back / remote use). */
+.vp-transport {
+  position: absolute; inset: 0; margin: auto; width: max-content; height: max-content; z-index: 5;
+  display: flex; align-items: center; justify-content: center; gap: 34px;
 }
-.vp.vp-ispaused .vp-pausedbadge { opacity: 1; transform: scale(1); }
-.vp-pausedbadge svg { width: 52px; height: 52px; color: #fff; }
+.vp-transport button {
+  display: flex; align-items: center; justify-content: center; position: relative;
+  border: none; cursor: pointer; color: #fff; border-radius: 50%;
+  background: rgba(8, 9, 13, 0.55); backdrop-filter: blur(4px);
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+.vp-transport button:hover { background: rgba(255, 255, 255, 0.16); }
+.vp-transport .vp-play { width: 104px; height: 104px; }
+.vp-transport .vp-play svg { width: 50px; height: 50px; display: block; }
+.vp-transport .vp-skip { width: 76px; height: 76px; }
+.vp-transport .vp-skip svg { width: 44px; height: 44px; display: block; }
+.vp-transport .vp-skip b { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 800; padding-top: 4px; }
+.vp-transport button.pfocus { background: rgba(255, 255, 255, 0.16); box-shadow: 0 0 0 3px var(--accent), 0 0 22px rgba(108, 92, 255, 0.85); transform: scale(1.06); }
 
 /* Live TV: a real broadcast — hide all time-travel controls, show a LIVE tag. */
 .vp-liveind { display: none; align-items: center; gap: 7px; font-size: 13px; font-weight: 800; letter-spacing: 1px; color: var(--hot); }
 .vp-live .vp-liveind { display: inline-flex; }
-.vp-live .vp-scrub, .vp-live .vp-skip, .vp-live .vp-play, .vp-live .vp-time,
-.vp-live .vp-skipbtn, .vp-live .vp-pausedbadge { display: none !important; }
+.vp-live .vp-scrub, .vp-live .vp-transport, .vp-live .vp-time,
+.vp-live .vp-skipbtn { display: none !important; }
 .vp-bottom {
   position: absolute; left: 0; right: 0; bottom: 0; z-index: 8; padding: 0 44px 24px; transition: opacity 0.25s ease;
   background: linear-gradient(0deg, rgba(0,0,0,0.88) 0%, rgba(0,0,0,0.45) 55%, rgba(0,0,0,0) 100%);

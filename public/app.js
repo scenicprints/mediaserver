@@ -1674,7 +1674,6 @@ function openPlayer(ctx) {
       <div class="vp-titles"><div class="vp-t">${escapeHtml(ctx.title)}</div>${ctx.subtitle ? `<div class="vp-st">${escapeHtml(ctx.subtitle)}</div>` : ''}</div>
     </div>
     <div class="vp-engine hidden"></div>
-    <div class="vp-pausedbadge">${ICONS.play}</div>
     <div class="vp-bottom vp-fade">
       <div class="vp-scrub" data-pf>
         <div class="vp-track"></div><div class="vp-buffered"></div><div class="vp-played"></div>
@@ -1682,10 +1681,6 @@ function openPlayer(ctx) {
         <input class="vp-seek" type="range" min="0" max="1000" value="0">
       </div>
       <div class="vp-ctrls">
-        <button class="vp-skip" data-pf data-d="-10" title="Back 10 seconds">${ICONS.back}<b>10</b></button>
-        <button class="vp-play" data-pf title="Play / Pause">${ICONS.pause}</button>
-        <button class="vp-skip" data-pf data-d="10" title="Forward 10 seconds">${ICONS.fwd}<b>10</b></button>
-        <button class="vp-mute" data-pf title="Mute">${ICONS.volHigh}</button><input class="vp-volbar" type="range" min="0" max="1" step="0.05" value="1">
         <span class="vp-time">0:00 / 0:00</span>
         <span class="vp-liveind"><span class="lt-live-dot"></span>LIVE</span>
         <div class="vp-spacer"></div>
@@ -1693,6 +1688,11 @@ function openPlayer(ctx) {
         <button class="vp-gear" data-pf title="Settings">${ICONS.gear}</button>
         <button class="vp-fs" data-pf title="Fullscreen">${ICONS.fullscreen}</button>
       </div>
+    </div>
+    <div class="vp-transport vp-fade">
+      <button class="vp-skip" data-pf data-d="-10" title="Back 10 seconds">${ICONS.back}<b>10</b></button>
+      <button class="vp-play" data-pf title="Play / Pause">${ICONS.pause}</button>
+      <button class="vp-skip" data-pf data-d="10" title="Forward 10 seconds">${ICONS.fwd}<b>10</b></button>
     </div>
     <button class="vp-skipbtn vp-skipintro hidden">Skip Intro ⏭</button>
     <button class="vp-skipbtn vp-skipcredits hidden">Skip Credits ⏭</button>
@@ -1976,13 +1976,8 @@ function openPlayer(ctx) {
   });
   seek.addEventListener('change', () => { if (dur()) seekTo((seek.value / 1000) * dur()); seeking = false; bubble.classList.add('hidden'); });
 
-  // volume
-  const mute = vp.querySelector('.vp-mute'), volbar = vp.querySelector('.vp-volbar');
-  volbar.addEventListener('input', () => { video.volume = +volbar.value; video.muted = false; });
-  mute.addEventListener('click', () => { video.muted = !video.muted; });
-  // Keep the icon in sync even when muted is toggled programmatically (the
-  // autoplay fallback briefly mutes then unmutes).
-  video.addEventListener('volumechange', () => { mute.innerHTML = video.muted ? ICONS.volMute : ICONS.volHigh; });
+  // Volume is controlled by the TV/remote itself, so the player has no on-screen
+  // mute button or volume slider (removed by request).
 
   // fullscreen
   vp.querySelector('.vp-fs').addEventListener('click', () => { if (document.fullscreenElement) document.exitFullscreen(); else if (vp.requestFullscreen) vp.requestFullscreen(); });
@@ -2166,6 +2161,9 @@ function openPlayer(ctx) {
   // auto-hide chrome
   let hideTimer;
   function showUI() { vp.classList.remove('hide-ui'); clearTimeout(hideTimer); hideTimer = setTimeout(() => { if (!video.paused && menu.classList.contains('hidden')) vp.classList.add('hide-ui'); }, 3500); }
+  // Instant "get rid of everything" — hide all chrome now (press 'h', or the
+  // remote's Back button as its first press). Also drops the key-focus ring.
+  function hideUINow() { clearTimeout(hideTimer); vp.classList.remove('vp-keys'); vp.classList.add('hide-ui'); menu.classList.add('hidden'); }
   vp.addEventListener('mousemove', () => { vp.classList.remove('vp-keys'); paintPf(); paintUpNext(); showUI(); });
   showUI();
 
@@ -2220,6 +2218,9 @@ function openPlayer(ctx) {
       e.preventDefault(); e.stopPropagation();
       if (subsOpen) document.getElementById('subs').classList.add('hidden');
       else if (menuOpen) menu.classList.add('hidden');
+      // While watching (playing, chrome visible), the first Back just clears the
+      // screen. Press it again — or when paused/already hidden — to exit.
+      else if (!video.paused && !vp.classList.contains('hide-ui')) hideUINow();
       else close();
       return;
     }
@@ -2268,7 +2269,7 @@ function openPlayer(ctx) {
     }
     if (e.key === ' ' || e.key === 'k') { e.preventDefault(); togglePlay(); showUI(); }
     else if (e.key === 'f') vp.querySelector('.vp-fs').click();
-    else if (e.key === 'm') mute.click();
+    else if (e.key === 'h') { e.preventDefault(); hideUINow(); }
     else if (e.key === 'c') vp.querySelector('.vp-cc').click();
     else if (e.key === 's') { menuIdx = 0; buildMenu(); menu.classList.remove('hidden'); showUI(); }
   };
