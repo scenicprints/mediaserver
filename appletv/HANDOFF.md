@@ -26,21 +26,26 @@ in the tvOS Simulator so we review look **before** shipping to TestFlight.
   role; `ITSAppUsesNonExemptEncryption=false` in Info.plist skips the
   compliance prompt.
 
-## How to PREVIEW without shipping (the review loop we now use)
+## How to PREVIEW without shipping
 - `gh workflow run "Apple TV preview shots"` → `.github/workflows/appletv-preview.yml`
   builds for the tvOS Simulator, boots it, and screenshots each tab, uploaded
-  as the `preview-shots` artifact.
+  as the `preview-shots` artifact. Also runs automatically on push to
+  `appletv/**`. Its main value is as the **Swift compile check** (no local
+  toolchain on the owner's Windows box).
+- **DO NOT deliver screenshot galleries to the owner anymore** (2026-07-14):
+  the JPEG/Artifact galleries rendered at "1/4 of the image" on his end and he
+  ended that loop — "just ship it". He reviews on the actual Apple TV. The loop
+  is now: change → preview build green → owner says ship → ship.
 - It uses **mock data from TMDB** (secret `MARQUEE_PREVIEW_TMDB`) because the
   owner's server is often offline/unreachable from CI — see
   `Store.loadPreviewMock` + the `PREVIEW_*` env hook in `MediaServerApp.swift`.
-- Download + view: `gh run download <id> -n preview-shots -D /tmp/shots`.
-- To show the owner: downscale the PNGs to JPEG + base64 into an HTML page and
-  publish via the Artifact tool (that's how the gallery was delivered).
-- **Known harness flakiness:** Library & Settings tabs sometimes capture the
-  login screen (the mock token gets cleared mid-run). FIX: give `Store` a
-  `previewMode` flag so `isLoggedIn` stays true and a 401 can't clear it in
-  preview. Detail/Collections/Requests/Search aren't screenshotted yet — add
-  them (detail needs launching straight into a `.movie(id)` route).
+- Download shots if you need them: `gh run download <id> -n preview-shots`.
+- **Known harness flakiness:** the tab captured right after the first
+  terminate+relaunch (Movies) reliably photographs the tvOS boot/home screen.
+  A size-based retry (<300 KB → relaunch) is in the workflow but the ~1.8 MB
+  springboard grab still slips past — if it matters again, also retry when the
+  screenshot's md5 matches the previous tab's, or sleep between terminate and
+  relaunch.
 
 ## What's built (Swift in `appletv/Sources/`)
 Home/Movies/TV as **BrowseScreen** (rotating **Marquee hero** — weekly pick of
@@ -60,26 +65,47 @@ transcodes mkv/etc. to HLS for AVPlayer. **Not yet verified on-device** — the
 first real .mkv is the test. Subtitles (below) will extend this module.
 
 ## ROADMAP — prioritized, pick up here
-Owner saw build 13, said it "looked nothing like" the web, gave 11 issues;
-fixes shipped in batches H/I/J (see auto-memory). **Still open, roughly in order:**
-1. **Confirm the H/I/J fixes on-device** — owner has only seen the preview
-   gallery, not the fixes on the actual Apple TV. Get their read first.
-2. **AI/Whisper subtitles in the player** (owner-requested, item 11). AVPlayer
-   needs subs as an HLS WebVTT rendition — extend `src/hls.js` to add a
-   subtitle group (extract embedded subs via ffmpeg `embeddedSubtitles`/
-   `extractSubtitle`, and external/OpenSubtitles/Whisper via `/api/subtitle/*`).
-   Add a CC picker + "Generate AI subtitles" (`/api/subtitles/generate`, poll).
-3. **TV-show Back exits the app** — attempted fix `.toolbar(.hidden,for:.tabBar)`
-   is UNCONFIRMED. If still broken, present detail via `fullScreenCover` +
-   `.onExitCommand { dismiss }` instead of a NavigationStack push.
-4. **Version picker** present (Menu when >1 file) but owner reported missing —
-   confirm on a multi-version title.
-5. **Verify .mkv playback** via the deployed HLS end-to-end on the Apple TV.
-6. **Fix preview harness** (Library/Settings login flicker) + add remaining
-   tabs/detail to the gallery.
-7. Polish from on-device eyes: focus/spacing/colors, hero timing.
-8. Not done: trailer playback (YouTube on tvOS — skipped by choice); Live TV is
-   movie+episode but tune-in for episodes fetches the show to resolve the file.
+**2026-07-14 (later): owner's first real on-device review came back with ~15
+issues; ALL were addressed in one big batch (commit `aaa322a`) — see the
+auto-memory for the list.** The headline pieces of that batch:
+- **HLS v2 (`src/hls.js`)** — full VOD playlist + seek-on-demand ffmpeg restarts
+  (absolute segment numbering, `-copyts`, keyframes forced on the 6s grid,
+  NVENC when present). Fixes the "LIVE" badge on transcodes, gives real
+  duration/scrubbing, makes resume + Live TV join-in-progress work, and
+  `master.m3u8` lists WebVTT subtitle renditions (sidecar/embedded/AI) so the
+  NATIVE tvOS CC picker works. Video is always re-encoded (never copied) so
+  segments align with the uniform playlist — revisit if quality/load complains.
+- Subtitle-aware playback: native containers with subtitle tracks also route
+  through HLS (`Store.resolvePlaybackURL`) so CC is available; "AI Subtitles"
+  buttons on movie detail + episode long-press call `/api/subtitles/generate`
+  and poll.
+- Player heartbeats `/api/session/heartbeat` (admin Now Playing works from
+  tvOS) and shows Skip Intro/Credits via `AVPlayerViewController
+  .contextualActions` from `/api/play` intro/chapter data.
+- Server additions (all additive): `show_title` on `/api/continue`, TV cast on
+  `/api/shows/:id/extra`, `registerHls(app, db, { allSubtitleTracks })`.
+- UI parity: card labels below posters (always visible), wordmark scrolls with
+  the page, Home rows mixed, Collections decode fixed (meta:* ids), Library/
+  search include streaming, show detail is a movie-style description window,
+  movie overview moved BELOW the splash, Live TV guide times floored to
+  :00/:30 + wider labels + custom row focus (no white platter).
+
+**Still open / verify next:**
+1. **On-device re-test of everything above** — especially mkv seek/scrub (HLS
+   v2 is unverified on real hardware), Skip Intro appearing, CC picker showing
+   tracks, admin Now Playing, Live TV joining mid-program.
+2. **Server deploy**: the Dell picks up `src/*` only when the owner runs the
+   web app's update (git pull + restart via run.bat). HLS v2 + the endpoint
+   additions need that before on-device testing shows them.
+3. **TV-show Back exits the app** — `.toolbar(.hidden,for:.tabBar)` fix is
+   STILL unconfirmed. If broken, switch detail to fullScreenCover +
+   `.onExitCommand { dismiss }`.
+4. Preview harness flakiness (sim grabs the tvOS home screen for random tabs —
+   re-run); detail/Collections screens aren't captured yet.
+5. Not done: trailer playback (YouTube on tvOS — skipped by choice); dboost/
+   night/norm audio filters are ignored on the HLS path (only stereo fold).
+6. An uncommitted `androidtv/MainActivity.kt` change sits in the owner's
+   working tree (not from an Apple TV session) — left alone, don't commit it.
 
 ## Facts a new chat needs
 - Bundle `com.scenicprints.marqueetv`, app name "Marquee TV". Server default
