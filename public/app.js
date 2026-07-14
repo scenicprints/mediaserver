@@ -2176,11 +2176,29 @@ function openPlayer(ctx) {
   // bar. Mouse use hides the ring; the next key brings it back.
   const pfEls = () => [...vp.querySelectorAll('[data-pf]')].filter((el) => el.offsetParent !== null); // visible only (Live TV hides seek/skip/play)
   let pfIdx = 0; // 0 = the scrub bar
+  let pfCol = 0; // desired horizontal position, remembered across Up/Down row moves
   function paintPf() {
     const keys = vp.classList.contains('vp-keys');
     pfEls().forEach((el, i) => el.classList.toggle('pfocus', keys && i === pfIdx));
   }
   function pfSet(i) { pfIdx = Math.max(0, Math.min(i, pfEls().length - 1)); paintPf(); }
+  // Focus a specific element (by node) via its flat pfEls index.
+  function pfFocus(el) { const i = pfEls().indexOf(el); if (i >= 0) pfSet(i); }
+  // The control rows, top → bottom: center transport, scrub bar, bottom utility
+  // buttons. Live TV hides the first two, leaving just the utility row. Up/Down
+  // step between rows; Left/Right move within one.
+  function pfRows() {
+    const vis = (el) => el && el.offsetParent !== null;
+    const transport = [...vp.querySelectorAll('.vp-transport [data-pf]')].filter(vis);
+    const scrub = [...vp.querySelectorAll('.vp-scrub[data-pf]')].filter(vis);
+    const utility = [...vp.querySelectorAll('.vp-ctrls [data-pf]')].filter(vis);
+    return [transport, scrub, utility].filter((r) => r.length);
+  }
+  function pfLocate() {
+    const rows = pfRows(), el = pfEls()[pfIdx];
+    for (let r = 0; r < rows.length; r++) { const c = rows[r].indexOf(el); if (c >= 0) return { rows, r, c }; }
+    return { rows, r: 0, c: 0 };
+  }
 
   // Debounced key-seek: presses accumulate, the bubble previews the target,
   // and the actual seek fires shortly after the last press.
@@ -2254,16 +2272,21 @@ function openPlayer(ctx) {
       // Controls hidden? The first press only reveals them, focused on the bar.
       if (vp.classList.contains('hide-ui')) { showUI(); pfSet(0); return; }
       showUI();
-      const els = pfEls();
-      const el = els[pfIdx] || els[0];
-      const onBar = el && el.classList.contains('vp-scrub');
-      if (e.key === 'Enter') { if (onBar) togglePlay(); else el.click(); }
-      else if (e.key === 'ArrowUp') pfSet(0);
-      else if (e.key === 'ArrowDown') { if (onBar) pfSet(els.findIndex((x) => x.classList.contains('vp-play'))); }
-      else { // Left / Right
+      const { rows, r, c } = pfLocate();
+      const onBar = rows[r] && rows[r][c] && rows[r][c].classList.contains('vp-scrub');
+      if (e.key === 'Enter') { if (onBar) togglePlay(); else (rows[r][c] || pfEls()[0]).click(); }
+      else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        // Step to the adjacent row, keeping the remembered horizontal position.
+        const nr = e.key === 'ArrowUp' ? r - 1 : r + 1;
+        if (nr < 0 || nr >= rows.length) return;
+        const dest = rows[nr];
+        pfFocus(dest[Math.max(0, Math.min(pfCol, dest.length - 1))]);
+      } else { // Left / Right
         const d = e.key === 'ArrowRight' ? 1 : -1;
-        if (onBar) keySeek(d * 10);
-        else pfSet(Math.max(1, pfIdx + d));
+        if (onBar) { keySeek(d * 10); return; } // the scrub bar seeks, doesn't move focus
+        const nc = Math.max(0, Math.min(c + d, rows[r].length - 1));
+        pfCol = nc;
+        pfFocus(rows[r][nc]);
       }
       return;
     }
