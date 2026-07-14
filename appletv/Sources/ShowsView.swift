@@ -1,34 +1,32 @@
 import SwiftUI
 
-// TV library as a poster grid → show detail. Mirrors the web TV view.
+// TV: rotating Marquee hero (shows) + the full categorized row set.
 struct ShowsView: View {
     @EnvironmentObject var store: Store
     @Binding var route: [Route]
-    private let columns = [GridItem(.adaptive(minimum: Theme.posterWidth), spacing: Theme.cardSpacing)]
 
     var body: some View {
-        ScrollView {
+        Group {
             if store.shows.isEmpty {
-                VStack(spacing: 14) {
-                    Text("No shows yet").font(.title2)
-                    Button("Reload") { Task { await store.loadHome() } }
-                }
-                .padding(60)
-            }
-            LazyVGrid(columns: columns, spacing: Theme.rowSpacing) {
-                ForEach(store.shows) { show in
-                    PosterCard(title: show.title, posterURL: show.poster,
-                               subtitle: show.year.map(String.init)) {
-                        route.append(.show(show.id))
+                ZStack {
+                    Theme.bg.ignoresSafeArea()
+                    VStack(spacing: 14) {
+                        Text("No shows yet").font(.title2)
+                        Button("Reload") { Task { await store.loadHome() } }
                     }
                 }
+            } else {
+                BrowseScreen(route: $route,
+                             heroItems: Browse.heroFromShows(store.shows),
+                             rows: Browse.showRows(store.shows),
+                             continueKind: "episode")
             }
-            .padding(Theme.gutter)
         }
         .task { if store.shows.isEmpty { await store.loadHome() } }
     }
 }
 
+// ---- Show detail: season picker + episode list with resume playback ----
 struct ShowDetailView: View {
     @EnvironmentObject var store: Store
     let showId: Int
@@ -85,14 +83,11 @@ struct ShowDetailView: View {
                     .padding(.horizontal, Theme.gutter).padding(.bottom, 40)
                 }
 
-                // Season picker
                 if d.seasons.count > 1 {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 16) {
                             ForEach(d.seasons, id: \.season) { s in
-                                Button {
-                                    selectedSeason = s.season
-                                } label: {
+                                Button { selectedSeason = s.season } label: {
                                     Text(s.season == 0 ? "Specials" : "Season \(s.season)")
                                         .font(.headline).padding(.horizontal, 20).padding(.vertical, 12)
                                 }
@@ -105,7 +100,6 @@ struct ShowDetailView: View {
                     .padding(.top, 20)
                 }
 
-                // Episode list
                 LazyVStack(spacing: 24) {
                     ForEach(currentEpisodes) { ep in
                         EpisodeRow(episode: ep) { playing = ep }
@@ -125,7 +119,6 @@ struct ShowDetailView: View {
     }
 }
 
-// A landscape still + title/overview; selecting it plays the episode.
 struct EpisodeRow: View {
     let episode: Episode
     let action: () -> Void

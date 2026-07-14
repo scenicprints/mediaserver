@@ -112,6 +112,18 @@ struct ArtImage: View {
     }
 }
 
+// A small rounded metadata pill (year, rating, genre, quality…).
+struct Chip: View {
+    let text: String
+    init(_ text: String) { self.text = text }
+    var body: some View {
+        Text(text)
+            .font(.callout).fontWeight(.medium)
+            .padding(.horizontal, 16).padding(.vertical, 8)
+            .background(.white.opacity(0.14), in: Capsule())
+    }
+}
+
 // Resume-progress bar pinned to the bottom of a tile.
 struct ProgressBar: View {
     let progress: Double

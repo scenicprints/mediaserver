@@ -18,12 +18,18 @@ struct Movie: Identifiable, Decodable, Hashable {
     let duration: Double?
     let runtime: Int?
     let versions: Int?
+    let addedAt: Double?
+    let qualities: String?
 
     var progressFraction: Double {
         guard let d = duration, d > 0, let p = resumePosition else { return 0 }
         return min(max(p / d, 0), 1)
     }
     var genreList: [String] { Store.parseJSONStrings(genres) }
+    var is4K: Bool { (qualities ?? "").localizedCaseInsensitiveContains("4K") }
+    var bestQuality: String? {
+        (qualities ?? "").split(separator: ",").map(String.init).sorted().last
+    }
 }
 
 // A row from /api/continue — either a movie or a show episode.
@@ -61,6 +67,10 @@ struct Show: Identifiable, Decodable, Hashable {
     let rating: Double?
     let episodes: Int?
     let unwatched: Int?
+    let genres: String?
+    let addedAt: Double?
+
+    var genreList: [String] { Store.parseJSONStrings(genres) }
 }
 
 struct Collection: Identifiable, Decodable, Hashable {
