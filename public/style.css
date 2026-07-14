@@ -791,10 +791,11 @@ body.tv-nav .card:hover { transform: none; }
 /* Buttons, nav, chips, list rows: a clean accent glow-ring. */
 .btn.tv-focus, .nav-link.tv-focus, .see-all.tv-focus, .tab.tv-focus,
 .az.tv-focus, .close.tv-focus, .detail-close.tv-focus, .icon-btn.tv-focus,
-.rm.tv-focus, .hero-dot.tv-focus, #update-pill.tv-focus,
+.rm.tv-focus, .hero-dot.tv-focus, #update-pill.tv-focus, .src-chip.tv-focus,
 .nav-search.tv-focus, .req-input.tv-focus, .dp-select.tv-focus {
   box-shadow: 0 0 0 3px var(--accent), 0 0 0 6px rgba(108, 92, 255, 0.32), 0 0 22px rgba(108, 92, 255, 0.55);
 }
+.src-chip.tv-focus { transform: translateY(-1px); } /* same lift as .btn, visible on colored/enabled chips */
 .nav-link.tv-focus { color: var(--text); background: rgba(108, 92, 255, 0.16); }
 .btn.tv-focus { transform: translateY(-1px); }
 .hero-dot.tv-focus { transform: scale(1.5); }
