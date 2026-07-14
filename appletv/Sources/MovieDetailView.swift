@@ -15,6 +15,7 @@ struct MovieDetailView: View {
     @State private var selectedFile: MovieFile?
     @State private var favorite = false
     @State private var watched = false
+    @State private var preroll: URL?
 
     var body: some View {
         ZStack {
@@ -27,7 +28,8 @@ struct MovieDetailView: View {
         .fullScreenCover(isPresented: $playing) {
             if let f = selectedFile ?? detail?.bestFile, let url = store.streamURL(fileId: f.id) {
                 PlayerView(url: url, startAt: resumeFrom,
-                           ref: .movie(movieId), duration: detail?.duration, store: store)
+                           ref: .movie(movieId), duration: detail?.duration, store: store,
+                           prerollURL: preroll)
                     .ignoresSafeArea()
             }
         }
@@ -168,5 +170,6 @@ struct MovieDetailView: View {
         watched = detail?.watched == 1
         loading = false
         extra = await store.movieExtra(movieId)   // enrich after the core loads
+        preroll = await store.prerollURL()
     }
 }

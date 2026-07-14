@@ -386,6 +386,15 @@ final class Store: ObservableObject {
         return URL(string: "\(cleanBase)/api/stream/episode/\(fileId)?token=\(t)")
     }
 
+    // Pre-roll clip URL (plays before a movie), or nil if none configured.
+    func prerollURL() async -> URL? {
+        struct R: Decodable { let available: Bool; let url: String?; let mode: String? }
+        guard let r = await get("api/preroll", as: R.self), r.available, let u = r.url, let t = token else { return nil }
+        var s = "\(cleanBase)\(u)?token=\(t)"
+        if r.mode == "transcode" { s += "&start=0&\(audioQuery())" }
+        return URL(string: s)
+    }
+
     func saveProgress(_ ref: PlayRef, position: Double, duration: Double?, watched: Bool? = nil) async {
         var body: [String: Any] = ["position": position]
         if let duration { body["duration"] = duration }

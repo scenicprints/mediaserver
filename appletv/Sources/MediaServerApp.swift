@@ -34,6 +34,7 @@ struct ContentView: View {
                     NavTab { MoviesView(route: $0) }.tabItem { Text("Movies") }
                     NavTab { ShowsView(route: $0) }.tabItem { Text("TV") }
                     LiveTVView().tabItem { Text("Live TV") }
+                    NavTab { LibraryView(route: $0) }.tabItem { Text("Library") }
                     NavTab { CollectionsView(route: $0) }.tabItem { Text("Collections") }
                     RequestsView().tabItem { Text("Requests") }
                     NavTab { SearchView(route: $0) }.tabItem { Text("Search") }
