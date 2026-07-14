@@ -1,0 +1,49 @@
+name: Apple TV build status
+
+# Asks App Store Connect whether the latest TestFlight upload has finished
+# processing (PROCESSING → VALID means it's live on the Apple TV via
+# auto-update). Manual button only; prints the last 3 builds to the job log.
+on:
+  workflow_dispatch:
+
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Query App Store Connect
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8_BASE64: ${{ secrets.ASC_KEY_P8_BASE64 }}
+          BUNDLE_ID: com.scenicprints.marqueetv
+        run: |
+          cat > status.mjs <<'EOF'
+          import crypto from 'node:crypto';
+          const key = Buffer.from(process.env.ASC_KEY_P8_BASE64, 'base64').toString();
+          const now = Math.floor(Date.now() / 1000);
+          const b64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
+          const input = `${b64({ alg: 'ES256', kid: process.env.ASC_KEY_ID, typ: 'JWT' })}.` +
+                        `${b64({ iss: process.env.ASC_ISSUER_ID, iat: now, exp: now + 600, aud: 'appstoreconnect-v1' })}`;
+          const sig = crypto.sign('sha256', Buffer.from(input), { key, dsaEncoding: 'ieee-p1363' }).toString('base64url');
+          const jwt = `${input}.${sig}`;
+          const api = async (path) => {
+            const r = await fetch(`https://api.appstoreconnect.apple.com/v1${path}`,
+              { headers: { Authorization: `Bearer ${jwt}` } });
+            if (!r.ok) { console.error(`ASC ${path} -> ${r.status}`, await r.text()); process.exit(1); }
+            return r.json();
+          };
+          const apps = await api(`/apps?filter[bundleId]=${process.env.BUNDLE_ID}`);
+          const appId = apps.data[0]?.id;
+          if (!appId) { console.error('app not found'); process.exit(1); }
+          const builds = await api(`/builds?filter[app]=${appId}&sort=-uploadedDate&limit=3` +
+            `&fields[builds]=version,processingState,uploadedDate,expired`);
+          for (const b of builds.data) {
+            const a = b.attributes;
+            console.log(`build ${a.version} | ${a.processingState} | uploaded ${a.uploadedDate}${a.expired ? ' | EXPIRED' : ''}`);
+          }
+          const latest = builds.data[0]?.attributes;
+          console.log(latest?.processingState === 'VALID'
+            ? '>>> READY — processed; the Apple TV can install/auto-update it now.'
+            : `>>> NOT READY YET — latest build is ${latest?.processingState}.`);
+          EOF
+          node status.mjs
