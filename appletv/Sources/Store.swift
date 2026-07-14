@@ -26,6 +26,7 @@ struct Movie: Identifiable, Decodable, Hashable {
         return min(max(p / d, 0), 1)
     }
     var genreList: [String] { Store.parseJSONStrings(genres) }
+    var isNew: Bool { Store.isRecent(addedAt) }
     var is4K: Bool { (qualities ?? "").localizedCaseInsensitiveContains("4K") }
     var bestQuality: String? {
         (qualities ?? "").split(separator: ",").map(String.init).sorted().last
@@ -71,6 +72,7 @@ struct Show: Identifiable, Decodable, Hashable {
     let addedAt: Double?
 
     var genreList: [String] { Store.parseJSONStrings(genres) }
+    var isNew: Bool { Store.isRecent(addedAt) }
 }
 
 struct Collection: Identifiable, Decodable, Hashable {
@@ -260,6 +262,12 @@ final class Store: ObservableObject {
 
     private func decoder() -> JSONDecoder {
         let d = JSONDecoder(); d.keyDecodingStrategy = .convertFromSnakeCase; return d
+    }
+
+    // Added within the last 14 days → "NEW" (web isNew). addedAt is ms epoch.
+    nonisolated static func isRecent(_ addedAt: Double?) -> Bool {
+        guard let a = addedAt else { return false }
+        return Date().timeIntervalSince1970 * 1000 - a < 14 * 24 * 3600 * 1000
     }
 
     nonisolated static func parseJSONStrings(_ s: String?) -> [String] {

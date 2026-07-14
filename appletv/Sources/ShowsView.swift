@@ -47,6 +47,7 @@ struct ShowDetailView: View {
             else if loading { ProgressView().scaleEffect(1.6) }
             else { Text("Couldn't load this show.").foregroundStyle(.secondary) }
         }
+        .toolbar(.hidden, for: .tabBar)
         .task { await load() }
         .fullScreenCover(item: $playing) { ep in
             if let f = ep.bestFile, let url = store.playbackURL(kind: "episode", file: f) {

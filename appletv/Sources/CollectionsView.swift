@@ -73,6 +73,7 @@ struct CollectionDetailView: View {
                 Text("Couldn't load this collection.").foregroundStyle(.secondary)
             }
         }
+        .toolbar(.hidden, for: .tabBar)
         .task {
             loading = true
             detail = await store.collectionDetail(collectionId)

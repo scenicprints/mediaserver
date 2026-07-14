@@ -3,18 +3,30 @@ import SwiftUI
 // Shared building blocks for the "10-foot" UI. tvOS gives us focus scale/parallax
 // for free via .buttonStyle(.card); we layer Marquee's art + labels on top.
 
-// A 2:3 poster tile that pushes a movie detail screen when selected.
+// A corner badge on a poster, mirroring the web card badges.
+enum CardBadge: Hashable {
+    case new                       // "NEW" (hot pink)
+    case newCount(Int)             // "N new" (shows with unwatched)
+    case quality(String)           // "4K"/"1080p" (dark pill, top-right)
+    case stream(String, UInt)      // streaming-only: solid provider colour, top-left
+    case alsoOn(String, UInt)      // owned + also on a service: outlined, top-left
+}
+
+// A 2:3 poster tile. Title/subtitle reveal on focus (like the web hover), and a
+// corner badge shows NEW / quality / streaming provider.
 struct PosterCard: View {
     let title: String
     let posterURL: String?
     let subtitle: String?
     let progress: Double
+    let badge: CardBadge?
     let action: () -> Void
+    @FocusState private var focused: Bool
 
     init(title: String, posterURL: String?, subtitle: String? = nil,
-         progress: Double = 0, action: @escaping () -> Void) {
-        self.title = title; self.posterURL = posterURL
-        self.subtitle = subtitle; self.progress = progress; self.action = action
+         progress: Double = 0, badge: CardBadge? = nil, action: @escaping () -> Void) {
+        self.title = title; self.posterURL = posterURL; self.subtitle = subtitle
+        self.progress = progress; self.badge = badge; self.action = action
     }
 
     var body: some View {
@@ -23,18 +35,50 @@ struct PosterCard: View {
                 ArtImage(url: posterURL, aspect: 2.0 / 3.0)
                     .frame(width: Theme.posterWidth, height: Theme.posterHeight)
                     .clipShape(RoundedRectangle(cornerRadius: Theme.posterRadius))
+                    .overlay(alignment: .topTrailing) { badgeView }
                     .overlay(alignment: .bottom) { ProgressBar(progress: progress) }
 
-                Text(title)
-                    .font(.callout).fontWeight(.medium)
-                    .lineLimit(1)
-                    .frame(width: Theme.posterWidth, alignment: .leading)
-                if let subtitle {
-                    Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                // Reserve the label space so the grid doesn't jump; reveal on focus.
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.callout).fontWeight(.semibold).lineLimit(1)
+                    Text(subtitle ?? " ").font(.caption).foregroundStyle(Theme.muted).lineLimit(1)
                 }
+                .frame(width: Theme.posterWidth, alignment: .leading)
+                .opacity(focused ? 1 : 0)
             }
         }
         .buttonStyle(.card)
+        .focused($focused)
+    }
+
+    @ViewBuilder private var badgeView: some View {
+        switch badge {
+        case .new:
+            badgePill("NEW", bg: Theme.hot, fg: .white)
+        case .newCount(let n):
+            badgePill("\(n) new", bg: Theme.hot, fg: .white)
+        case .quality(let q):
+            badgePill(q, bg: Color.black.opacity(0.72), fg: Color(hex: 0xeaf0ff))
+        case .stream(let name, let color):
+            badgePill(name, bg: Color(hex: color), fg: .white, topLeading: true)
+        case .alsoOn(let name, let color):
+            badgePill("▸ \(name)", bg: Color.black.opacity(0.78), fg: .white,
+                      stroke: Color(hex: color), topLeading: true)
+        case .none:
+            EmptyView()
+        }
+    }
+
+    private func badgePill(_ text: String, bg: Color, fg: Color,
+                           stroke: Color? = nil, topLeading: Bool = false) -> some View {
+        Text(text)
+            .font(.caption2).fontWeight(.bold).foregroundStyle(fg)
+            .padding(.horizontal, 10).padding(.vertical, 5)
+            .background(bg, in: Capsule())
+            .overlay(stroke.map { Capsule().strokeBorder($0, lineWidth: 2) })
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: topLeading ? .leading : .trailing)
+            .frame(maxHeight: .infinity, alignment: .top)
     }
 }
 
@@ -103,8 +147,8 @@ struct ArtImage: View {
                 image.resizable().aspectRatio(contentMode: .fill)
             default:
                 ZStack {
-                    Rectangle().fill(Theme.card)
-                    Image(systemName: "film").font(.system(size: 44)).foregroundStyle(.secondary)
+                    Rectangle().fill(Theme.posterFill)
+                    Image(systemName: "film").font(.system(size: 44)).foregroundStyle(Theme.muted)
                 }
                 .aspectRatio(aspect, contentMode: .fill)
             }
@@ -139,8 +183,8 @@ struct ProgressBar: View {
         if progress > 0.01 {
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
-                    Rectangle().fill(.black.opacity(0.55))
-                    Rectangle().fill(Theme.accent)
+                    Rectangle().fill(.white.opacity(0.18))
+                    Rectangle().fill(Theme.grad)
                         .frame(width: geo.size.width * progress)
                 }
             }

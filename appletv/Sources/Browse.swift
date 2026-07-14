@@ -27,14 +27,22 @@ struct MarqueeHero: View {
         let it = idx < items.count ? items[idx] : items[0]
         ZStack(alignment: .bottomLeading) {
             ArtImage(url: it.backdrop, aspect: 16.0 / 9.0)
-                .frame(height: 760).frame(maxWidth: .infinity).clipped()
+                .frame(height: 840).frame(maxWidth: .infinity).clipped()
+                // Vertical fade to the page background (web .hero::after, 0deg).
                 .overlay {
-                    LinearGradient(colors: [.clear, Theme.bg.opacity(0.5), Theme.bg],
-                                   startPoint: .top, endPoint: .bottom)
+                    LinearGradient(stops: [
+                        .init(color: Theme.bg, location: 0.0),
+                        .init(color: Theme.bg.opacity(0.4), location: 0.34),
+                        .init(color: .clear, location: 0.68)
+                    ], startPoint: .bottom, endPoint: .top)
                 }
+                // Horizontal scrim so the title reads over bright art (web 90deg).
                 .overlay {
-                    LinearGradient(colors: [Theme.bg.opacity(0.7), .clear],
-                                   startPoint: .leading, endPoint: .trailing)
+                    LinearGradient(stops: [
+                        .init(color: Theme.bg.opacity(0.95), location: 0.0),
+                        .init(color: Theme.bg.opacity(0.55), location: 0.32),
+                        .init(color: .clear, location: 0.62)
+                    ], startPoint: .leading, endPoint: .trailing)
                 }
                 .id(it.id)                       // cross-fade on change
                 .transition(.opacity)
@@ -93,6 +101,7 @@ struct BrowseCard: Identifiable, Hashable {
     let poster: String?
     let subtitle: String?
     let progress: Double
+    let badge: CardBadge?
     let route: Route
 }
 struct BrowseRow: Identifiable {
@@ -135,7 +144,7 @@ struct BrowseScreen: View {
                     MediaRow(title: row.title) {
                         ForEach(row.cards) { c in
                             PosterCard(title: c.title, posterURL: c.poster, subtitle: c.subtitle,
-                                       progress: c.progress) { route.append(c.route) }
+                                       progress: c.progress, badge: c.badge) { route.append(c.route) }
                         }
                     }
                 }
@@ -149,12 +158,20 @@ struct BrowseScreen: View {
 // ---- Row/hero builders (mirror the web app's view() row set) ----
 enum Browse {
     static func movieCard(_ m: Movie) -> BrowseCard {
-        BrowseCard(id: "m\(m.id)", title: m.title, poster: m.poster,
-                   subtitle: m.year.map(String.init), progress: m.progressFraction, route: .movie(m.id))
+        var badge: CardBadge? = nil
+        if m.isNew { badge = .new }
+        else if (m.versions ?? 0) > 1, let q = m.bestQuality { badge = .quality(q) }
+        return BrowseCard(id: "m\(m.id)", title: m.title, poster: m.poster,
+                          subtitle: m.year.map(String.init), progress: m.progressFraction,
+                          badge: badge, route: .movie(m.id))
     }
     static func showCard(_ s: Show) -> BrowseCard {
-        BrowseCard(id: "s\(s.id)", title: s.title, poster: s.poster,
-                   subtitle: s.year.map(String.init), progress: 0, route: .show(s.id))
+        var badge: CardBadge? = nil
+        if let u = s.unwatched, u > 0 { badge = .newCount(u) }
+        else if s.isNew { badge = .new }
+        return BrowseCard(id: "s\(s.id)", title: s.title, poster: s.poster,
+                          subtitle: s.year.map(String.init), progress: 0,
+                          badge: badge, route: .show(s.id))
     }
 
     static func heroFromMovies(_ movies: [Movie]) -> [HeroItem] {

@@ -24,6 +24,7 @@ struct MovieDetailView: View {
             else if loading { ProgressView().scaleEffect(1.6) }
             else { Text("Couldn't load this title.").foregroundStyle(.secondary) }
         }
+        .toolbar(.hidden, for: .tabBar)
         .task { await load() }
         .fullScreenCover(isPresented: $playing) {
             if let f = selectedFile ?? detail?.bestFile, let url = store.playbackURL(kind: "movie", file: f) {
@@ -58,15 +59,17 @@ struct MovieDetailView: View {
                     }
 
                     HStack(spacing: 20) {
-                        Button {
-                            resumeFrom = 0; playing = true
-                        } label: { Label("Play", systemImage: "play.fill").font(.headline).padding(.horizontal, 16) }
-                        .buttonStyle(.borderedProminent).tint(Theme.accent)
-
                         if let p = d.resumePosition, p > 5 {
                             Button { resumeFrom = p; playing = true } label: {
-                                Label("Resume · \(timecode(p))", systemImage: "gobackward").font(.headline).padding(.horizontal, 12)
+                                Label("Resume · \(timecode(p))", systemImage: "play.fill").font(.headline).padding(.horizontal, 16)
+                            }.buttonStyle(.borderedProminent).tint(Theme.accent)
+                            Button { resumeFrom = 0; playing = true } label: {
+                                Label("From Beginning", systemImage: "gobackward").font(.headline).padding(.horizontal, 12)
                             }.buttonStyle(.bordered)
+                        } else {
+                            Button { resumeFrom = 0; playing = true } label: {
+                                Label("Play", systemImage: "play.fill").font(.headline).padding(.horizontal, 16)
+                            }.buttonStyle(.borderedProminent).tint(Theme.accent)
                         }
 
                         Button { Task { favorite = await store.toggleFavorite(movieId) ?? favorite } } label: {
