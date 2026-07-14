@@ -15,7 +15,8 @@
     '.card', '.coll-card', '.req-card', '.nav-link', '.hero-dot', '.see-all', '.season-card',
     '.episode', '.rec', '.trailer-card', '.tab', '.az', '.frow',
     '.btn', '.close', '.detail-close', '.icon-btn', '.rm', '#update-pill',
-    '.nav-search', '.req-input', '.dp-select', '.req-qsel select',
+    '.src-chip', // Settings ▸ Streaming source toggles — without this the remote can't leave the tab row
+    '.nav-search', '.req-input', '.dp-select', '.req-qsel select', '.sa-input', // Settings text fields
     '.auth-input', '.auth-toggle'
   ].join(',');
 
