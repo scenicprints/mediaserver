@@ -209,7 +209,7 @@ struct ShowDetailView: View {
 
     @ViewBuilder
     private func actions(_ d: ShowDetail) -> some View {
-        HStack(spacing: 18) {
+        ActionRow {
             if let ep = nextUp {
                 if (ep.resumePosition ?? 0) > 5 {
                     Button { play(ep) } label: {
@@ -303,6 +303,35 @@ struct ShowDetailView: View {
     }
 }
 
+// Deep-link target for an episode (Continue Watching cards): loads the show,
+// finds the episode, and shows its description page.
+struct EpisodeRouteView: View {
+    @EnvironmentObject var store: Store
+    let showId: Int
+    let episodeId: Int
+    @State private var show: ShowDetail?
+    @State private var failed = false
+
+    var body: some View {
+        ZStack {
+            Theme.bg.ignoresSafeArea()
+            if let show, let ep = show.seasons.flatMap({ $0.episodes }).first(where: { $0.id == episodeId }) {
+                EpisodeDetailView(showTitle: show.title, episode: ep,
+                                  fallbackArt: show.poster ?? show.backdrop)
+            } else if failed {
+                Text("Couldn't load this episode.").foregroundStyle(.secondary)
+            } else {
+                ProgressView().scaleEffect(1.6)
+            }
+        }
+        .toolbar(.hidden, for: .tabBar)
+        .task {
+            show = await store.showDetail(showId)
+            failed = show == nil
+        }
+    }
+}
+
 // ---- Episode description scene (mirrors the web openEpisodeDetail) ----
 // A full-screen page for ONE episode: still splash, S/E title, air date /
 // rating / runtime / quality chips, Resume / From Beginning, Mark Watched,
@@ -382,7 +411,7 @@ struct EpisodeDetailView: View {
                         if watched { Chip("✓ Watched") }
                     }
 
-                    HStack(spacing: 18) {
+                    ActionRow {
                         if resumeAt > 0 {
                             Button { play(at: resumeAt) } label: {
                                 Label("Resume · \(timecode(resumeAt))", systemImage: "play.fill")

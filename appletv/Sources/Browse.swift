@@ -10,6 +10,7 @@ struct HeroItem: Identifiable, Hashable {
     let id: String
     let title: String
     let backdrop: String?
+    var poster: String? = nil    // fallback art if the backdrop won't load
     let year: Int?
     let rating: Double?
     let badge: String?
@@ -26,7 +27,7 @@ struct MarqueeHero: View {
     var body: some View {
         let it = idx < items.count ? items[idx] : items[0]
         ZStack(alignment: .bottomLeading) {
-            ArtImage(url: it.backdrop, aspect: 16.0 / 9.0)
+            ArtImage(url: it.backdrop ?? it.poster, aspect: 16.0 / 9.0)
                 .frame(height: 840).frame(maxWidth: .infinity).clipped()
                 // Vertical fade — melt into the page at the bottom AND soften the
                 // top so there's no hard edge under the tab bar.
@@ -180,6 +181,7 @@ struct BrowseScreen: View {
                             MarqueeWordmark()
                                 .padding(.leading, Theme.gutter).padding(.top, 46)
                         }
+                        .focusSection()   // up from any card lands on the hero buttons
                 } else {
                     MarqueeWordmark()
                         .padding(.leading, Theme.gutter).padding(.top, 46)
@@ -191,8 +193,10 @@ struct BrowseScreen: View {
                             ContinueCard(title: item.displayTitle, subtitle: item.subtitle,
                                          posterURL: item.poster, progress: item.progressFraction,
                                          action: {
+                                             // Movies open their page; episodes open the
+                                             // EPISODE page (Resume/Mark Watched live there).
                                              if item.kind == "movie" { route.append(.movie(item.id)) }
-                                             else if let sid = item.showId { route.append(.show(sid)) }
+                                             else if let sid = item.showId { route.append(.episode(sid, item.id)) }
                                          },
                                          onMarkWatched: {
                                              Task { await store.markContinueWatched(item) }

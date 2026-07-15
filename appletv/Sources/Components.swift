@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 // Shared building blocks for the "10-foot" UI. tvOS gives us focus scale/parallax
 // for free via .buttonStyle(.card); we layer Marquee's art + labels on top.
@@ -151,22 +152,27 @@ struct MediaRow<Content: View>: View {
                 .padding(.vertical, 12)   // room for focus scale
             }
         }
+        // Whole row is one focus section: moving up/down from ANY card lands on
+        // the neighboring row/hero even when nothing sits directly above it
+        // (cards deep in a row used to be dead ends).
+        .focusSection()
     }
 }
 
-// Poster/backdrop loader with a graceful placeholder. The placeholder carries
-// the title (web .ph) so an unenriched item is never a blank tile.
+// Poster/backdrop loader with a graceful placeholder. Unlike AsyncImage this
+// RETRIES failed loads (TMDB hiccups were leaving random marquee/poster tiles
+// blank) and goes through URLCache, so a retried image costs nothing later.
 struct ArtImage: View {
     let url: String?
     let aspect: CGFloat
     var placeholderTitle: String? = nil
+    @State private var image: UIImage?
 
     var body: some View {
-        AsyncImage(url: URL(string: url ?? "")) { phase in
-            switch phase {
-            case .success(let image):
-                image.resizable().aspectRatio(contentMode: .fill)
-            default:
+        Group {
+            if let image {
+                Image(uiImage: image).resizable().aspectRatio(contentMode: .fill)
+            } else {
                 ZStack {
                     Rectangle().fill(Theme.posterFill)
                     if let t = placeholderTitle, !t.isEmpty {
@@ -182,6 +188,35 @@ struct ArtImage: View {
                 .aspectRatio(aspect, contentMode: .fill)
             }
         }
+        .task(id: url) { await load() }
+    }
+
+    private func load() async {
+        image = nil   // view reuse: drop stale art when the URL changes
+        guard let s = url, !s.isEmpty, let u = URL(string: s) else { return }
+        for attempt in 1...3 {
+            if let (data, resp) = try? await URLSession.shared.data(from: u),
+               (resp as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? true,
+               let img = UIImage(data: data) {
+                image = img
+                return
+            }
+            if attempt < 3 { try? await Task.sleep(nanoseconds: UInt64(attempt) * 500_000_000) }
+        }
+    }
+}
+
+// A detail-page action row that never wraps: buttons keep their intrinsic
+// one-line size and the row scrolls horizontally when it runs out of width
+// (compressed buttons used to wrap their labels into giant two-line pills).
+struct ActionRow<Content: View>: View {
+    @ViewBuilder let content: () -> Content
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 18) { content() }
+                .padding(.vertical, 10)   // focus-scale headroom
+        }
+        .focusSection()
     }
 }
 

@@ -9,6 +9,8 @@ struct RequestsView: View {
     @State private var notice: String?
     @State private var toast: String?
     @State private var searching = false
+    @State private var pending: RequestResult?          // awaiting a quality choice
+    @State private var profiles: [ArrProfile] = []
     private let columns = [GridItem(.adaptive(minimum: Theme.posterWidth), spacing: Theme.cardSpacing)]
 
     var body: some View {
@@ -52,6 +54,19 @@ struct RequestsView: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
+        // Quality picker: when Radarr/Sonarr have more than one profile, ask
+        // which one this request should use (matches the web request flow).
+        .confirmationDialog("Quality for “\(pending?.title ?? "")”",
+                            isPresented: Binding(get: { pending != nil }, set: { if !$0 { pending = nil } }),
+                            titleVisibility: .visible) {
+            ForEach(profiles, id: \.id) { p in
+                Button(p.name ?? "Profile \(p.id)") {
+                    if let r = pending { submit(r, profileId: p.id) }
+                    pending = nil
+                }
+            }
+            Button("Cancel", role: .cancel) { pending = nil }
+        }
     }
 
     private func runSearch() {
@@ -68,7 +83,15 @@ struct RequestsView: View {
 
     private func add(_ r: RequestResult) {
         Task {
-            let msg = await store.requestAdd(r)
+            let p = await store.requestProfiles(for: r.type)
+            if p.count > 1 { profiles = p; pending = r }   // let the user pick
+            else { submit(r, profileId: p.first?.id) }
+        }
+    }
+
+    private func submit(_ r: RequestResult, profileId: Int?) {
+        Task {
+            let msg = await store.requestAdd(r, profileId: profileId)
             showToast(msg)
         }
     }

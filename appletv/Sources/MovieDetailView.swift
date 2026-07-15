@@ -142,7 +142,7 @@ struct MovieDetailView: View {
 
     @ViewBuilder
     private func actions(_ d: MovieDetail) -> some View {
-        HStack(spacing: 18) {
+        ActionRow {
             if let p = d.resumePosition, p > 5 {
                 Button { play(at: p) } label: {
                     Label("Resume · \(timecode(p))", systemImage: "play.fill").font(.headline).padding(.horizontal, 14)

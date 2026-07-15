@@ -78,6 +78,7 @@ struct PlayerView: UIViewControllerRepresentable {
 
         vc.player = player
         player.play()
+        context.coordinator.installTransportMenu()
 
         // One 1s cadence drives everything: skip-button visibility (needs to be
         // snappy), progress saves (self-throttled to ~10s), and heartbeats (every
@@ -139,6 +140,38 @@ struct PlayerView: UIViewControllerRepresentable {
             self.store = store; self.ref = ref; self.kind = kind; self.duration = duration
             self.startAt = startAt; self.title = title; self.subtitle = subtitle
             self.fileId = fileId; self.live = live; self.mode = mode
+        }
+
+        // "Generate AI Subtitles" lives IN the player: swipe down → transport
+        // bar menu. Kicks the Whisper job and shows live progress in the menu
+        // item's title; the finished track appears in the CC picker on replay.
+        private var aiSubState = "Generate AI Subtitles"
+        private var aiSubRunning = false
+        func installTransportMenu() {
+            guard let fileId, !live else { return }
+            let action = UIAction(title: aiSubState, image: UIImage(systemName: "captions.bubble")) { [weak self] _ in
+                self?.startAISubtitles(fileId: fileId)
+            }
+            vc?.transportBarCustomMenuItems = [action]
+        }
+        private func startAISubtitles(fileId: Int) {
+            guard !aiSubRunning else { return }
+            aiSubRunning = true
+            aiSubState = "AI Subtitles: starting…"; installTransportMenu()
+            Task { [weak self] in
+                guard let self else { return }
+                var job = await self.store.generateSubtitles(kind: self.kind, fileId: fileId)
+                while let j = job, j.status == "running" {
+                    self.aiSubState = "AI Subtitles: \(j.pct ?? 0)%"; self.installTransportMenu()
+                    try? await Task.sleep(nanoseconds: 4_000_000_000)
+                    job = await self.store.subtitleJobStatus(kind: self.kind, fileId: fileId)
+                }
+                self.aiSubRunning = false
+                self.aiSubState = (job?.status == "done")
+                    ? "AI Subtitles ready — restart the video"
+                    : (job?.error ?? "AI Subtitles failed")
+                self.installTransportMenu()
+            }
         }
 
         // /api/play gives the fingerprinted intro range + named chapters (and
@@ -213,12 +246,19 @@ struct PlayerView: UIViewControllerRepresentable {
         private func heartbeat(position: Double) {
             let dur = duration ?? mainItem?.duration.seconds
             let paused = (player?.rate ?? 0) == 0
+            // Buffer health for the admin monitor (how far ahead is loaded).
+            var buffered: Double = 0
+            for r in mainItem?.loadedTimeRanges ?? [] {
+                let range = r.timeRangeValue
+                let end = range.start.seconds + range.duration.seconds
+                if range.start.seconds <= position, end > position { buffered = max(buffered, end - position) }
+            }
             Task {
                 await store.sessionHeartbeat(sessionId: sessionId, kind: live ? "live" : kind,
                                              fileId: fileId, title: title, subtitle: subtitle,
                                              mode: mode, position: position,
                                              duration: (dur?.isFinite == true) ? dur : nil,
-                                             paused: paused, live: live)
+                                             paused: paused, live: live, bufferedAhead: buffered)
             }
         }
 

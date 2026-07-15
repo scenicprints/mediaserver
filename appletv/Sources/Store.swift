@@ -665,11 +665,12 @@ final class Store: ObservableObject {
     // ---- Session heartbeat (feeds the admin "Now Playing" monitor) ----
     func sessionHeartbeat(sessionId: String, kind: String, fileId: Int?, title: String,
                           subtitle: String?, mode: String, position: Double, duration: Double?,
-                          paused: Bool, live: Bool) async {
+                          paused: Bool, live: Bool, bufferedAhead: Double = 0) async {
         if previewMode { return }
         var body: [String: Any] = [
             "sessionId": sessionId, "kind": kind, "title": title, "mode": mode,
             "position": position, "paused": paused, "live": live, "tv": true,
+            "bufferedAhead": bufferedAhead,
             "audioMode": audioMode == "surround" ? "surround" : "stereo"
         ]
         if let fileId { body["fileId"] = fileId }
@@ -818,16 +819,17 @@ final class Store: ObservableObject {
         } catch { return ([], "Couldn't reach the server.") }
     }
 
-    private func qualityProfileId(for type: String) async -> Int? {
-        guard let p = await get("api/requests/profiles", as: ProfilesResponse.self) else { return nil }
-        return (type == "movie" ? p.radarr : p.sonarr)?.first?.id
+    // Quality profiles for the request picker (Radarr = movies, Sonarr = TV).
+    func requestProfiles(for type: String) async -> [ArrProfile] {
+        guard let p = await get("api/requests/profiles", as: ProfilesResponse.self) else { return [] }
+        return (type == "movie" ? p.radarr : p.sonarr) ?? []
     }
 
-    func requestAdd(_ r: RequestResult) async -> String {
+    func requestAdd(_ r: RequestResult, profileId: Int? = nil) async -> String {
         var body: [String: Any] = ["type": r.type]
         if let t = r.tmdbId { body["tmdbId"] = t }
         if let t = r.tvdbId { body["tvdbId"] = t }
-        if let pid = await qualityProfileId(for: r.type) { body["qualityProfileId"] = pid }
+        if let pid = profileId ?? (await requestProfiles(for: r.type).first?.id) { body["qualityProfileId"] = pid }
         do {
             let (data, http) = try await request("api/requests/add", method: "POST", body: body)
             if (200..<300).contains(http.statusCode) { return "Requested “\(r.title)”." }

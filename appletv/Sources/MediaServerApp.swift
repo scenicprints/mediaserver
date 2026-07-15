@@ -20,6 +20,7 @@ struct MediaServerApp: App {
 enum Route: Hashable {
     case movie(Int)
     case show(Int)
+    case episode(Int, Int)     // showId, episodeId — the episode description page
     case collection(String)
 }
 
@@ -89,6 +90,7 @@ struct NavTab<Content: View>: View {
                     switch route {
                     case .movie(let id): MovieDetailView(route: $path, movieId: id)
                     case .show(let id): ShowDetailView(showId: id)
+                    case .episode(let sid, let eid): EpisodeRouteView(showId: sid, episodeId: eid)
                     case .collection(let id): CollectionDetailView(route: $path, collectionId: id)
                     }
                 }

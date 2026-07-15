@@ -118,15 +118,28 @@ function spawnFfmpeg(s, filePath, opts, info, startSeg) {
   args.push('-i', filePath, '-map', '0:v:0', '-map', '0:a:0?', '-sn', '-dn');
 
   // Video: always re-encode with keyframes forced on the 6s grid so segment
-  // boundaries exactly match the uniform VOD playlist. After a seek, -ss
-  // resets timestamps to 0 and -output_ts_offset (below) shifts the muxed
-  // segments back to their absolute position — the same mechanism Jellyfin
-  // uses; unlike -copyts it can't produce negative-DTS mux failures.
+  // boundaries exactly match the uniform VOD playlist. Three flags here are
+  // load-bearing (from Jellyfin's HLS pipeline, which fought the exact
+  // "audio plays, video is black" failure on Apple clients):
+  //  * -forced-idr 1 — NVENC's forced keyframes are NOT IDR frames without
+  //    it, and an HLS segment that doesn't open on an IDR renders black.
+  //  * -copyts -avoid_negative_ts disabled (below) — keep A/V timestamps
+  //    aligned and ABSOLUTE (these files have nonzero per-stream start
+  //    offsets; dropping them desyncs audio from video). Absolute stamps are
+  //    also what keep seek segments aligned with the uniform playlist.
+  //  * -max_muxing_queue_size — audio is often COPIED (instant) while the
+  //    video encode lags; the default queue overflows and ffmpeg dies
+  //    mid-stream ("Too many packets buffered"), which read as a stall.
   const scaleH = info.mode === 'transcode' ? (info.scaleH || 0) : 0;
   if (scaleH) args.push('-vf', `scale=-2:${scaleH}`);
   args.push('-force_key_frames', `expr:gte(t,n_forced*${SEG_SECONDS})`);
-  if (nvenc) args.push('-c:v', 'h264_nvenc', '-preset', 'p4', '-cq', '23', '-bf', '0', '-pix_fmt', 'yuv420p');
-  else args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21', '-bf', '0', '-pix_fmt', 'yuv420p');
+  if (nvenc) {
+    args.push('-c:v', 'h264_nvenc', '-preset', 'p4', '-cq', '23', '-bf', '0',
+              '-forced-idr', '1', '-profile:v', 'high', '-pix_fmt', 'yuv420p');
+  } else {
+    args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21', '-bf', '0',
+              '-sc_threshold', '0', '-pix_fmt', 'yuv420p');
+  }
 
   // Audio: AAC stereo (device downmix), or copy when the source is already fine
   // ("direct"-eligible files only come through here for the subtitle rendition).
@@ -137,8 +150,9 @@ function spawnFfmpeg(s, filePath, opts, info, startSeg) {
     if (opts.forceStereo) args.push('-ac', '2');
   }
 
-  if (startSeg > 0) args.push('-output_ts_offset', String(startSeg * SEG_SECONDS));
   args.push(
+    '-copyts', '-avoid_negative_ts', 'disabled',
+    '-max_muxing_queue_size', '2048', '-max_delay', '5000000',
     '-f', 'hls',
     '-hls_time', String(SEG_SECONDS),
     '-hls_segment_type', 'mpegts',
@@ -148,12 +162,16 @@ function spawnFfmpeg(s, filePath, opts, info, startSeg) {
     path.join(s.dir, 'ff.m3u8')
   );
   console.log(`[hls] start ${path.basename(filePath)} @seg${startSeg}${nvenc ? ' (nvenc)' : ' (x264)'}`);
+  s.lastArgs = args.join(' ');
 
   const proc = spawn(ff, args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
   let err = '';
-  proc.stderr.on('data', (d) => { err = (err + d).slice(-2000); });
+  proc.stderr.on('data', (d) => { err = (err + d).slice(-2000); s.lastErr = err.trim(); });
   proc.on('error', (e) => console.error('[hls] spawn error:', e.message));
-  proc.on('exit', (code) => { if (code && code !== 255) console.error(`[hls] ffmpeg exit ${code}: ${err.trim().split('\n').pop() || ''}`); });
+  proc.on('exit', (code) => {
+    s.lastExit = code;
+    if (code && code !== 255) console.error(`[hls] ffmpeg exit ${code}: ${err.trim().split('\n').pop() || ''}`);
+  });
   s.proc = proc;
   s.startSeg = startSeg;
 }
@@ -202,6 +220,26 @@ function head(s) {
 export function registerHls(app, db, helpers = {}) {
   fs.mkdirSync(ROOT, { recursive: true });
   const allSubtitleTracks = helpers.allSubtitleTracks || (async () => []);
+
+  // Admin diagnostics: what is (or was) the transcoder doing? Shows each live
+  // session's ffmpeg args, progress, and the last stderr — debuggable from a
+  // browser instead of the Dell's console.
+  app.get('/api/hls/debug', async (req, reply) => {
+    if (!req.user || req.user.role !== 'admin') return reply.code(403).send({ error: 'admin only' });
+    return {
+      sessions: [...sessions.entries()].map(([key, s]) => ({
+        key,
+        running: running(s),
+        startSeg: s.startSeg,
+        head: head(s),
+        done: s.done.size,
+        lastExit: s.lastExit ?? null,
+        idleSec: Math.round((Date.now() - s.lastAccess) / 1000),
+        args: s.lastArgs || null,
+        lastErr: s.lastErr || null
+      }))
+    };
+  });
 
   const resolve = (req, reply) => {
     const kind = req.params.kind === 'episode' ? 'episode' : 'movie';
