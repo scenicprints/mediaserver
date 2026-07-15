@@ -829,7 +829,9 @@ final class Store: ObservableObject {
         var body: [String: Any] = ["type": r.type]
         if let t = r.tmdbId { body["tmdbId"] = t }
         if let t = r.tvdbId { body["tvdbId"] = t }
-        if let pid = profileId ?? (await requestProfiles(for: r.type).first?.id) { body["qualityProfileId"] = pid }
+        var pid = profileId
+        if pid == nil { pid = (await requestProfiles(for: r.type)).first?.id }
+        if let pid { body["qualityProfileId"] = pid }
         do {
             let (data, http) = try await request("api/requests/add", method: "POST", body: body)
             if (200..<300).contains(http.statusCode) { return "Requested “\(r.title)”." }
