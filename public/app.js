@@ -1612,6 +1612,7 @@ function openPlayer(ctx) {
   let cues = [];
   let subVisible = true;
   let currentSubIdx = -1;
+  let subDbgOn = false; // admin caption-timing readout (toggle with 'd')
   let upnextShown = false;
   const subUrl = (idx) => withToken(`${ctx.subtitleBase}${current.id}?idx=${idx}`);
   // Caption delay is remembered per file+track (server-side) and restored
@@ -1685,6 +1686,7 @@ function openPlayer(ctx) {
     <video playsinline></video>
     <video class="vp-preroll-vid hidden" playsinline></video>
     <div class="vp-subs"></div>
+    <div class="vp-subdbg hidden"></div>
     <div class="vp-top vp-fade">
       <button class="vp-back">‹ Back</button>
       <div class="vp-titles"><div class="vp-t">${escapeHtml(ctx.title)}</div>${ctx.subtitle ? `<div class="vp-st">${escapeHtml(ctx.subtitle)}</div>` : ''}</div>
@@ -1787,15 +1789,35 @@ function openPlayer(ctx) {
     try { const r = await fetch(url); if (r.ok) cues = parseVtt(await r.text()); } catch (_e) {}
     renderSub();
   }
+  const subDbg = vp.querySelector('.vp-subdbg');
   function renderSub() {
+    // Admin-only timing readout: if captions ever appear "stuck" while the video
+    // plays, this shows whether the PLAYHEAD (cur/ct) is advancing or frozen — the
+    // one thing that tells a real render bug from a timeline stall. Toggle: press D.
+    if (subDbg && subDbgOn) {
+      const ct = video.currentTime, c = cur();
+      const act = cues.filter((q) => (c - subOffset) >= q.start && (c - subOffset) <= q.end)[0];
+      subDbg.textContent = `cur ${c.toFixed(2)} · ct ${ct.toFixed(2)} · base ${base.toFixed(2)} · off ${subOffset} · cues ${cues.length} · cue ${act ? act.start.toFixed(1) + '-' + act.end.toFixed(1) : '—'}`;
+    }
     if (!subVisible || !cues.length) { subsDiv.innerHTML = ''; return; }
     const t = cur() - subOffset;
     const active = cues.filter((c) => t >= c.start && t <= c.end);
     subsDiv.innerHTML = active.map((c) => c.html).join('<br>');
   }
-  // Cues update on a short timer, not just `timeupdate` (which only fires ~4×/s
-  // and made captions appear late / linger).
-  const subTimer = setInterval(renderSub, 200);
+  // Drive captions off the REAL playhead: every animation frame while playing (so
+  // they stay locked to the exact frame on screen and can never lag or stick behind
+  // it), a slow timer as a fallback (paused delay tweaks, backgrounded tab), and an
+  // immediate resync right after any resume/seek so a resumed caption is correct at
+  // once. `cur()` is the single source of truth for both the frame and the caption.
+  let subRaf = 0;
+  function subFrame() { renderSub(); subRaf = video.paused ? 0 : requestAnimationFrame(subFrame); }
+  const startSubLoop = () => { if (!subRaf && !video.paused) subRaf = requestAnimationFrame(subFrame); };
+  video.addEventListener('play', startSubLoop);
+  video.addEventListener('playing', startSubLoop);
+  video.addEventListener('pause', () => { cancelAnimationFrame(subRaf); subRaf = 0; renderSub(); });
+  video.addEventListener('seeked', renderSub);
+  video.addEventListener('loadeddata', renderSub);
+  const subTimer = setInterval(renderSub, 250);
 
   // Autoplay on the first press even though we had to await /api/play (which
   // drops the click's transient activation). If sound-autoplay is blocked, start
@@ -2551,11 +2573,14 @@ function openPlayer(ctx) {
     else if (e.key === 'h') { e.preventDefault(); hideUINow(); }
     else if (e.key === 'c') vp.querySelector('.vp-cc').click();
     else if (e.key === 's') { menuIdx = 0; buildMenu(); menu.classList.remove('hidden'); showUI(); }
+    // Admin caption-timing debug overlay (helps diagnose a "frozen subtitle").
+    else if (e.key === 'd' && document.body.classList.contains('is-admin')) { subDbgOn = !subDbgOn; if (subDbg) subDbg.classList.toggle('hidden', !subDbgOn); renderSub(); showUI(); }
   };
   document.addEventListener('keydown', vp._onKey, true);
   const origRemove = vp.remove.bind(vp);
   vp.remove = () => {
     clearInterval(subTimer);
+    cancelAnimationFrame(subRaf);
     clearInterval(hbTimer);
     try { prefetchAbort && prefetchAbort.abort(); } catch (_e) {} // stop any idle prefetch in flight
     // Drop our session from the admin monitor at once (sendBeacon so it still

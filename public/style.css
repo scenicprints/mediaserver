@@ -755,6 +755,12 @@ button { font-family: inherit; }
 }
 .vp-subs:empty { display: none; }
 .vp.hide-ui .vp-subs { bottom: 8%; }
+/* Admin caption-timing debug readout (toggle with 'd') — sits just above the subs. */
+.vp-subdbg {
+  position: absolute; left: 0; right: 0; bottom: 22%; z-index: 9; text-align: center; pointer-events: none;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; font-size: 12px; color: #7ee0a2;
+  text-shadow: 0 1px 3px rgba(0,0,0,0.95);
+}
 
 /* ---------- Skeleton ---------- */
 .skel { background: linear-gradient(90deg, #171a22 25%, #20242f 50%, #171a22 75%); background-size: 200% 100%;
