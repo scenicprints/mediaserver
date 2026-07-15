@@ -266,6 +266,9 @@ struct PlayerView: UIViewControllerRepresentable {
             guard onMain, item === mainItem else { return }        // ignore pre-roll
             guard position.isFinite else { return }
             lastSaved = position
+            // Live TV is ephemeral (matches the web): never write watch-state, or
+            // the live offset would poison the title's real resume point.
+            if live { return }
             let dur = duration ?? item?.duration.seconds
             let total = (dur?.isFinite == true) ? dur : nil
             let watched = (total.map { position / $0 } ?? 0) > 0.92
@@ -275,6 +278,7 @@ struct PlayerView: UIViewControllerRepresentable {
         func flush(finalPosition: Double?) {
             let sid = sessionId
             Task { await store.sessionEnd(sessionId: sid) }
+            if live { return }                                     // ephemeral — see report()
             guard onMain, let p = finalPosition, p.isFinite, p > 1 else { return }
             let total = (duration?.isFinite == true) ? duration : nil
             let watched = (total.map { p / $0 } ?? 0) > 0.92
