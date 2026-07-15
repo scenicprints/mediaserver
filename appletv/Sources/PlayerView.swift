@@ -59,6 +59,7 @@ struct PlayerView: UIViewControllerRepresentable {
 
     func makeUIViewController(context: Context) -> AVPlayerViewController {
         let vc = AVPlayerViewController()
+        context.coordinator.vc = vc            // MUST precede installTransportMenu()
         let mainItem = AVPlayerItem(url: url)
         context.coordinator.mainItem = mainItem
 
@@ -89,7 +90,6 @@ struct PlayerView: UIViewControllerRepresentable {
             context.coordinator.tick(position: time.seconds, item: player.currentItem)
         }
         context.coordinator.player = player
-        context.coordinator.vc = vc
         context.coordinator.loadPlayMeta()
         return vc
     }

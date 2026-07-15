@@ -164,11 +164,12 @@ struct ShowDetailView: View {
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 36) {
                                 ForEach(Array(cast.enumerated()), id: \.offset) { _, c in
-                                    castTile(c)
+                                    CastTile(name: c.name, role: c.character, profile: c.profile)
                                 }
                             }
                             .padding(.horizontal, Theme.gutter).padding(.vertical, 8)
                         }
+                        .focusSection()
                     }
                     .padding(.top, 26)
                 }
@@ -269,25 +270,6 @@ struct ShowDetailView: View {
                 subJobText = "AI subtitles ready — pick them from the player's subtitle menu."
             } else {
                 subJobText = job?.error ?? "AI subtitles failed."
-            }
-        }
-    }
-
-    private func castTile(_ c: CastMember) -> some View {
-        VStack(spacing: 10) {
-            Group {
-                if let p = c.profile {
-                    AsyncImage(url: URL(string: p)) { img in
-                        img.resizable().aspectRatio(contentMode: .fill)
-                    } placeholder: { Circle().fill(Theme.card) }
-                } else {
-                    ZStack { Circle().fill(Theme.card); Text(String(c.name.prefix(1))).font(.title) }
-                }
-            }
-            .frame(width: 150, height: 150).clipShape(Circle())
-            Text(c.name).font(.callout).lineLimit(1).frame(width: 160)
-            if let role = c.character {
-                Text(role).font(.caption).foregroundStyle(.secondary).lineLimit(1).frame(width: 160)
             }
         }
     }
@@ -476,26 +458,12 @@ struct EpisodeDetailView: View {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 36) {
                             ForEach(Array(people.enumerated()), id: \.offset) { _, p in
-                                VStack(spacing: 10) {
-                                    Group {
-                                        if let pr = p.profile {
-                                            AsyncImage(url: URL(string: pr)) { img in
-                                                img.resizable().aspectRatio(contentMode: .fill)
-                                            } placeholder: { Circle().fill(Theme.card) }
-                                        } else {
-                                            ZStack { Circle().fill(Theme.card); Text(String(p.name.prefix(1))).font(.title) }
-                                        }
-                                    }
-                                    .frame(width: 150, height: 150).clipShape(Circle())
-                                    Text(p.name).font(.callout).lineLimit(1).frame(width: 160)
-                                    if let role = p.role {
-                                        Text(role).font(.caption).foregroundStyle(.secondary).lineLimit(1).frame(width: 160)
-                                    }
-                                }
+                                CastTile(name: p.name, role: p.role, profile: p.profile)
                             }
                         }
                         .padding(.horizontal, Theme.gutter).padding(.vertical, 8)
                     }
+                    .focusSection()
                 }
                 .padding(.top, 26)
             }

@@ -117,19 +117,9 @@ function spawnFfmpeg(s, filePath, opts, info, startSeg) {
   if (startSeg > 0) args.push('-ss', String(startSeg * SEG_SECONDS));
   args.push('-i', filePath, '-map', '0:v:0', '-map', '0:a:0?', '-sn', '-dn');
 
-  // Video: always re-encode with keyframes forced on the 6s grid so segment
-  // boundaries exactly match the uniform VOD playlist. Three flags here are
-  // load-bearing (from Jellyfin's HLS pipeline, which fought the exact
-  // "audio plays, video is black" failure on Apple clients):
-  //  * -forced-idr 1 — NVENC's forced keyframes are NOT IDR frames without
-  //    it, and an HLS segment that doesn't open on an IDR renders black.
-  //  * -copyts -avoid_negative_ts disabled (below) — keep A/V timestamps
-  //    aligned and ABSOLUTE (these files have nonzero per-stream start
-  //    offsets; dropping them desyncs audio from video). Absolute stamps are
-  //    also what keep seek segments aligned with the uniform playlist.
-  //  * -max_muxing_queue_size — audio is often COPIED (instant) while the
-  //    video encode lags; the default queue overflows and ffmpeg dies
-  //    mid-stream ("Too many packets buffered"), which read as a stall.
+  // Video: always re-encode, keyframes forced on the 6s grid so segment
+  // boundaries match the uniform VOD playlist. -forced-idr makes NVENC's forced
+  // keyframes true IDR frames (a segment not opening on an IDR renders black).
   const scaleH = info.mode === 'transcode' ? (info.scaleH || 0) : 0;
   if (scaleH) args.push('-vf', `scale=-2:${scaleH}`);
   args.push('-force_key_frames', `expr:gte(t,n_forced*${SEG_SECONDS})`);
@@ -141,17 +131,21 @@ function spawnFfmpeg(s, filePath, opts, info, startSeg) {
               '-sc_threshold', '0', '-pix_fmt', 'yuv420p');
   }
 
-  // Audio: AAC stereo (device downmix), or copy when the source is already fine
-  // ("direct"-eligible files only come through here for the subtitle rendition).
-  const acopy = info.mode === 'direct' ? true : !!info.acopy;
-  if (acopy) args.push('-c:a', 'copy');
-  else {
-    args.push('-c:a', 'aac', '-b:a', '192k');
-    if (opts.forceStereo) args.push('-ac', '2');
-  }
+  // Audio: ALWAYS re-encode to AAC — never copy. This is THE fix for the
+  // "audio plays, video is black" reports. When audio was copied it kept the
+  // file's ORIGINAL start timestamp (these files have a nonzero video/audio
+  // start offset — the old lip-sync saga), while the re-encoded video started
+  // at 0. AVPlayer anchored the timeline to the audio, so every video frame was
+  // "in the past" and never displayed. Re-encoding both from the same point
+  // (no -copyts; -ss resets to 0) puts them on one shared timeline.
+  args.push('-c:a', 'aac', '-b:a', '192k');
+  if (opts.forceStereo) args.push('-ac', '2');   // else keep source channel count
 
+  // Place seek segments at their absolute playlist time (both streams shifted
+  // together, so they stay in sync). -max_muxing_queue_size guards against the
+  // queue overflow that killed ffmpeg mid-stream.
+  if (startSeg > 0) args.push('-output_ts_offset', String(startSeg * SEG_SECONDS));
   args.push(
-    '-copyts', '-avoid_negative_ts', 'disabled',
     '-max_muxing_queue_size', '2048', '-max_delay', '5000000',
     '-f', 'hls',
     '-hls_time', String(SEG_SECONDS),

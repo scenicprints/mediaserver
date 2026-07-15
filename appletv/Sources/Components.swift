@@ -206,6 +206,38 @@ struct ArtImage: View {
     }
 }
 
+// A focusable cast/crew tile. Being a .card button is what lets tvOS move focus
+// DOWN onto the cast row — and moving focus is what scrolls a detail page to
+// reveal it. Non-focusable content below the buttons is unreachable (you'd get
+// stuck at the action row and never see cast), which is the "can't scroll down"
+// complaint. No tap action; it exists purely to be a focus/scroll waypoint.
+struct CastTile: View {
+    let name: String
+    let role: String?
+    let profile: String?
+    var body: some View {
+        Button {} label: {
+            VStack(spacing: 10) {
+                Group {
+                    if let p = profile, !p.isEmpty {
+                        AsyncImage(url: URL(string: p)) { img in
+                            img.resizable().aspectRatio(contentMode: .fill)
+                        } placeholder: { Circle().fill(Theme.card) }
+                    } else {
+                        ZStack { Circle().fill(Theme.card); Text(String(name.prefix(1))).font(.title) }
+                    }
+                }
+                .frame(width: 150, height: 150).clipShape(Circle())
+                Text(name).font(.callout).lineLimit(1).frame(width: 170)
+                if let role, !role.isEmpty {
+                    Text(role).font(.caption).foregroundStyle(.secondary).lineLimit(1).frame(width: 170)
+                }
+            }
+        }
+        .buttonStyle(.card)
+    }
+}
+
 // A detail-page action row that never wraps: buttons keep their intrinsic
 // one-line size and the row scrolls horizontally when it runs out of width
 // (compressed buttons used to wrap their labels into giant two-line pills).

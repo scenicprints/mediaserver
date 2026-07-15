@@ -40,9 +40,12 @@ struct MovieDetailView: View {
         guard let d = detail, let f = selectedFile ?? d.bestFile else { return }
         Task {
             guard let url = await store.resolvePlaybackURL(kind: "movie", file: f) else { return }
+            // Pre-roll plays ONLY when starting from the beginning (matches the
+            // web). On a Resume the pre-roll queue also swallowed the seek and
+            // restarted from 0 — dropping it fixes both.
             session = PlaySession(url: url, ref: .movie(movieId), duration: d.duration,
                                   startAt: position, title: d.title,
-                                  fileId: f.id, preroll: preroll)
+                                  fileId: f.id, preroll: position <= 1 ? preroll : nil)
         }
     }
 
@@ -210,32 +213,16 @@ struct MovieDetailView: View {
             Text("Cast & Crew").font(.title2).fontWeight(.semibold).padding(.leading, Theme.gutter)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 36) {
-                    ForEach(directors, id: \.self) { d in personTile(name: d, role: "Director", profile: nil) }
+                    ForEach(directors, id: \.self) { d in CastTile(name: d, role: "Director", profile: nil) }
                     ForEach(Array(cast.enumerated()), id: \.offset) { _, c in
-                        personTile(name: c.name, role: c.character, profile: c.profile)
+                        CastTile(name: c.name, role: c.character, profile: c.profile)
                     }
                 }
                 .padding(.horizontal, Theme.gutter).padding(.vertical, 8)
             }
+            .focusSection()
         }
         .padding(.top, 26)
-    }
-
-    private func personTile(name: String, role: String?, profile: String?) -> some View {
-        VStack(spacing: 10) {
-            Group {
-                if let p = profile {
-                    AsyncImage(url: URL(string: p)) { img in
-                        img.resizable().aspectRatio(contentMode: .fill)
-                    } placeholder: { Circle().fill(Theme.card) }
-                } else {
-                    ZStack { Circle().fill(Theme.card); Text(String(name.prefix(1))).font(.title) }
-                }
-            }
-            .frame(width: 150, height: 150).clipShape(Circle())
-            Text(name).font(.callout).lineLimit(1).frame(width: 160)
-            if let role { Text(role).font(.caption).foregroundStyle(.secondary).lineLimit(1).frame(width: 160) }
-        }
     }
 
     private func genrePill(_ g: String) -> some View {

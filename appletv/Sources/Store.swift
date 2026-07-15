@@ -265,7 +265,11 @@ struct RequestResult: Identifiable, Decodable, Hashable {
     var id: String { "\(type)-\(tmdbId ?? tvdbId ?? title.hashValue)" }
 }
 struct ArrProfile: Decodable, Hashable { let id: Int; let name: String? }
-struct ProfilesResponse: Decodable { let radarr: [ArrProfile]?; let sonarr: [ArrProfile]? }
+// /api/requests/profiles returns { radarr: { profiles, default }, sonarr: {…} }
+// (NOT bare arrays — decoding it as an array silently yielded no profiles, so
+// the quality picker never appeared).
+struct ArrProfiles: Decodable, Hashable { let profiles: [ArrProfile]?; let `default`: Int? }
+struct ProfilesResponse: Decodable { let radarr: ArrProfiles?; let sonarr: ArrProfiles? }
 
 // ---- /api/movies/:id/extra : rich TMDB metadata ----
 struct CastMember: Decodable, Hashable { let name: String; let character: String?; let profile: String? }
@@ -822,7 +826,7 @@ final class Store: ObservableObject {
     // Quality profiles for the request picker (Radarr = movies, Sonarr = TV).
     func requestProfiles(for type: String) async -> [ArrProfile] {
         guard let p = await get("api/requests/profiles", as: ProfilesResponse.self) else { return [] }
-        return (type == "movie" ? p.radarr : p.sonarr) ?? []
+        return (type == "movie" ? p.radarr : p.sonarr)?.profiles ?? []
     }
 
     func requestAdd(_ r: RequestResult, profileId: Int? = nil) async -> String {
