@@ -146,10 +146,12 @@ function requireAdmin(req, reply) {
 const SESSION_TTL = 45000;
 const sessions = new Map();       // sessionId -> live session record
 const playDecisions = new Map();  // `${userId}:${kind}:${fileId}` -> { mode, engine, at }
+const transcodeStats = new Map(); // `${userId}:${kind}:${fileId}` -> { speed, at } from ffmpeg -stats
 function pruneSessions() {
   const now = Date.now();
   for (const [id, s] of sessions) if (now - s.lastSeen > SESSION_TTL) sessions.delete(id);
   for (const [k, d] of playDecisions) if (now - d.at > 6 * 3600e3) playDecisions.delete(k);
+  for (const [k, d] of transcodeStats) if (now - d.at > 30e3) transcodeStats.delete(k); // stale = transcode stopped
 }
 
 // Gate every /api/* route (except the auth endpoints) behind a valid session.
@@ -1034,7 +1036,15 @@ app.get('/api/transcode/:kind/:fileId', async (req, reply) => {
     start, vcopy: info.vcopy, acopy: info.acopy, downmix: info.downmix, scaleH: info.scaleH, maxKbps: info.maxKbps || 0,
     forceStereo: opts.forceStereo, dboost: opts.dboost, night: opts.night, norm: opts.norm
   });
-  proc.stderr.on('data', (d) => console.error('[ffmpeg]', String(d).trim()));
+  const statKey = `${req.user.id}:${kind}:${fileId}`;
+  proc.stderr.on('data', (d) => {
+    const s = String(d);
+    // ffmpeg's -stats line carries `speed=N x` (realtime factor). Grab the latest so
+    // the admin monitor can show whether the transcode is keeping ahead or at ~1×.
+    const m = [...s.matchAll(/speed=\s*([0-9.]+)x/g)];
+    if (m.length) transcodeStats.set(statKey, { speed: parseFloat(m[m.length - 1][1]), at: Date.now() });
+    console.error('[ffmpeg]', s.trim());
+  });
   proc.on('error', (e) => console.error('[ffmpeg] spawn error:', e.message));
   req.raw.on('close', () => { try { proc.kill('SIGKILL'); } catch {} });
   reply.header('Content-Type', 'video/mp4');
@@ -1111,7 +1121,9 @@ app.post('/api/session/heartbeat', async (req, reply) => {
   const prev = sessions.get(id);
   const kind = b.live ? 'live' : (b.kind === 'episode' ? 'episode' : 'movie');
   const fileId = b.fileId != null ? String(b.fileId) : null;
-  const dec = playDecisions.get(`${req.user.id}:${kind}:${fileId}`);
+  const decKey = `${req.user.id}:${kind}:${fileId}`;
+  const dec = playDecisions.get(decKey);
+  const ts = transcodeStats.get(decKey); // ffmpeg realtime speed factor for this transcode
   const buffAhead = numOr(b.bufferedAhead, 0);
   // Buffer trend: seconds of cushion gained/lost per wall-second since the last
   // beat. Negative = the buffer is draining → heading for a stall (network-bound).
@@ -1144,6 +1156,7 @@ app.post('/api/session/heartbeat', async (req, reply) => {
     dropped: numOr(b.dropped, null),
     decoded: numOr(b.decoded, null),
     downlinkMbps: numOr(b.downlinkMbps, null),
+    transcodeSpeed: ts ? ts.speed : null,
     live: !!b.live,
     subtitleTrack: String(b.subtitleTrack || '').slice(0, 160),
     audioMode: String(b.audioMode || '').slice(0, 40),

@@ -372,7 +372,10 @@ export function transcodeStream(filePath, { start = 0, vcopy = false, acopy = fa
   // First line of defense against A/V drift (applied regardless of resolution):
   // `+genpts` regenerates missing timestamps up front, and `aresample=async=1`
   // (below) keeps audio locked to the video timeline.
-  const args = ['-hide_banner', '-loglevel', 'error', '-fflags', '+genpts'];
+  // `-stats` forces ffmpeg's periodic progress line (incl. `speed=N x`) to stderr
+  // even at -loglevel error, so the server can read the realtime encode factor and
+  // surface it in the admin monitor (speed ≈ 1× = the transcode is the bottleneck).
+  const args = ['-hide_banner', '-loglevel', 'error', '-stats', '-fflags', '+genpts'];
   // Offload decode to the GPU when we have one — this is what lets a 4K source
   // transcode in real time without downscaling (CPU HEVC decode is the bottleneck).
   // `auto` falls back to software if the GPU can't decode a given file.

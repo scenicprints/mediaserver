@@ -2869,7 +2869,12 @@ async function loadSessions() {
     const bd = s.bufferDelta;
     const trend = bd != null ? `buffer ${bd > 0.05 ? '↑' : bd < -0.05 ? '↓ draining' : '→ flat'} ${bd >= 0 ? '+' : ''}${bd}/s` : null;
     const dropPct = (s.dropped != null && s.decoded) ? (s.dropped / s.decoded) * 100 : null;
+    // Encode realtime factor is the headline for a transcode: ~1× means the server
+    // can't get ahead (the bottleneck); ≥~2× is healthy. ⚠ below 1.5×.
+    const enc = (s.mode === 'transcode' && s.transcodeSpeed != null)
+      ? `encode ${s.transcodeSpeed.toFixed(2)}× realtime${s.transcodeSpeed < 1.5 ? ' ⚠' : ''}` : null;
     const diag = [
+      enc,
       trend,
       s.stalls ? `${s.stalls} stall${s.stalls === 1 ? '' : 's'}` : null,
       dropPct != null ? `${dropPct.toFixed(dropPct < 10 ? 1 : 0)}% frames dropped` : null,
