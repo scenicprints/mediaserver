@@ -111,7 +111,19 @@ jobs:
       - name: Upload to TestFlight
         if: steps.pre.outputs.skip != 'true'
         run: |
-          xcrun altool --upload-app -t tvos \
+          # altool prints "UPLOAD FAILED" but exits 0 on some validation errors
+          # (e.g. "Upload limit reached"), which silently faked a successful
+          # ship. Capture the output and fail the step ourselves if it didn't
+          # actually succeed.
+          set -o pipefail
+          out=$(xcrun altool --upload-app -t tvos \
             -f "$PWD/build/export/MarqueeTV.ipa" \
             --apiKey "${{ secrets.ASC_KEY_ID }}" \
-            --apiIssuer "${{ secrets.ASC_ISSUER_ID }}"
+            --apiIssuer "${{ secrets.ASC_ISSUER_ID }}" 2>&1) || true
+          echo "$out"
+          if echo "$out" | grep -qiE 'UPLOAD FAILED|ERROR:|Validation failed'; then
+            echo "::error::TestFlight upload failed (see log above)."
+            exit 1
+          fi
+          echo "$out" | grep -qi 'No errors uploading' || {
+            echo "::error::altool did not confirm a successful upload."; exit 1; }
