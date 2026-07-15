@@ -39,6 +39,7 @@ struct ShowDetailView: View {
     @State private var selectedSeason = 0
     @State private var session: PlaySession?
     @State private var subJobText: String?
+    @State private var episodePage: Episode?     // selected episode → its description scene
 
     private var flatEpisodes: [Episode] { detail?.seasons.flatMap { $0.episodes } ?? [] }
     // Next up: an in-progress episode first, else the first unwatched.
@@ -67,6 +68,13 @@ struct ShowDetailView: View {
             Task { await load(); await store.loadHome() }   // fresh resume state
         }) { s in
             PlayerView(session: s, store: store).ignoresSafeArea()
+        }
+        .fullScreenCover(item: $episodePage, onDismiss: {
+            Task { await load() }                            // watched/resume may have changed
+        }) { ep in
+            EpisodeDetailView(showTitle: detail?.title ?? "", episode: ep,
+                              fallbackArt: seasonPoster(ep.season ?? selectedSeason) ?? detail?.backdrop)
+                .environmentObject(store)
         }
     }
 
@@ -185,8 +193,12 @@ struct ShowDetailView: View {
                 // ---- Selected season's episodes ----
                 LazyVStack(spacing: 24) {
                     ForEach(currentEpisodes) { ep in
-                        EpisodeRow(episode: ep) { play(ep) }
-                            .contextMenu { episodeMenu(ep) }
+                        // Selecting an episode opens its description scene (like
+                        // the web); playback starts from there.
+                        EpisodeRow(episode: ep, fallbackArt: seasonPoster(ep.season ?? selectedSeason)) {
+                            episodePage = ep
+                        }
+                        .contextMenu { episodeMenu(ep) }
                     }
                 }
                 .padding(Theme.gutter)
@@ -291,6 +303,196 @@ struct ShowDetailView: View {
     }
 }
 
+// ---- Episode description scene (mirrors the web openEpisodeDetail) ----
+// A full-screen page for ONE episode: still splash, S/E title, air date /
+// rating / runtime / quality chips, Resume / From Beginning, Mark Watched,
+// version picker, overview and Cast & Crew. Menu (Back) returns to the show.
+struct EpisodeDetailView: View {
+    @EnvironmentObject var store: Store
+    @Environment(\.dismiss) private var dismiss
+    let showTitle: String
+    let episode: Episode
+    var fallbackArt: String? = nil
+
+    @State private var extra: EpisodeExtra?
+    @State private var session: PlaySession?
+    @State private var watched = false
+    @State private var resumeAt: Double = 0
+    @State private var selectedFile: MovieFile?
+    @State private var subJobText: String?
+
+    private var art: String? { extra?.still ?? episode.still ?? fallbackArt }
+
+    var body: some View {
+        ZStack {
+            Theme.bg.ignoresSafeArea()
+            content
+        }
+        .onExitCommand { dismiss() }
+        .task {
+            watched = episode.watched == 1
+            resumeAt = (episode.resumePosition ?? 0) > 5 ? (episode.resumePosition ?? 0) : 0
+            extra = await store.episodeExtra(episode.id)
+        }
+        .fullScreenCover(item: $session) { s in
+            PlayerView(session: s, store: store).ignoresSafeArea()
+        }
+    }
+
+    private func play(at position: Double) {
+        guard let f = selectedFile ?? episode.bestFile else { return }
+        Task {
+            guard let url = await store.resolvePlaybackURL(kind: "episode", file: f) else { return }
+            session = PlaySession(url: url, ref: .episode(episode.id), duration: episode.duration,
+                                  startAt: position, title: showTitle,
+                                  subtitle: "\(episode.tag) · \(episode.displayTitle)", fileId: f.id)
+        }
+    }
+
+    private var content: some View {
+        ScrollView {
+            ZStack(alignment: .bottomLeading) {
+                ArtImage(url: art, aspect: 16.0 / 9.0)
+                    .frame(height: 700).frame(maxWidth: .infinity).clipped()
+                    .overlay {
+                        LinearGradient(stops: [
+                            .init(color: Theme.bg.opacity(0.95), location: 0.0),
+                            .init(color: Theme.bg.opacity(0.6), location: 0.30),
+                            .init(color: .clear, location: 0.66)
+                        ], startPoint: .leading, endPoint: .trailing)
+                    }
+                    .overlay {
+                        LinearGradient(stops: [
+                            .init(color: Theme.bg, location: 0.0),
+                            .init(color: Theme.bg.opacity(0.45), location: 0.32),
+                            .init(color: .clear, location: 0.72)
+                        ], startPoint: .bottom, endPoint: .top)
+                    }
+
+                VStack(alignment: .leading, spacing: 16) {
+                    Text(showTitle).font(.headline).foregroundStyle(Theme.accent2)
+                    Text("\(episode.tag) · \(episode.displayTitle)")
+                        .font(.system(size: 48, weight: .bold)).shadow(radius: 12).lineLimit(2)
+
+                    HStack(spacing: 14) {
+                        if let d = extra?.airDate { Chip(d) }
+                        if let r = extra?.rating, r > 0 { Chip(String(format: "★ %.1f", r)) }
+                        if let rt = extra?.runtime, rt > 0 { Chip("\(rt)m") }
+                        if let q = (selectedFile ?? episode.bestFile)?.quality { Chip(q) }
+                        if watched { Chip("✓ Watched") }
+                    }
+
+                    HStack(spacing: 18) {
+                        if resumeAt > 0 {
+                            Button { play(at: resumeAt) } label: {
+                                Label("Resume · \(timecode(resumeAt))", systemImage: "play.fill")
+                                    .font(.headline).padding(.horizontal, 14)
+                            }.buttonStyle(.borderedProminent).tint(Theme.accent)
+                            Button { play(at: 0) } label: {
+                                Label("From Beginning", systemImage: "gobackward").font(.headline).padding(.horizontal, 10)
+                            }.buttonStyle(.bordered)
+                        } else {
+                            Button { play(at: 0) } label: {
+                                Label("Play", systemImage: "play.fill").font(.headline).padding(.horizontal, 14)
+                            }.buttonStyle(.borderedProminent).tint(Theme.accent)
+                        }
+
+                        Button {
+                            watched.toggle()
+                            if watched { resumeAt = 0 }
+                            Task { await store.setEpisodeWatched(episode.id, watched) }
+                        } label: {
+                            Label(watched ? "Watched" : "Mark Watched",
+                                  systemImage: watched ? "checkmark.circle.fill" : "checkmark.circle")
+                        }.buttonStyle(.bordered)
+
+                        if episode.files.count > 1 {
+                            Menu {
+                                ForEach(episode.files) { f in
+                                    Button(f.quality ?? f.filename ?? "Version") { selectedFile = f }
+                                }
+                            } label: {
+                                Label((selectedFile ?? episode.bestFile)?.quality ?? "Version",
+                                      systemImage: "rectangle.stack")
+                            }.buttonStyle(.bordered)
+                        }
+
+                        if let f = selectedFile ?? episode.bestFile {
+                            Button { generateAISubs(fileId: f.id) } label: {
+                                Label("AI Subtitles", systemImage: "captions.bubble")
+                            }.buttonStyle(.bordered)
+                        }
+                    }
+                    .padding(.top, 6)
+                }
+                .padding(.horizontal, Theme.gutter).padding(.bottom, 48)
+            }
+
+            VStack(alignment: .leading, spacing: 14) {
+                let overview = extra?.overview ?? episode.overview
+                if let o = overview, !o.isEmpty {
+                    Text(o).font(.title3).foregroundStyle(Color(hex: 0xd7dbe6))
+                        .frame(maxWidth: 1250, alignment: .leading)
+                }
+                if let job = subJobText {
+                    Text(job).font(.callout).foregroundStyle(Theme.accent2)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, Theme.gutter).padding(.top, 8)
+
+            if let people = extra?.people, !people.isEmpty {
+                VStack(alignment: .leading, spacing: 20) {
+                    Text("Cast & Crew").font(.title2).fontWeight(.semibold).padding(.leading, Theme.gutter)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 36) {
+                            ForEach(Array(people.enumerated()), id: \.offset) { _, p in
+                                VStack(spacing: 10) {
+                                    Group {
+                                        if let pr = p.profile {
+                                            AsyncImage(url: URL(string: pr)) { img in
+                                                img.resizable().aspectRatio(contentMode: .fill)
+                                            } placeholder: { Circle().fill(Theme.card) }
+                                        } else {
+                                            ZStack { Circle().fill(Theme.card); Text(String(p.name.prefix(1))).font(.title) }
+                                        }
+                                    }
+                                    .frame(width: 150, height: 150).clipShape(Circle())
+                                    Text(p.name).font(.callout).lineLimit(1).frame(width: 160)
+                                    if let role = p.role {
+                                        Text(role).font(.caption).foregroundStyle(.secondary).lineLimit(1).frame(width: 160)
+                                    }
+                                }
+                            }
+                        }
+                        .padding(.horizontal, Theme.gutter).padding(.vertical, 8)
+                    }
+                }
+                .padding(.top, 26)
+            }
+            Color.clear.frame(height: Theme.gutter)
+        }
+        .ignoresSafeArea(edges: .top)
+    }
+
+    private func generateAISubs(fileId: Int) {
+        subJobText = "AI subtitles: starting…"
+        Task {
+            var job = await store.generateSubtitles(kind: "episode", fileId: fileId)
+            while let j = job, j.status == "running" {
+                subJobText = "AI subtitles: \(j.phase ?? "working")… \(j.pct ?? 0)%"
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                job = await store.subtitleJobStatus(kind: "episode", fileId: fileId)
+            }
+            if let j = job, j.status == "done" {
+                subJobText = "AI subtitles ready — pick them from the player's subtitle menu."
+            } else {
+                subJobText = job?.error ?? "AI subtitles failed."
+            }
+        }
+    }
+}
+
 // A season poster card in the show detail.
 struct SeasonCard: View {
     let title: String
@@ -320,12 +522,13 @@ struct SeasonCard: View {
 
 struct EpisodeRow: View {
     let episode: Episode
+    var fallbackArt: String? = nil     // season poster when the episode has no still
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             HStack(alignment: .top, spacing: 28) {
-                ArtImage(url: episode.still, aspect: 16.0 / 9.0, placeholderTitle: episode.displayTitle)
+                ArtImage(url: episode.still ?? fallbackArt, aspect: 16.0 / 9.0)
                     .frame(width: 360, height: 202)
                     .clipShape(RoundedRectangle(cornerRadius: Theme.posterRadius))
                     .overlay(alignment: .bottom) { ProgressBar(progress: episode.progressFraction) }

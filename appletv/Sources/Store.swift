@@ -234,6 +234,17 @@ struct ShowDetail: Decodable {
 struct SeasonMeta: Decodable, Hashable { let season: Int; let poster: String? }
 struct ShowExtra: Decodable { let seasons: [SeasonMeta]?; let cast: [CastMember]? }
 
+// ---- /api/episodes/:id/extra : rich single-episode detail (matches web) ----
+struct EpisodePerson: Decodable, Hashable { let name: String; let role: String?; let profile: String? }
+struct EpisodeExtra: Decodable {
+    let still: String?
+    let overview: String?
+    let airDate: String?
+    let rating: Double?
+    let runtime: Int?
+    let people: [EpisodePerson]?
+}
+
 // ---- /api/collections/:id : the collection's owned movies, in order ----
 struct CollectionDetail: Decodable {
     let name: String?
@@ -565,6 +576,13 @@ final class Store: ObservableObject {
     }
     func showExtra(_ id: Int) async -> ShowExtra? {
         await get("api/shows/\(id)/extra", as: ShowExtra.self)
+    }
+    func episodeExtra(_ id: Int) async -> EpisodeExtra? {
+        if previewMode { return nil }
+        return await get("api/episodes/\(id)/extra", as: EpisodeExtra.self)
+    }
+    func setEpisodeWatched(_ id: Int, _ watched: Bool) async {
+        _ = try? await request("api/episodes/\(id)/watched", method: "POST", body: ["watched": watched])
     }
     func collectionDetail(_ id: String) async -> CollectionDetail? {
         let enc = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id

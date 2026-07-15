@@ -189,12 +189,12 @@ struct LiveTVView: View {
                     Text("Add movies or shows to start broadcasting.").foregroundStyle(.secondary)
                 }
             } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 24) {
-                        if channels.indices.contains(selected) { preview(channels[selected]) }
-                        guide
-                    }
-                    .padding(.bottom, Theme.gutter)
+                // The marquee preview is PINNED — it carries what you're looking
+                // at while only the guide rows scroll underneath it.
+                VStack(alignment: .leading, spacing: 18) {
+                    if channels.indices.contains(selected) { preview(channels[selected]) }
+                    guide
+                        .frame(maxHeight: .infinity)
                 }
                 .ignoresSafeArea()
             }
@@ -220,7 +220,7 @@ struct LiveTVView: View {
     @ViewBuilder private func previewArt(_ ch: LiveChannel, on: (item: LiveItem, offset: Double, endsIn: Double, idx: Int)) -> some View {
         ZStack(alignment: .bottomLeading) {
             ArtImage(url: on.item.backdrop ?? on.item.still ?? on.item.poster, aspect: 16.0 / 9.0)
-                .frame(height: 640).frame(maxWidth: .infinity).clipped()
+                .frame(height: 560).frame(maxWidth: .infinity).clipped()
                 .overlay {
                     LinearGradient(stops: [
                         .init(color: Theme.bg, location: 0.0),
@@ -290,17 +290,22 @@ struct LiveTVView: View {
             }
             .padding(.leading, Theme.gutter)
 
-            // Channel rows with the red "now" line overlaid across all of them.
-            ZStack(alignment: .topLeading) {
-                VStack(spacing: 8) {
-                    ForEach(channels) { ch in
-                        channelRow(ch, winStart: winStart, winEnd: winEnd, nowSec: nowSec)
+            // Channel rows scroll under the pinned marquee + time axis; the red
+            // "now" line rides inside the scroll content, spanning all rows.
+            // tvOS auto-scrolls to keep the focused channel visible.
+            ScrollView(.vertical, showsIndicators: false) {
+                ZStack(alignment: .topLeading) {
+                    VStack(spacing: 8) {
+                        ForEach(channels) { ch in
+                            channelRow(ch, winStart: winStart, winEnd: winEnd, nowSec: nowSec)
+                        }
                     }
+                    Rectangle().fill(.red).frame(width: 3)
+                        .overlay(alignment: .top) { Circle().fill(.red).frame(width: 14, height: 14).offset(y: -6) }
+                        .padding(.leading, nowX)
+                        .allowsHitTesting(false)
                 }
-                Rectangle().fill(.red).frame(width: 3)
-                    .overlay(alignment: .top) { Circle().fill(.red).frame(width: 14, height: 14).offset(y: -6) }
-                    .padding(.leading, nowX)
-                    .allowsHitTesting(false)
+                .padding(.bottom, Theme.gutter)
             }
         }
     }

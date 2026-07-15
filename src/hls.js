@@ -115,16 +115,16 @@ function spawnFfmpeg(s, filePath, opts, info, startSeg) {
   const args = ['-hide_banner', '-loglevel', 'error', '-fflags', '+genpts'];
   if (nvenc) args.push('-hwaccel', 'auto');
   if (startSeg > 0) args.push('-ss', String(startSeg * SEG_SECONDS));
-  // -copyts keeps ABSOLUTE timestamps, so a segment produced after a seek
-  // carries the same PTS the playlist promises for its slot (and full-file
-  // WebVTT cue times line up with the video).
-  args.push('-copyts', '-i', filePath, '-map', '0:v:0', '-map', '0:a:0?', '-sn', '-dn');
+  args.push('-i', filePath, '-map', '0:v:0', '-map', '0:a:0?', '-sn', '-dn');
 
-  // Video: always re-encode with keyframes forced on the absolute 6s grid so
-  // segment boundaries exactly match the uniform VOD playlist.
+  // Video: always re-encode with keyframes forced on the 6s grid so segment
+  // boundaries exactly match the uniform VOD playlist. After a seek, -ss
+  // resets timestamps to 0 and -output_ts_offset (below) shifts the muxed
+  // segments back to their absolute position — the same mechanism Jellyfin
+  // uses; unlike -copyts it can't produce negative-DTS mux failures.
   const scaleH = info.mode === 'transcode' ? (info.scaleH || 0) : 0;
   if (scaleH) args.push('-vf', `scale=-2:${scaleH}`);
-  args.push('-force_key_frames', `expr:gte(t,${startSeg * SEG_SECONDS}+n_forced*${SEG_SECONDS})`);
+  args.push('-force_key_frames', `expr:gte(t,n_forced*${SEG_SECONDS})`);
   if (nvenc) args.push('-c:v', 'h264_nvenc', '-preset', 'p4', '-cq', '23', '-bf', '0', '-pix_fmt', 'yuv420p');
   else args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21', '-bf', '0', '-pix_fmt', 'yuv420p');
 
@@ -137,6 +137,7 @@ function spawnFfmpeg(s, filePath, opts, info, startSeg) {
     if (opts.forceStereo) args.push('-ac', '2');
   }
 
+  if (startSeg > 0) args.push('-output_ts_offset', String(startSeg * SEG_SECONDS));
   args.push(
     '-f', 'hls',
     '-hls_time', String(SEG_SECONDS),
@@ -146,6 +147,7 @@ function spawnFfmpeg(s, filePath, opts, info, startSeg) {
     '-hls_segment_filename', path.join(s.dir, 'seg%05d.ts'),
     path.join(s.dir, 'ff.m3u8')
   );
+  console.log(`[hls] start ${path.basename(filePath)} @seg${startSeg}${nvenc ? ' (nvenc)' : ' (x264)'}`);
 
   const proc = spawn(ff, args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
   let err = '';
@@ -210,19 +212,31 @@ export function registerHls(app, db, helpers = {}) {
 
   // Master playlist: the video variant + every subtitle track as a WebVTT
   // rendition, so AVPlayer's native CC picker lists them.
+  //
+  // AVPlayer treats a rendition group with DUPLICATE NAMEs as a hard error and
+  // rejects the whole master playlist — and real libraries produce duplicates
+  // constantly (three "EN" sidecars + embedded "English"…). That single quirk
+  // made every subtitled file refuse to play while bare files direct-played.
+  // So: uniquify names, cap the list, and never advertise a CODECS attribute
+  // (it's optional, and a wrong value — e.g. copied AC-3 vs the claimed AAC —
+  // is another whole-playlist reject).
   app.get('/api/hls/:kind/:fileId/master.m3u8', async (req, reply) => {
     const r = resolve(req, reply);
     if (!r) return;
     let lines = ['#EXTM3U', '#EXT-X-VERSION:3'];
     let tracks = [];
-    try { tracks = await allSubtitleTracks(r.row.path); } catch {}
+    try { tracks = (await allSubtitleTracks(r.row.path)).slice(0, 12); } catch {}
+    const seen = new Map(); // base name -> count
     tracks.forEach((t, i) => {
-      const name = String(t.label || `Subtitles ${i + 1}`).replace(/"/g, "'");
+      let name = String(t.label || `Subtitles ${i + 1}`).replace(/"/g, "'");
+      const n = (seen.get(name) || 0) + 1;
+      seen.set(name, n);
+      if (n > 1) name = `${name} ${n}`;
       const lang = /^[a-z]{2,3}$/i.test(name) ? `,LANGUAGE="${name.toLowerCase()}"` : '';
       lines.push(`#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="${name}",DEFAULT=NO,AUTOSELECT=NO${lang},URI="subs/${i}.m3u8${r.q}"`);
     });
     const subs = tracks.length ? ',SUBTITLES="subs"' : '';
-    lines.push(`#EXT-X-STREAM-INF:BANDWIDTH=20000000,CODECS="avc1.640028,mp4a.40.2"${subs}`);
+    lines.push(`#EXT-X-STREAM-INF:BANDWIDTH=20000000${subs}`);
     lines.push(`index.m3u8${r.q}`);
     reply.header('Content-Type', 'application/vnd.apple.mpegurl');
     return reply.send(lines.join('\n') + '\n');
