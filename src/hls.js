@@ -81,11 +81,34 @@ async function codecInfo(filePath) {
   const info = {
     vcodec: v && String(v.codec_name || '').toLowerCase(),
     vtag: v && String(v.codec_tag_string || '').toLowerCase(),
+    vprofile: v && String(v.profile || ''),
+    vlevel: v && parseInt(v.level, 10),
     acodec: a && String(a.codec_name || '').toLowerCase(),
     duration: parseFloat(p && p.format && p.format.duration) || 0
   };
   probeCache.set(filePath, { at: Date.now(), info });
   return info;
+}
+
+// RFC 6381 CODECS string for the HLS master variant. tvOS will NOT play HEVC
+// fMP4 without it — with no declared codec it can't build a decoder and loops
+// on the init segment (confirmed from the real Apple TV request log). Computed
+// per file from the probe: HEVC Main/Main10 (the library) map to exact strings
+// (Main10 L4.0 -> hvc1.2.4.L120.90); h264 falls back to a profile/level avc1.
+function videoCodecTag(ci, transcodedToH264) {
+  const level = ci.vlevel || 120;
+  if (transcodedToH264 || ci.vcodec === 'h264') {
+    const p = (ci.vprofile || '').toLowerCase();
+    const idc = p.includes('high') ? 0x64 : p.includes('main') ? 0x4d : p.includes('base') ? 0x42 : 0x64;
+    return `avc1.${idc.toString(16).padStart(2, '0')}00${(level || 40).toString(16).padStart(2, '0')}`;
+  }
+  const p = (ci.vprofile || '').toLowerCase();
+  const idc = p.includes('10') ? 2 : 1;          // Main 10 = 2, Main = 1
+  const compat = idc === 2 ? '4' : '6';           // bit-reversed compatibility flags
+  return `hvc1.${idc}.${compat}.L${level}.90`;    // .90 = progressive + frame-only
+}
+function audioCodecTag(acodec) {
+  return { aac: 'mp4a.40.2', ac3: 'ac-3', eac3: 'ec-3', mp3: 'mp4a.40.34', alac: 'alac' }[acodec] || 'mp4a.40.2';
 }
 
 // Propagate the query the segment/init/subtitle URIs need (AVPlayer resolves
@@ -283,11 +306,19 @@ export function registerHls(app, db, helpers = {}) {
     };
   });
 
-  // Master: the video variant + WebVTT subtitle renditions (unique NAMEs; no
-  // CODECS attribute — a wrong one rejects the whole playlist).
+  // Master: the video variant (WITH a CODECS attribute — REQUIRED for HEVC
+  // fMP4, or tvOS loops on the init segment and never plays) + WebVTT subtitle
+  // renditions.
   app.get('/api/hls/:kind/:fileId/master.m3u8', async (req, reply) => {
     const r = resolve(req, reply);
     if (!r) return;
+    const ci = await codecInfo(r.row.path);
+    const vcopy = !!ci.vcodec && APPLE_VIDEO.has(ci.vcodec);
+    const acopy = !!ci.acodec && APPLE_AUDIO.has(ci.acodec);
+    const vtag = videoCodecTag(ci, !vcopy);                 // hvc1/avc1 for what we OUTPUT
+    const atag = audioCodecTag(acopy ? ci.acodec : 'aac');  // copied codec, else aac
+    const codecs = `${vtag},${atag}`;
+
     const lines = ['#EXTM3U', '#EXT-X-VERSION:7'];
     let tracks = [];
     try { tracks = (await allSubtitleTracks(r.row.path)).slice(0, 12); } catch {}
@@ -300,8 +331,9 @@ export function registerHls(app, db, helpers = {}) {
       lines.push(`#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="${name}",DEFAULT=NO,AUTOSELECT=NO${lang},URI="subs/${i}.m3u8${r.q}"`);
     });
     const subs = tracks.length ? ',SUBTITLES="subs"' : '';
-    lines.push(`#EXT-X-STREAM-INF:BANDWIDTH=20000000${subs}`);
+    lines.push(`#EXT-X-STREAM-INF:BANDWIDTH=20000000,CODECS="${codecs}"${subs}`);
     lines.push(`index.m3u8${r.q}`);
+    logEvent('master', { file: path.basename(r.row.path), codecs, subs: tracks.length });
     reply.header('Content-Type', 'application/vnd.apple.mpegurl');
     return reply.send(lines.join('\n') + '\n');
   });
