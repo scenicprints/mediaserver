@@ -630,16 +630,21 @@ final class Store: ObservableObject {
         guard let t = token else { return nil }
         return URL(string: "\(cleanBase)/api/hls/\(kind)/\(fileId)/master.m3u8?token=\(t)&\(audioQuery())")
     }
-    // Native containers (mp4/m4v/mov) ALWAYS direct-play — the Apple TV plays
-    // their codecs (HEVC incl. 10-bit, H.264, AAC, AC3, EAC3) natively, exactly
-    // like Plex Direct Play. We do NOT reroute them through HLS for subtitles:
-    // that was forcing perfectly-playable movies through the transcoder (black
-    // video / no resume). Only non-native containers (mkv/avi/ts…) go to HLS,
-    // where the server now REMUXES (stream copy) rather than re-encoding.
+    // Ask the SERVER whether AVPlayer can direct-play this file. Direct play needs
+    // a native container (mp4/m4v/mov) AND codecs AVPlayer reads as-is — crucially
+    // HEVC must be tagged 'hvc1' (a 'hev1' file direct-plays as audio-only, no
+    // video). Anything else routes to the HLS remux, which retags/repackages
+    // losslessly. The server decides because only it can probe the codec + tag.
+    struct PlayDecision: Decodable { let direct: Bool }
     func resolvePlaybackURL(kind: String, file: MovieFile) async -> URL? {
+        if let d = await get("api/hls/decide/\(kind)/\(file.id)", as: PlayDecision.self) {
+            if d.direct { return kind == "episode" ? episodeStreamURL(fileId: file.id) : streamURL(fileId: file.id) }
+            return hlsURL(kind: kind, fileId: file.id)
+        }
+        // Server too old to decide (no endpoint): fall back to a container guess
+        // so the app still works — native → direct, else HLS.
         let ext = (file.filename as NSString?)?.pathExtension.lowercased() ?? ""
-        let native: Set<String> = ["mp4", "m4v", "mov"]
-        if native.contains(ext) {
+        if ["mp4", "m4v", "mov"].contains(ext) {
             return kind == "episode" ? episodeStreamURL(fileId: file.id) : streamURL(fileId: file.id)
         }
         return hlsURL(kind: kind, fileId: file.id)

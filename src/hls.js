@@ -65,6 +65,7 @@ async function codecInfo(filePath) {
   const a = streams.find((s) => s.codec_type === 'audio');
   const info = {
     vcodec: v && String(v.codec_name || '').toLowerCase(),
+    vtag: v && String(v.codec_tag_string || '').toLowerCase(),
     acodec: a && String(a.codec_name || '').toLowerCase(),
     duration: parseFloat(p && p.format && p.format.duration) || 0
   };
@@ -139,6 +140,10 @@ function spawnFfmpeg(s, filePath, opts, ci) {
 
   if (vcopy) {
     args.push('-c:v', 'copy');
+    // AVPlayer only decodes HEVC tagged 'hvc1'; a file tagged 'hev1' plays
+    // audio with NO VIDEO. Re-tag on the copy (bitstream is identical) — this
+    // is THE fix for HEVC files that direct-played as audio-only.
+    if (ci.vcodec === 'hevc' || ci.vcodec === 'h265') args.push('-tag:v', 'hvc1');
   } else {
     // Truly-unsupported video (rare: VC-1, MPEG-2…): re-encode to H.264 with
     // IDR keyframes on the 6s grid.
@@ -210,6 +215,26 @@ export function registerHls(app, db, helpers = {}) {
     if (!row) { reply.code(404).send({ error: 'not found' }); return null; }
     return { kind, row, opts: audioOptsFromQuery(req.query || {}), q: passQuery(req.query || {}) };
   };
+
+  // Playback decision for the Apple TV: can AVPlayer DIRECT-PLAY this file, or
+  // must it go through the HLS remux? Direct play needs a native container
+  // (mp4/m4v/mov) with codecs AVPlayer reads as-is — notably HEVC must be tagged
+  // 'hvc1' (a 'hev1' tag is audio-only), and the container can't be Matroska.
+  // Anything else routes to /api/hls (which remuxes: retags HEVC, repackages
+  // the container — a fast lossless copy, not a re-encode).
+  app.get('/api/hls/decide/:kind/:fileId', async (req, reply) => {
+    const kind = req.params.kind === 'episode' ? 'episode' : 'movie';
+    const row = fileRow(db, kind, req.params.fileId);
+    if (!row) return reply.code(404).send({ error: 'not found' });
+    const ci = await codecInfo(row.path);
+    const ext = path.extname(row.path).toLowerCase();
+    const nativeContainer = ['.mp4', '.m4v', '.mov'].includes(ext);
+    const directVideo = ci.vcodec === 'h264'
+      || (ci.vcodec === 'hevc' && ci.vtag === 'hvc1');   // hev1 → must remux
+    const directAudio = !ci.acodec || ['aac', 'ac3', 'eac3', 'mp3', 'alac'].includes(ci.acodec);
+    const direct = nativeContainer && directVideo && directAudio;
+    return { direct, vcodec: ci.vcodec, vtag: ci.vtag, acodec: ci.acodec, container: ext };
+  });
 
   // Admin diagnostics: what is the transcoder actually doing?
   app.get('/api/hls/debug', async (req, reply) => {
