@@ -108,6 +108,22 @@ async function waitFor(s, file) {
   return fs.existsSync(file);
 }
 
+// Wait until ffmpeg's playlist actually LISTS a segment (it can create ff.m3u8
+// a beat before the first .m4s lands — serving that empty playlist makes
+// AVPlayer give up with nothing to play). Returns the playlist text, or null.
+async function waitForPlaylist(s, ff) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < WAIT_MS) {
+    let txt = '';
+    try { txt = fs.readFileSync(ff, 'utf8'); } catch {}
+    if (/\.m4s/.test(txt)) return txt;
+    if (!running(s)) return /\.m4s/.test(txt) ? txt : null;  // died before a segment
+    await sleep(200);
+    s.lastAccess = Date.now();
+  }
+  try { return fs.readFileSync(ff, 'utf8'); } catch { return null; }
+}
+
 function spawnFfmpeg(s, filePath, opts, ci) {
   const ff = ffmpegBin();
   if (!ff) throw new Error('ffmpeg not installed');
@@ -261,8 +277,14 @@ export function registerHls(app, db, helpers = {}) {
     catch (e) { return reply.code(500).send({ error: e.message }); }
 
     const ff = path.join(s.dir, 'ff.m3u8');
-    if (!(await waitFor(s, ff))) return reply.code(504).send({ error: 'playlist not ready' });
-    let pl = fs.readFileSync(ff, 'utf8');
+    let pl = await waitForPlaylist(s, ff);
+    if (!pl) {
+      // ffmpeg produced no playable segment — surface the real reason (it's the
+      // #1 thing to know when a file won't play).
+      const why = (s.lastErr || '').split('\n').pop() || 'transcoder produced no output';
+      console.error(`[hls] no segments for ${path.basename(r.row.path)} — ${why}`);
+      return reply.code(500).send({ error: `playback failed: ${why}` });
+    }
     pl = pl
       .replace(/URI="init\.mp4"/g, `URI="init.mp4${r.q}"`)
       .replace(/^(seg\d+\.m4s)\s*$/gm, (m, f) => `${f}${r.q}`);
