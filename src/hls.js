@@ -239,6 +239,15 @@ export function registerHls(app, db, helpers = {}) {
     return { kind, row, opts: audioOptsFromQuery(req.query || {}), q: passQuery(req.query || {}) };
   };
 
+  // Log EVERY request the Apple TV makes, in order — the request SEQUENCE is the
+  // real diagnostic: master→(nothing) means AVPlayer rejected the master;
+  // master→index→init→segN→index(refetch) means it's working. `range` shows
+  // whether AVPlayer is byte-seeking a segment.
+  app.addHook('onRequest', async (req) => {
+    const m = /^\/api\/hls\/(movie|episode)\/(\d+)\/([^?]*)/.exec(req.url);
+    if (m) logEvent('request', { res: decodeURIComponent(m[3]), kind: m[1], fileId: m[2], range: req.headers.range || null, ua: (req.headers['user-agent'] || '').slice(0, 40) });
+  });
+
   // Playback decision for the Apple TV: can AVPlayer DIRECT-PLAY this file, or
   // must it go through the HLS remux? Direct play needs a native container
   // (mp4/m4v/mov) with codecs AVPlayer reads as-is — notably HEVC must be tagged
