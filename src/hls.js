@@ -43,6 +43,21 @@ const APPLE_AUDIO = new Set(['aac', 'ac3', 'eac3', 'mp3', 'alac']);
 const sessions = new Map();     // key -> session
 const probeCache = new Map();   // path -> { at, info }
 
+// ---- Debug log: a plain file the on-server operator (or a Claude with shell
+// access to the Dell) can `cat` WITHOUT auth, plus an in-memory ring the admin
+// /api/hls/debug endpoint returns. Every playback decision, ffmpeg spawn (full
+// command), exit code + stderr, and playlist/segment stall is recorded — so the
+// exact failure on a REAL file is visible instead of guessed at. ----
+const LOG_FILE = path.join(ROOT, 'debug.log');
+const recentLog = [];
+function logEvent(event, data = {}) {
+  const rec = { t: new Date().toISOString(), event, ...data };
+  recentLog.push(rec);
+  if (recentLog.length > 80) recentLog.shift();
+  try { fs.appendFileSync(LOG_FILE, JSON.stringify(rec) + '\n'); } catch {}
+  console.log(`[hls] ${event}`, JSON.stringify(data));
+}
+
 function audioOptsFromQuery(q) {
   return { forceStereo: q.audio !== 'surround' };
 }
@@ -181,15 +196,19 @@ function spawnFfmpeg(s, filePath, opts, ci) {
   );
 
   s.vcopy = vcopy; s.acopy = acopy;
-  s.lastArgs = args.join(' ');
-  console.log(`[hls] ${path.basename(filePath)} — video ${vcopy ? 'COPY' : 'transcode'}, audio ${acopy ? 'COPY' : 'aac'} (${ci.vcodec}/${ci.acodec})`);
+  s.lastArgs = `${ff} ${args.join(' ')}`;
+  logEvent('spawn', {
+    file: path.basename(filePath), vcodec: ci.vcodec, vtag: ci.vtag, acodec: ci.acodec,
+    videoMode: vcopy ? 'copy' : 'transcode', audioMode: acopy ? 'copy' : 'aac', retagHvc1: vcopy && (ci.vcodec === 'hevc' || ci.vcodec === 'h265'),
+    cmd: s.lastArgs
+  });
 
   const proc = spawn(ff, args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
   proc.stderr.on('data', (d) => { s.err = ((s.err || '') + d).slice(-4000); s.lastErr = s.err.trim(); });
-  proc.on('error', (e) => console.error('[hls] spawn error:', e.message));
+  proc.on('error', (e) => logEvent('spawn_error', { file: path.basename(filePath), error: e.message }));
   proc.on('exit', (code) => {
     s.lastExit = code;
-    if (code && code !== 255) console.error(`[hls] ffmpeg exit ${code}: ${(s.err || '').trim().split('\n').pop() || ''}`);
+    logEvent('exit', { file: path.basename(filePath), code, stderr: (s.err || '').trim().slice(-1500) });
   });
   s.proc = proc;
 }
@@ -237,6 +256,7 @@ export function registerHls(app, db, helpers = {}) {
       || (ci.vcodec === 'hevc' && ci.vtag === 'hvc1');   // hev1 → must remux
     const directAudio = !ci.acodec || ['aac', 'ac3', 'eac3', 'mp3', 'alac'].includes(ci.acodec);
     const direct = nativeContainer && directVideo && directAudio;
+    logEvent('decide', { file: path.basename(row.path), direct, vcodec: ci.vcodec, vtag: ci.vtag, acodec: ci.acodec, container: ext });
     return { direct, vcodec: ci.vcodec, vtag: ci.vtag, acodec: ci.acodec, container: ext };
   });
 
@@ -244,6 +264,8 @@ export function registerHls(app, db, helpers = {}) {
   app.get('/api/hls/debug', async (req, reply) => {
     if (!req.user || req.user.role !== 'admin') return reply.code(403).send({ error: 'admin only' });
     return {
+      logFile: LOG_FILE,
+      recent: recentLog.slice(-40),
       sessions: [...sessions.entries()].map(([k, s]) => ({
         key: k, running: running(s), vcopy: s.vcopy, acopy: s.acopy,
         lastExit: s.lastExit ?? null, idleSec: Math.round((Date.now() - s.lastAccess) / 1000),
@@ -311,9 +333,10 @@ export function registerHls(app, db, helpers = {}) {
       // ffmpeg produced no playable segment — surface the real reason (it's the
       // #1 thing to know when a file won't play).
       const why = (s.lastErr || '').split('\n').pop() || 'transcoder produced no output';
-      console.error(`[hls] no segments for ${path.basename(r.row.path)} — ${why}`);
+      logEvent('no_segments', { file: path.basename(r.row.path), why, exit: s.lastExit ?? null });
       return reply.code(500).send({ error: `playback failed: ${why}` });
     }
+    logEvent('playlist_served', { file: path.basename(r.row.path), segments: (pl.match(/\.m4s/g) || []).length, running: running(s) });
     pl = pl
       .replace(/URI="init\.mp4"/g, `URI="init.mp4${r.q}"`)
       .replace(/^(seg\d+\.m4s)\s*$/gm, (m, f) => `${f}${r.q}`);
