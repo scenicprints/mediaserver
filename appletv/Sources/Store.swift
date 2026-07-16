@@ -630,16 +630,17 @@ final class Store: ObservableObject {
         guard let t = token else { return nil }
         return URL(string: "\(cleanBase)/api/hls/\(kind)/\(fileId)/master.m3u8?token=\(t)&\(audioQuery())")
     }
-    // Async variant: also routes native containers through HLS when the file has
-    // subtitle tracks (sidecar/embedded/AI) so the native CC picker can show them.
+    // Native containers (mp4/m4v/mov) ALWAYS direct-play — the Apple TV plays
+    // their codecs (HEVC incl. 10-bit, H.264, AAC, AC3, EAC3) natively, exactly
+    // like Plex Direct Play. We do NOT reroute them through HLS for subtitles:
+    // that was forcing perfectly-playable movies through the transcoder (black
+    // video / no resume). Only non-native containers (mkv/avi/ts…) go to HLS,
+    // where the server now REMUXES (stream copy) rather than re-encoding.
     func resolvePlaybackURL(kind: String, file: MovieFile) async -> URL? {
         let ext = (file.filename as NSString?)?.pathExtension.lowercased() ?? ""
         let native: Set<String> = ["mp4", "m4v", "mov"]
         if native.contains(ext) {
-            if await subtitleTracks(kind: kind, fileId: file.id).isEmpty {
-                return kind == "episode" ? episodeStreamURL(fileId: file.id) : streamURL(fileId: file.id)
-            }
-            return hlsURL(kind: kind, fileId: file.id)
+            return kind == "episode" ? episodeStreamURL(fileId: file.id) : streamURL(fileId: file.id)
         }
         return hlsURL(kind: kind, fileId: file.id)
     }
