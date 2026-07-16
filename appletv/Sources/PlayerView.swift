@@ -1,10 +1,9 @@
 import SwiftUI
 import AVKit
-import UIKit
 
-// A fully-resolved playback request: URL picked (direct vs HLS, subtitle-aware),
-// context for the admin monitor, and the resume point. Views resolve one of
-// these asynchronously, then present PlayerView from it.
+// A fully-resolved playback request: URL picked (direct vs HLS), context for the
+// admin monitor, and the resume point. Views resolve one of these, then present
+// PlayerView from it.
 struct PlaySession: Identifiable {
     let id = UUID()
     let url: URL
@@ -27,13 +26,11 @@ extension PlayerView {
     }
 }
 
-// Native tvOS video playback via AVPlayerViewController (full transport UI,
-// scrubbing, info panel, native CC picker for HLS subtitle renditions).
-// Streams the server file over ?token=; seeks to the resume point; reports
-// progress so Continue Watching stays in sync with the web app; heartbeats the
-// session so the admin "Now Playing" monitor sees this viewer; and surfaces
-// Skip Intro / Skip Credits as native contextual actions (the Netflix-style
-// top overlay button) driven by the server's chapter/fingerprint data.
+// Native tvOS playback via AVPlayerViewController (full transport UI, scrubbing,
+// native subtitle/CC picker). Deliberately SIMPLE — this is the reset after a
+// pile of extras (skip-intro, in-player AI-subs menu, buffer polling) broke
+// playback. Kept: resume, progress save, a lightweight admin heartbeat, and an
+// optional pre-roll that CANNOT wedge the feature (hard watchdog).
 struct PlayerView: UIViewControllerRepresentable {
     let url: URL
     let startAt: Double
@@ -46,10 +43,7 @@ struct PlayerView: UIViewControllerRepresentable {
     var fileId: Int? = nil
     var live: Bool = false
 
-    private var kind: String {
-        if case .episode = ref { return "episode" }
-        return "movie"
-    }
+    private var kind: String { if case .episode = ref { return "episode" }; return "movie" }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(store: store, ref: ref, kind: kind, duration: duration, startAt: startAt,
@@ -59,38 +53,30 @@ struct PlayerView: UIViewControllerRepresentable {
 
     func makeUIViewController(context: Context) -> AVPlayerViewController {
         let vc = AVPlayerViewController()
-        context.coordinator.vc = vc            // MUST precede installTransportMenu()
         let mainItem = AVPlayerItem(url: url)
         context.coordinator.mainItem = mainItem
 
         let player: AVPlayer
         if let prerollURL {
-            // Queue: pre-roll → feature. Seek the feature to the resume point once
-            // the pre-roll ends; progress is only reported on the feature.
             let pre = AVPlayerItem(url: prerollURL)
             let q = AVQueuePlayer(items: [pre, mainItem])
             player = q
-            context.coordinator.observePrerollEnd(pre, player: q)
+            context.coordinator.startPreroll(pre, mainItem: mainItem, player: q)
         } else {
             player = AVPlayer(playerItem: mainItem)
             if startAt > 1 { player.seek(to: CMTime(seconds: startAt, preferredTimescale: 600)) }
             context.coordinator.onMain = true
         }
-
         vc.player = player
         player.play()
-        context.coordinator.installTransportMenu()
 
-        // One 1s cadence drives everything: skip-button visibility (needs to be
-        // snappy), progress saves (self-throttled to ~10s), and heartbeats (every
-        // 10th tick).
-        let interval = CMTime(seconds: 1, preferredTimescale: 10)
+        // A single 5s tick saves progress and heartbeats — light, off the render path.
+        let interval = CMTime(seconds: 5, preferredTimescale: 1)
         context.coordinator.timeObserver = player.addPeriodicTimeObserver(
             forInterval: interval, queue: .main) { time in
             context.coordinator.tick(position: time.seconds, item: player.currentItem)
         }
         context.coordinator.player = player
-        context.coordinator.loadPlayMeta()
         return vc
     }
 
@@ -118,22 +104,13 @@ struct PlayerView: UIViewControllerRepresentable {
         let sessionId = UUID().uuidString
 
         var player: AVPlayer?
-        weak var vc: AVPlayerViewController?
         var mainItem: AVPlayerItem?
         var timeObserver: Any?
         var onMain = false
         private var endObserver: NSObjectProtocol?
         private var failObserver: NSObjectProtocol?
         private var lastSaved: Double = 0
-        private var tickCount = 0
-
-        // Skip Intro / Skip Credits ranges (server fingerprint + named chapters).
-        private var introRange: Store.IntroRange?
-        private var creditsRange: Store.IntroRange?
-        private var introSkipped = false
-        private var creditsSkipped = false
-        private var showingIntro = false
-        private var showingCredits = false
+        private var ticks = 0
 
         init(store: Store, ref: Store.PlayRef, kind: String, duration: Double?, startAt: Double,
              title: String, subtitle: String?, fileId: Int?, live: Bool, mode: String) {
@@ -142,134 +119,47 @@ struct PlayerView: UIViewControllerRepresentable {
             self.fileId = fileId; self.live = live; self.mode = mode
         }
 
-        // "Generate AI Subtitles" lives IN the player: swipe down → transport
-        // bar menu. Kicks the Whisper job and shows live progress in the menu
-        // item's title; the finished track appears in the CC picker on replay.
-        private var aiSubState = "Generate AI Subtitles"
-        private var aiSubRunning = false
-        func installTransportMenu() {
-            guard let fileId, !live else { return }
-            let action = UIAction(title: aiSubState, image: UIImage(systemName: "captions.bubble")) { [weak self] _ in
-                self?.startAISubtitles(fileId: fileId)
-            }
-            vc?.transportBarCustomMenuItems = [action]
-        }
-        private func startAISubtitles(fileId: Int) {
-            guard !aiSubRunning else { return }
-            aiSubRunning = true
-            aiSubState = "AI Subtitles: starting…"; installTransportMenu()
-            Task { [weak self] in
-                guard let self else { return }
-                var job = await self.store.generateSubtitles(kind: self.kind, fileId: fileId)
-                while let j = job, j.status == "running" {
-                    self.aiSubState = "AI Subtitles: \(j.pct ?? 0)%"; self.installTransportMenu()
-                    try? await Task.sleep(nanoseconds: 4_000_000_000)
-                    job = await self.store.subtitleJobStatus(kind: self.kind, fileId: fileId)
-                }
-                self.aiSubRunning = false
-                self.aiSubState = (job?.status == "done")
-                    ? "AI Subtitles ready — restart the video"
-                    : (job?.error ?? "AI Subtitles failed")
-                self.installTransportMenu()
-            }
-        }
-
-        // /api/play gives the fingerprinted intro range + named chapters (and
-        // primes the server's engine decision for the admin monitor).
-        func loadPlayMeta() {
-            guard let fileId, !live else { return }
-            Task { [weak self] in
-                guard let self, let meta = await self.store.playMeta(kind: self.kind, fileId: fileId) else { return }
-                // Intro: the detected range, else a chapter whose name says intro.
-                self.introRange = meta.intro
-                if self.introRange == nil, let ch = meta.chapters?.first(where: {
-                    ($0.title ?? "").range(of: "intro|opening", options: [.regularExpression, .caseInsensitive]) != nil
-                }) { self.introRange = Store.IntroRange(start: ch.start, end: ch.end) }
-                // Credits: only a named chapter (bounded and authoritative).
-                if let ch = meta.chapters?.first(where: {
-                    ($0.title ?? "").range(of: "credit", options: [.regularExpression, .caseInsensitive]) != nil
-                }) { self.creditsRange = Store.IntroRange(start: ch.start, end: ch.end) }
-            }
-        }
-
-        // When the pre-roll finishes, the queue advances to the feature; seek it
-        // to the resume point and start counting progress.
-        func observePrerollEnd(_ preroll: AVPlayerItem, player: AVPlayer) {
-            let advance: (Notification) -> Void = { [weak self] _ in
+        // Pre-roll → feature, with a watchdog so a slow/stalled pre-roll can NEVER
+        // wedge the movie: if the feature isn't playing shortly, skip straight to it.
+        func startPreroll(_ pre: AVPlayerItem, mainItem: AVPlayerItem, player: AVQueuePlayer) {
+            let advance: () -> Void = { [weak self, weak player] in
                 guard let self, !self.onMain else { return }
-                if self.startAt > 1 {
-                    player.seek(to: CMTime(seconds: self.startAt, preferredTimescale: 600))
-                }
                 self.onMain = true
+                if let player, player.currentItem !== mainItem { player.advanceToNextItem() }
+                if self.startAt > 1 { player?.seek(to: CMTime(seconds: self.startAt, preferredTimescale: 600)) }
+                player?.play()
             }
             let nc = NotificationCenter.default
-            endObserver = nc.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: preroll, queue: .main, using: advance)
-            // If the pre-roll can't be played, skip straight to the feature.
-            failObserver = nc.addObserver(forName: .AVPlayerItemFailedToPlayToEndTime, object: preroll, queue: .main) { [weak self] n in
-                if let q = player as? AVQueuePlayer { q.advanceToNextItem() }
-                advance(n)
-                _ = self
-            }
+            endObserver = nc.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: pre, queue: .main) { _ in advance() }
+            failObserver = nc.addObserver(forName: .AVPlayerItemFailedToPlayToEndTime, object: pre, queue: .main) { _ in advance() }
+            // Hard watchdog: no matter what the pre-roll does, the feature starts.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 12) { advance() }
         }
 
         func tick(position: Double, item: AVPlayerItem?) {
             guard onMain, item === mainItem, position.isFinite else { return }
-            updateSkipActions(position)
-            if position - lastSaved >= 9 { report(position: position, item: item) }
-            tickCount += 1
-            if tickCount % 10 == 1 { heartbeat(position: position) }
-        }
-
-        private func updateSkipActions(_ t: Double) {
-            let showIntro = !live && !introSkipped && introRange.map { t >= $0.start && t < $0.end } == true
-            let showCredits = !live && !creditsSkipped && creditsRange.map { t >= $0.start && t < $0.end } == true
-            guard showIntro != showingIntro || showCredits != showingCredits else { return }
-            showingIntro = showIntro; showingCredits = showCredits
-            var actions: [UIAction] = []
-            if showIntro, let r = introRange {
-                actions.append(UIAction(title: "Skip Intro") { [weak self] _ in
-                    self?.introSkipped = true
-                    self?.player?.seek(to: CMTime(seconds: r.end, preferredTimescale: 600))
-                    self?.updateSkipActions(r.end)
-                })
-            }
-            if showCredits, let r = creditsRange {
-                actions.append(UIAction(title: "Skip Credits") { [weak self] _ in
-                    self?.creditsSkipped = true
-                    self?.player?.seek(to: CMTime(seconds: r.end, preferredTimescale: 600))
-                    self?.updateSkipActions(r.end)
-                })
-            }
-            vc?.contextualActions = actions
+            if position - lastSaved >= 8 { report(position: position) }
+            ticks += 1
+            if ticks % 2 == 1 { heartbeat(position: position) }   // ~every 10s
         }
 
         private func heartbeat(position: Double) {
             let dur = duration ?? mainItem?.duration.seconds
             let paused = (player?.rate ?? 0) == 0
-            // Buffer health for the admin monitor (how far ahead is loaded).
-            var buffered: Double = 0
-            for r in mainItem?.loadedTimeRanges ?? [] {
-                let range = r.timeRangeValue
-                let end = range.start.seconds + range.duration.seconds
-                if range.start.seconds <= position, end > position { buffered = max(buffered, end - position) }
-            }
             Task {
                 await store.sessionHeartbeat(sessionId: sessionId, kind: live ? "live" : kind,
                                              fileId: fileId, title: title, subtitle: subtitle,
                                              mode: mode, position: position,
                                              duration: (dur?.isFinite == true) ? dur : nil,
-                                             paused: paused, live: live, bufferedAhead: buffered)
+                                             paused: paused, live: live)
             }
         }
 
-        func report(position: Double, item: AVPlayerItem?) {
-            guard onMain, item === mainItem else { return }        // ignore pre-roll
-            guard position.isFinite else { return }
+        func report(position: Double) {
+            guard onMain, position.isFinite else { return }
             lastSaved = position
-            // Live TV is ephemeral (matches the web): never write watch-state, or
-            // the live offset would poison the title's real resume point.
-            if live { return }
-            let dur = duration ?? item?.duration.seconds
+            if live { return }   // Live TV is ephemeral — never write watch-state
+            let dur = duration ?? mainItem?.duration.seconds
             let total = (dur?.isFinite == true) ? dur : nil
             let watched = (total.map { position / $0 } ?? 0) > 0.92
             Task { await store.saveProgress(ref, position: position, duration: total, watched: watched ? true : nil) }
@@ -278,7 +168,7 @@ struct PlayerView: UIViewControllerRepresentable {
         func flush(finalPosition: Double?) {
             let sid = sessionId
             Task { await store.sessionEnd(sessionId: sid) }
-            if live { return }                                     // ephemeral — see report()
+            if live { return }
             guard onMain, let p = finalPosition, p.isFinite, p > 1 else { return }
             let total = (duration?.isFinite == true) ? duration : nil
             let watched = (total.map { p / $0 } ?? 0) > 0.92
