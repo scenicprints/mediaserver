@@ -169,7 +169,11 @@ function spawnFfmpeg(s, filePath, opts, ci) {
     '-hls_time', String(SEG_SECONDS),
     '-hls_segment_type', 'fmp4',
     '-hls_fmp4_init_filename', 'init.mp4',
-    '-hls_playlist_type', 'vod',
+    // EVENT, not VOD: AVPlayer fetches a VOD playlist ONCE, so while the remux
+    // is still producing segments it would see only the first one or two and
+    // stall. An EVENT playlist tells AVPlayer to re-fetch as it grows; we append
+    // #EXT-X-ENDLIST when ffmpeg finishes, which makes it a complete/seekable VOD.
+    '-hls_playlist_type', 'event',
     '-hls_list_size', '0',
     '-hls_flags', 'independent_segments',
     '-hls_segment_filename', path.join(s.dir, 'seg%05d.m4s'),
