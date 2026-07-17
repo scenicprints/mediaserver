@@ -1,8 +1,5 @@
 import SwiftUI
 import UIKit
-import AVKit
-import AVFoundation
-import CoreMedia
 import VLCKitSPM
 
 // One upcoming episode for the in-player "Up Next" autoplay queue.
@@ -16,7 +13,6 @@ struct UpNextItem: Identifiable, Hashable {
     let duration: Double?
 }
 
-// A fully-resolved playback request.
 struct PlaySession: Identifiable {
     let id = UUID()
     let url: URL
@@ -40,7 +36,25 @@ extension PlayerView {
     }
 }
 
-// MARK: - Player screen (SwiftUI over VLCKit)
+// Player colors — the web player's tokens (style.css :root).
+private enum VP {
+    static let accent = Color(hex: 0x6c5cff)
+    static let accent2 = Color(hex: 0x37c2ff)
+    static let grad = LinearGradient(colors: [Color(hex: 0x6c5cff), Color(hex: 0x37c2ff)],
+                                     startPoint: .topLeading, endPoint: .bottomTrailing)
+    static let panel = Color(hex: 0x10121a)
+    static let panel2 = Color(hex: 0x1e222d)
+    static let line = Color(hex: 0x262b38)
+    static let muted = Color(hex: 0x9aa1b4)
+}
+
+enum PlayerFocus: Hashable {
+    case catcher, skipBack, play, skipFwd, scrubber, cc, gear
+    case skipIntro, upNext
+    case menuRow(Int)
+}
+
+// MARK: - Player screen (SwiftUI over VLCKit), styled to match the web player
 
 struct PlayerView: View {
     let url: URL
@@ -59,204 +73,300 @@ struct PlayerView: View {
     @StateObject private var m = PlayerModel()
     @FocusState private var focus: PlayerFocus?
 
+    private var kind: String { if case .episode = ref { return "episode" }; return "movie" }
+    private var chromeUp: Bool { m.controlsVisible || m.menu != .none }
+
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
             VLCVideoView(model: m).ignoresSafeArea()
 
-            // Bottom scrim so controls read against bright video.
-            if m.controlsVisible || m.menu != .none {
-                LinearGradient(colors: [.clear, .black.opacity(0.85)],
-                               startPoint: .center, endPoint: .bottom)
-                    .ignoresSafeArea().allowsHitTesting(false)
-            }
+            // Invisible catcher owns the remote only when nothing else is up. A
+            // plain Color (not a Button) has NO tvOS focus highlight — fixes the
+            // white flash when the chrome hides.
+            Color.clear
+                .focusable(!chromeUp && !m.showSkipIntro && !m.showUpNext)
+                .focused($focus, equals: .catcher)
+                .onMoveCommand { _ in m.flashControls() }
+                .onPlayPauseCommand { m.togglePlay(); m.flashControls() }
 
-            // The invisible full-screen surface owns the remote when no overlay is up:
-            // click = play/pause, swipe L/R = seek, swipe up = show controls.
-            // Owns the remote only when no controls/menus/prompts are up, so focus
-            // can move to the buttons the rest of the time.
-            Button(action: { m.togglePlay(); m.flashControls() }) { Color.clear }
-                .buttonStyle(.plain)
-                .focused($focus, equals: .surface)
-                .disabled(m.controlsVisible || m.menu == .subs || m.menu == .audio || m.showSkipIntro || m.showUpNext)
-                .onMoveCommand { dir in
-                    switch dir {
-                    case .left: m.jump(-10); m.flashControls()
-                    case .right: m.jump(10); m.flashControls()
-                    default: m.flashControls()
-                    }
-                }
-
-            overlay
+            if chromeUp { topBar; bottomChrome }
+            if m.buffering { spinner }
+            skipAndUpNext
+            if m.menu != .none { settingsMenu }
         }
         .onExitCommand {
-            if m.menu != .none { m.menu = .none; m.controlsVisible = false; focus = .surface }
-            else if m.controlsVisible { m.controlsVisible = false; focus = .surface }
+            if m.menu != .none { m.closeMenu(); focus = .catcher }
+            else if m.controlsVisible { m.controlsVisible = false; focus = .catcher }
             else { m.teardown(); dismiss() }
         }
         .onAppear {
             m.bind(store: store)
             m.start(url: url, startAt: startAt, ref: ref, kind: kind, duration: duration,
                     title: title, subtitle: subtitle, fileId: fileId, live: live,
-                    preroll: prerollURL, upNext: upNext, window: nil)
-            focus = .surface
+                    preroll: prerollURL, upNext: upNext)
+            focus = .catcher
         }
         .onDisappear { m.teardown() }
         .onChange(of: m.controlsVisible) { vis in
-            if vis { if focus != .skip && focus != .upNext { focus = .control(0) } }
-            else if m.menu == .none && !m.showSkipIntro && !m.showUpNext { focus = .surface }
+            if vis { if !menuOrPrompt { focus = .play } }
+            else if !menuOrPrompt { focus = .catcher }
         }
-        .onChange(of: m.showSkipIntro) { on in if on { focus = .skip } else if focus == .skip { focus = m.controlsVisible ? .control(0) : .surface } }
-        .onChange(of: m.showUpNext) { on in if on { focus = .upNext } else if focus == .upNext { focus = m.controlsVisible ? .control(0) : .surface } }
+        .onChange(of: m.menu) { menu in
+            if menu == .settings { focus = .menuRow(0) }
+            else if menu == .aiPicker { focus = .menuRow(0) }
+        }
+        .onChange(of: m.showSkipIntro) { on in if on { focus = .skipIntro } else if focus == .skipIntro { focus = m.controlsVisible ? .play : .catcher } }
+        .onChange(of: m.showUpNext) { on in if on { focus = .upNext } else if focus == .upNext { focus = m.controlsVisible ? .play : .catcher } }
         .onChange(of: m.finishedPlayback) { done in if done { m.teardown(); dismiss() } }
     }
 
-    private var kind: String { if case .episode = ref { return "episode" }; return "movie" }
+    private var menuOrPrompt: Bool { m.menu != .none || m.showSkipIntro || m.showUpNext }
 
-    @ViewBuilder private var overlay: some View {
-        VStack(alignment: .leading) {
-            // Title (top) when controls are up.
-            if m.controlsVisible || m.menu != .none {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(title).font(.system(size: 42, weight: .bold)).foregroundStyle(.white)
-                    if let s = subtitle { Text(s).font(.title3).foregroundStyle(Theme.muted) }
+    // MARK: Top bar — Back + title (web .vp-top)
+
+    private var topBar: some View {
+        VStack {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title).font(.system(size: 40, weight: .bold)).foregroundStyle(.white)
+                    if let s = subtitle { Text(s).font(.title3).foregroundStyle(Color(hex: 0xc7ccda)) }
                 }
-                .shadow(radius: 10)
-                .padding(.top, 60).padding(.leading, Theme.gutter)
-                .transition(.opacity)
+                Spacer()
+            }
+            .padding(.top, 54).padding(.horizontal, 68)
+            .background(LinearGradient(colors: [.black.opacity(0.7), .clear], startPoint: .top, endPoint: .bottom)
+                .ignoresSafeArea(edges: .top).allowsHitTesting(false))
+            Spacer()
+        }
+        .transition(.opacity)
+    }
+
+    // MARK: Center transport + bottom scrubber/utility (web .vp-transport + .vp-bottom)
+
+    private var bottomChrome: some View {
+        VStack(spacing: 0) {
+            Spacer()
+            // Center transport — big round glass buttons.
+            HStack(spacing: 60) {
+                glassButton("gobackward.10", 108, .skipBack) { m.jump(-10); m.flashControls() }
+                glassButton(m.isPlaying ? "pause.fill" : "play.fill", 140, .play) { m.togglePlay(); m.flashControls() }
+                glassButton("goforward.10", 108, .skipFwd) { m.jump(10); m.flashControls() }
             }
             Spacer()
+            // Bottom: scrubber + utility row over a scrim.
+            VStack(spacing: 14) {
+                scrubber
+                HStack(spacing: 18) {
+                    Text("\(m.clock(m.position)) / \(m.clock(m.duration))")
+                        .font(.system(size: 28, weight: .medium).monospacedDigit())
+                        .foregroundStyle(Color(hex: 0xeef1f8))
+                    Spacer()
+                    utilityButton(.cc) { Text("CC").font(.system(size: 26, weight: .heavy)) } action: { m.toggleCC() }
+                    utilityButton(.gear) { Image(systemName: "gearshape.fill").font(.system(size: 30)) } action: { m.menu = .settings }
+                }
+            }
+            .padding(.horizontal, 80).padding(.bottom, 54)
+            .background(LinearGradient(stops: [
+                .init(color: .black.opacity(0.88), location: 0),
+                .init(color: .black.opacity(0.45), location: 0.55),
+                .init(color: .clear, location: 1)
+            ], startPoint: .bottom, endPoint: .top).ignoresSafeArea(edges: .bottom).allowsHitTesting(false))
+        }
+        .transition(.opacity)
+    }
 
-            // Info panel / menus.
-            if m.menu == .info { infoPanel.padding(.leading, Theme.gutter).padding(.bottom, 20) }
-            if m.menu == .subs { trackMenu("Subtitles", m.subtitleOptions, m.currentSubtitle) { m.selectSubtitle($0) } }
-            if m.menu == .audio { trackMenu("Audio", m.audioOptions, m.currentAudio) { m.selectAudio($0) } }
+    private var scrubber: some View {
+        let f = (focus == .scrubber)
+        return GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(.white.opacity(0.22)).frame(height: f ? 12 : 8)
+                Capsule().fill(.white.opacity(0.38))
+                    .frame(width: geo.size.width * m.buffered, height: f ? 12 : 8)
+                Capsule().fill(VP.grad)
+                    .frame(width: max(0, geo.size.width * m.progress), height: f ? 12 : 8)
+                // thumb
+                Circle().fill(.white)
+                    .frame(width: f ? 22 : 0, height: f ? 22 : 0)
+                    .shadow(color: VP.accent.opacity(f ? 0.9 : 0), radius: 14)
+                    .offset(x: max(0, geo.size.width * m.progress - (f ? 11 : 0)))
+            }
+            .frame(height: 40)
+            .shadow(color: VP.accent.opacity(f ? 0.55 : 0), radius: 16)
+        }
+        .frame(height: 40)
+        .focusable(m.controlsVisible && m.menu == .none)
+        .focused($focus, equals: .scrubber)
+        .onMoveCommand { dir in
+            switch dir { case .left: m.jump(-10); case .right: m.jump(10); default: break }
+            m.flashControls()
+        }
+        .animation(.easeOut(duration: 0.12), value: f)
+    }
 
-            // Skip Intro + Up Next (focusable, bottom-trailing).
+    // MARK: Skip Intro / Up Next (web .vp-skipbtn / .vp-upnext), bottom-right
+
+    private var skipAndUpNext: some View {
+        VStack {
+            Spacer()
             HStack {
                 Spacer()
                 if m.showSkipIntro {
-                    Button { m.skipIntro() } label: { pill("Skip Intro", "forward.end.fill") }
-                        .buttonStyle(.plain).focused($focus, equals: .skip)
+                    Button { m.skipIntro() } label: {
+                        Label("Skip Intro", systemImage: "forward.end.fill").font(.system(size: 26, weight: .bold))
+                            .padding(.horizontal, 26).padding(.vertical, 16)
+                            .background(Color(hex: 0x14161e).opacity(0.9), in: RoundedRectangle(cornerRadius: 10))
+                            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.white.opacity(0.35), lineWidth: 1))
+                    }
+                    .buttonStyle(.plain).foregroundStyle(.white)
+                    .focused($focus, equals: .skipIntro)
+                    .focusRing(focus == .skipIntro)
                 }
                 if m.showUpNext, let n = m.upNextItem {
                     Button { m.playNext() } label: { upNextCard(n) }
-                        .buttonStyle(.plain).focused($focus, equals: .upNext)
+                        .buttonStyle(.plain)
+                        .focused($focus, equals: .upNext)
+                        .focusRing(focus == .upNext)
                 }
             }
-            .padding(.trailing, Theme.gutter).padding(.bottom, 24)
-
-            // Transport bar.
-            if m.controlsVisible { transportBar.transition(.move(edge: .bottom).combined(with: .opacity)) }
+            .padding(.trailing, 80).padding(.bottom, 150)
         }
-        .animation(.easeInOut(duration: 0.25), value: m.controlsVisible)
-        .animation(.easeInOut(duration: 0.2), value: m.menu)
     }
 
-    private var transportBar: some View {
-        VStack(spacing: 14) {
-            // Scrubber.
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(.white.opacity(0.22)).frame(height: 8)
-                    Capsule().fill(Theme.grad)
-                        .frame(width: max(0, geo.size.width * m.progress), height: 8)
-                }
-            }
-            .frame(height: 8)
-
-            HStack {
-                Text(m.clock(m.position)).foregroundStyle(.white)
-                Spacer()
-                // Control buttons.
-                HStack(spacing: 26) {
-                    ctrlButton(m.isPlaying ? "pause.fill" : "play.fill", .control(0)) { m.togglePlay() }
-                    ctrlButton("captions.bubble", .control(1)) { m.menu = .subs; focus = .menuRow(m.subtitleOptions.first?.id ?? -1) }
-                    ctrlButton("waveform", .control(2)) { m.menu = .audio; focus = .menuRow(m.audioOptions.first?.id ?? 0) }
-                    ctrlButton("info.circle", .control(3)) { m.menu = (m.menu == .info ? .none : .info) }
-                }
-                Spacer()
-                Text(m.clock(m.duration)).foregroundStyle(.white)
-            }
-            .font(.title3.monospacedDigit())
-        }
-        .padding(.horizontal, Theme.gutter).padding(.bottom, 54)
-    }
-
-    private func ctrlButton(_ icon: String, _ id: PlayerFocus, _ action: @escaping () -> Void) -> some View {
-        Button(action: { action(); m.flashControls() }) {
-            Image(systemName: icon).font(.title2).frame(width: 64, height: 64)
-                .background(.white.opacity(0.12), in: Circle())
-        }
-        .buttonStyle(.plain).focused($focus, equals: id)
-    }
-
-    private func trackMenu(_ heading: String, _ items: [PlayerModel.TrackOption],
-                           _ current: Int, _ pick: @escaping (Int) -> Void) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(heading).font(.title2.weight(.semibold)).foregroundStyle(.white).padding(.bottom, 6)
-            ForEach(items) { item in
-                Button { pick(item.id); m.menu = .none; m.controlsVisible = false; focus = .surface } label: {
-                    HStack {
-                        Image(systemName: item.id == current ? "checkmark.circle.fill" : "circle")
-                            .foregroundStyle(item.id == current ? Theme.accent : Theme.muted)
-                        Text(item.label).foregroundStyle(.white)
-                        Spacer()
-                    }
-                    .padding(.vertical, 10).padding(.horizontal, 18).frame(width: 620)
-                }
-                .buttonStyle(.plain).focused($focus, equals: .menuRow(item.id))
-            }
-        }
-        .padding(24).background(Theme.card.opacity(0.96), in: RoundedRectangle(cornerRadius: 16))
-        .padding(.leading, Theme.gutter).padding(.bottom, 20)
-    }
-
-    private var infoPanel: some View {
-        let i = m.info
-        return VStack(alignment: .leading, spacing: 8) {
-            Text("Now Playing").font(.title3.weight(.semibold)).foregroundStyle(.white)
-            infoRow("Resolution", m.videoSizeText)
-            if let hdr = i?.hdrText { infoRow("Dynamic Range", hdr) } else { infoRow("Dynamic Range", "SDR") }
-            infoRow("Video", (i?.vcodec ?? "—").uppercased() + (i?.bitDepth.map { " · \($0)-bit" } ?? ""))
-            infoRow("Audio", (i?.acodec ?? "—").uppercased() + (i?.channelLayout.map { " · \($0)" } ?? ""))
-            if let kbps = i?.videoKbps {
-                infoRow("Bitrate", kbps >= 1000 ? String(format: "%.1f Mbps", Double(kbps) / 1000) : "\(kbps) kbps")
-            }
-            infoRow("Display", m.displayMatchText)
-        }
-        .padding(22).background(Theme.card.opacity(0.96), in: RoundedRectangle(cornerRadius: 16))
-    }
-    private func infoRow(_ k: String, _ v: String) -> some View {
-        HStack(spacing: 16) {
-            Text(k).foregroundStyle(Theme.muted).frame(width: 200, alignment: .leading)
-            Text(v).foregroundStyle(.white)
-        }.font(.title3)
-    }
-
-    private func pill(_ text: String, _ icon: String) -> some View {
-        Label(text, systemImage: icon).font(.headline)
-            .padding(.horizontal, 22).padding(.vertical, 14)
-            .background(.ultraThinMaterial, in: Capsule())
-            .overlay(Capsule().strokeBorder(.white.opacity(0.25), lineWidth: 1))
-    }
     private func upNextCard(_ n: UpNextItem) -> some View {
-        HStack(spacing: 14) {
-            ArtImage(url: n.still, aspect: 16.0/9.0).frame(width: 150, height: 84)
+        HStack(spacing: 16) {
+            ArtImage(url: n.still, aspect: 16.0/9.0).frame(width: 168, height: 94)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Up Next").font(.caption).foregroundStyle(Theme.accent2)
-                Text(n.title).font(.headline).foregroundStyle(.white).lineLimit(1)
-                if let s = n.subtitle { Text(s).font(.subheadline).foregroundStyle(Theme.muted) }
+            VStack(alignment: .leading, spacing: 5) {
+                Text("UP NEXT").font(.caption).fontWeight(.heavy).foregroundStyle(VP.accent2)
+                Text(n.title).font(.title3.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
+                if let s = n.subtitle { Text(s).font(.subheadline).foregroundStyle(VP.muted) }
             }
             Spacer(minLength: 0)
         }
-        .padding(14).frame(width: 420)
-        .background(Theme.card.opacity(0.96), in: RoundedRectangle(cornerRadius: 12))
+        .padding(16).frame(width: 460)
+        .background(VP.panel.opacity(0.96), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(VP.line, lineWidth: 1))
+    }
+
+    // MARK: Settings / Subtitles menu (web .vp-menu) — scrollable, bottom-right
+
+    private var settingsMenu: some View {
+        VStack {
+            Spacer()
+            HStack {
+                Spacer()
+                menuPanel
+                    .frame(width: 560)
+                    .padding(.trailing, 80).padding(.bottom, 150)
+            }
+        }
+    }
+
+    @ViewBuilder private var menuPanel: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 6) {
+                switch m.menu {
+                case .aiProgress:
+                    menuHeader("Generating subtitles")
+                    VStack(alignment: .leading, spacing: 12) {
+                        GeometryReader { g in
+                            ZStack(alignment: .leading) {
+                                Capsule().fill(.white.opacity(0.15)).frame(height: 10)
+                                Capsule().fill(VP.grad).frame(width: g.size.width * Double(m.aiPct)/100.0, height: 10)
+                            }
+                        }.frame(height: 10)
+                        Text("\(m.aiPhase ?? "Working")… \(m.aiPct)%").foregroundStyle(.white).font(.title3)
+                        Text("A full movie takes a few minutes — you can keep watching; the track appears when it's ready.")
+                            .font(.callout).foregroundStyle(VP.muted)
+                    }.padding(.horizontal, 10)
+                    menuButton("Keep watching", 0, false) { m.closeMenu(); focus = .catcher }
+                case .aiPicker:
+                    menuHeader("Generate with AI")
+                    menuButton("Transcribe spoken audio", 0, false) { m.startAISubs("orig") }
+                    menuButton("Subtitles in English", 1, false) { m.startAISubs("en") }
+                    menuButton("Subtitles in Spanish", 2, false) { m.startAISubs("es") }
+                    Text("Runs on the server. Great when there are no subtitles, or to translate.")
+                        .font(.callout).foregroundStyle(VP.muted).padding(10)
+                    menuButton("‹ Back", 3, false) { m.menu = .settings; focus = .menuRow(0) }
+                default:
+                    menuHeader("Subtitles")
+                    ForEach(Array(m.subtitleRows.enumerated()), id: \.offset) { i, row in
+                        menuButton(row.label, i, row.id == m.currentSubtitle) { m.selectSubtitle(row.id); m.closeMenu(); focus = .catcher }
+                    }
+                    let genIdx = m.subtitleRows.count
+                    menuButton("✨  Generate with AI…", genIdx, false) { m.menu = .aiPicker; focus = .menuRow(0) }
+                    if m.audioOptions.count > 1 {
+                        menuHeader("Audio")
+                        ForEach(Array(m.audioOptions.enumerated()), id: \.offset) { j, a in
+                            menuButton(a.label, genIdx + 1 + j, a.id == m.currentAudio) { m.selectAudio(a.id); m.closeMenu(); focus = .catcher }
+                        }
+                    }
+                }
+            }
+            .padding(16)
+        }
+        .frame(maxHeight: 620)
+        .background(VP.panel.opacity(0.97), in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(VP.line, lineWidth: 1))
+    }
+
+    private func menuHeader(_ t: String) -> some View {
+        Text(t.uppercased()).font(.caption.weight(.semibold)).tracking(0.5)
+            .foregroundStyle(VP.muted).padding(.horizontal, 10).padding(.top, 10).padding(.bottom, 4)
+    }
+    private func menuButton(_ label: String, _ idx: Int, _ checked: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack {
+                Text(label).foregroundStyle(checked ? VP.accent2 : .white)
+                Spacer()
+                if checked { Image(systemName: "checkmark").foregroundStyle(VP.accent2) }
+            }
+            .font(.title3).padding(.vertical, 12).padding(.horizontal, 14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background((focus == .menuRow(idx)) ? VP.panel2 : .clear, in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder((focus == .menuRow(idx)) ? VP.accent : .clear, lineWidth: 2))
+        }
+        .buttonStyle(.plain).focused($focus, equals: .menuRow(idx))
+    }
+
+    // MARK: Reusable buttons with the web focus ring
+
+    private func glassButton(_ icon: String, _ size: CGFloat, _ id: PlayerFocus, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon).font(.system(size: size * 0.42, weight: .semibold)).foregroundStyle(.white)
+                .frame(width: size, height: size)
+                .background(Color(hex: 0x08090d).opacity(0.55), in: Circle())
+        }
+        .buttonStyle(.plain).focused($focus, equals: id).focusRing(focus == id)
+    }
+    private func utilityButton<L: View>(_ id: PlayerFocus, @ViewBuilder label: () -> L, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            label().foregroundStyle(Color(hex: 0xeef1f8)).frame(width: 70, height: 70)
+                .background(.white.opacity(0.08), in: Circle())
+        }
+        .buttonStyle(.plain).focused($focus, equals: id).focusRing(focus == id)
+    }
+
+    private var spinner: some View {
+        ProgressView().scaleEffect(2).tint(VP.accent)
     }
 }
 
-enum PlayerFocus: Hashable { case surface, skip, upNext, control(Int), menuRow(Int) }
+// The web player's focus ring: white inner + purple outer ring + ambient glow + scale.
+private extension View {
+    func focusRing(_ on: Bool) -> some View {
+        self.overlay(
+            RoundedRectangle(cornerRadius: 999)
+                .strokeBorder(.white, lineWidth: on ? 3 : 0)
+                .overlay(RoundedRectangle(cornerRadius: 999).strokeBorder(VP.accent, lineWidth: on ? 3 : 0).padding(-3))
+                .allowsHitTesting(false)
+        )
+        .shadow(color: VP.accent.opacity(on ? 0.65 : 0), radius: on ? 22 : 0)
+        .scaleEffect(on ? 1.08 : 1)
+        .animation(.easeOut(duration: 0.14), value: on)
+    }
+}
 
 // MARK: - VLCKit drawable host
 
@@ -270,34 +380,33 @@ struct VLCVideoView: UIViewRepresentable {
     func updateUIView(_ uiView: UIView, context: Context) {}
 }
 
-// MARK: - Player model (owns libVLC, publishes UI state, does the work)
+// MARK: - Player model
 
 @MainActor
 final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     struct TrackOption: Identifiable, Hashable { let id: Int; let label: String }
-
-    enum Menu { case none, subs, audio, info }
+    enum Menu { case none, settings, aiPicker, aiProgress }
 
     private let player = VLCMediaPlayer()
-    private weak var store: Store?
 
-    // Published UI state
     @Published var position: Double = 0
     @Published var duration: Double = 0
+    @Published var buffered: Double = 0
     @Published var isPlaying = false
+    @Published var buffering = false
     @Published var controlsVisible = true
     @Published var menu: Menu = .none
     @Published var showSkipIntro = false
     @Published var showUpNext = false
     @Published var finishedPlayback = false
-    @Published var info: Store.MediaInfo?
     @Published var subtitleOptions: [TrackOption] = []
     @Published var audioOptions: [TrackOption] = []
     @Published var currentSubtitle = -1
     @Published var currentAudio = 0
-    @Published var displayMatchText = "—"
+    @Published var aiPhase: String?
+    @Published var aiPct = 0
 
-    // Context
+    private weak var store: Store?
     private var ref: Store.PlayRef?
     private var kind = "movie"
     private var fileId: Int?
@@ -307,42 +416,38 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     private var live = false
     private var startAt: Double = 0
     private var prerollURL: URL?
+    private var mainURL: URL?
     private var upNext: [UpNextItem] = []
     private let sessionId = UUID().uuidString
 
-    // Reporting / state
     private var onMain = false
-    private var mainURL: URL?
     private var seekedToStart = false
     private var lastSaved: Double = 0
     private var lastBeat: Double = -100
     private var finished = false
     private var hideTimer: Timer?
     private var introRange: Store.IntroRange?
-    private weak var hostWindow: UIWindow?
-    private var addedSubURLs: [Int: Int] = [:]   // menu id -> vlc spu index (for server slaves)
+
+    var subtitleRows: [TrackOption] { subtitleOptions }
+    var upNextItem: UpNextItem? { upNext.first }
+    var progress: Double { duration > 0 ? min(1, max(0, position / duration)) : 0 }
+    private var upNextLead: Double { max(20, min(60, duration * 0.04)) }
 
     func bind(store: Store) { self.store = store }
-
-    func attachDrawable(_ view: UIView) {
-        player.drawable = view
-        hostWindow = view.window
-    }
+    func attachDrawable(_ view: UIView) { player.drawable = view }
 
     func start(url: URL, startAt: Double, ref: Store.PlayRef, kind: String, duration: Double?,
                title: String, subtitle: String?, fileId: Int?, live: Bool,
-               preroll: URL?, upNext: [UpNextItem], window: UIWindow?) {
+               preroll: URL?, upNext: [UpNextItem]) {
         self.ref = ref; self.kind = kind; self.fileId = fileId; self.mediaTitle = title
         self.mediaSubtitle = subtitle; self.declaredDuration = duration; self.live = live
         self.startAt = startAt; self.prerollURL = preroll; self.upNext = upNext
-        self.mainURL = url
-        self.duration = duration ?? 0
+        self.mainURL = url; self.duration = duration ?? 0
         player.delegate = self
-
         if let preroll {
             player.media = VLCMedia(url: preroll)
             Timer.scheduledTimer(withTimeInterval: 12, repeats: false) { [weak self] _ in
-                Task { @MainActor in self?.switchToMain(url: url) }
+                Task { @MainActor in if let u = self?.mainURL { self?.switchToMain(url: u) } }
             }
         } else {
             onMain = true
@@ -358,63 +463,60 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         for opt in store?.audioFilterOptions() ?? [] { media.addOption(opt) }
         return media
     }
-
     private func switchToMain(url: URL) {
         guard !onMain else { return }
         onMain = true; seekedToStart = false
-        player.media = mediaWithFilters(url)
-        player.play()
+        player.media = mediaWithFilters(url); player.play()
     }
 
-    // Fetch intro/chapters, media info (for HDR match + overlay), subtitle tracks.
     private func loadMeta() async {
         guard let store, let fileId else { return }
-        if kind == "episode", let pm = await store.playMeta(kind: kind, fileId: fileId) {
-            introRange = pm.intro
-        }
-        if let mi = await store.mediaInfo(kind: kind, fileId: fileId) {
-            info = mi
-            applyDisplayCriteria(mi)
-        }
+        if kind == "episode", let pm = await store.playMeta(kind: kind, fileId: fileId) { introRange = pm.intro }
+        await reloadSubtitles()
+    }
+    private func reloadSubtitles() async {
+        guard let store, let fileId else { return }
         let tracks = await store.subtitleTracks(kind: kind, fileId: fileId)
         var opts: [TrackOption] = [TrackOption(id: -1, label: "Off")]
         for t in tracks { opts.append(TrackOption(id: t.idx, label: t.label)) }
         subtitleOptions = opts
     }
 
-    // MARK: Remote
-
+    // MARK: Transport
     func togglePlay() { if player.isPlaying { player.pause() } else { player.play() } }
     func jump(_ s: Int) { if s < 0 { player.jumpBackward(Int32(-s)) } else { player.jumpForward(Int32(s)) } }
-
     func flashControls() {
         controlsVisible = true
         hideTimer?.invalidate()
-        hideTimer = Timer.scheduledTimer(withTimeInterval: 4.5, repeats: false) { [weak self] _ in
-            Task { @MainActor in if self?.menu == PlayerModel.Menu.none { self?.controlsVisible = false } }
+        hideTimer = Timer.scheduledTimer(withTimeInterval: 3.5, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                if self.menu == PlayerModel.Menu.none && self.player.isPlaying { self.controlsVisible = false }
+            }
         }
     }
-
     func skipIntro() {
         guard let end = introRange?.end else { return }
-        player.time = VLCTime(int: Int32(end * 1000))
-        showSkipIntro = false
+        player.time = VLCTime(int: Int32(end * 1000)); showSkipIntro = false
     }
+    func closeMenu() { menu = .none }
 
-    // MARK: Subtitle / audio menus
-
-    var currentSubtitleOptions: [TrackOption] { subtitleOptions }
+    // MARK: Subtitles / audio
+    func toggleCC() {
+        // Quick toggle: if a track is on, turn off; else turn on the first real track.
+        if currentSubtitle >= 0 { selectSubtitle(-1) }
+        else if let first = subtitleOptions.first(where: { $0.id >= 0 }) { selectSubtitle(first.id) }
+        else { menu = .aiPicker }   // nothing to show yet → offer AI
+        flashControls()
+    }
     func selectSubtitle(_ id: Int) {
         currentSubtitle = id
         if id == -1 { player.currentVideoSubTitleIndex = -1; return }
-        // Load the server's WebVTT for this track as a slave, then select it.
         if let store, let fileId, let url = store.subtitleURL(kind: kind, fileId: fileId, idx: id) {
-            let spu = player.addPlaybackSlave(url, type: .subtitle, enforce: true)
-            addedSubURLs[id] = Int(spu)
+            _ = player.addPlaybackSlave(url, type: .subtitle, enforce: true)
         }
     }
     func selectAudio(_ id: Int) { currentAudio = id; player.currentAudioTrackIndex = Int32(id) }
-
     private func refreshAudioTracks() {
         let idxs = (player.audioTrackIndexes as? [NSNumber]) ?? []
         let names = (player.audioTrackNames as? [String]) ?? []
@@ -424,108 +526,76 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         currentAudio = Int(player.currentAudioTrackIndex)
     }
 
-    var currentSubtitle_: Int { currentSubtitle }
+    // MARK: AI subtitles (Whisper) — the flow the web player has
+    func startAISubs(_ target: String) {
+        guard let store, let fileId else { return }
+        menu = .aiProgress; aiPhase = "Starting"; aiPct = 0
+        Task {
+            var job = await store.generateSubtitles(kind: kind, fileId: fileId)
+            while let j = job, j.status == "running" {
+                aiPhase = phaseLabel(j.phase); aiPct = j.pct ?? 0
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                job = await store.subtitleJobStatus(kind: kind, fileId: fileId)
+            }
+            if let j = job, j.status == "done" {
+                await reloadSubtitles()
+                if let newest = subtitleOptions.last(where: { $0.id >= 0 }) { selectSubtitle(newest.id) }
+                menu = .none
+            } else {
+                aiPhase = job?.error ?? "Couldn't generate subtitles"
+            }
+        }
+    }
+    private func phaseLabel(_ p: String?) -> String {
+        switch p { case "extracting": return "Extracting audio"; case "transcribing": return "Transcribing"
+                   case "translating": return "Translating"; default: return "Starting" }
+    }
 
     // MARK: Up Next
-
-    var upNextItem: UpNextItem? { upNext.first }
     func playNext() {
         guard let next = upNext.first, let store else { return }
-        upNext.removeFirst()
-        showUpNext = false
-        finish(save: true)      // save progress on the finishing item
-        // Reset for the new item
+        upNext.removeFirst(); showUpNext = false
+        finish(save: true)
         finished = false; onMain = true; seekedToStart = true; lastSaved = 0; lastBeat = -100
         ref = next.ref; fileId = next.fileId; mediaTitle = next.title
         mediaSubtitle = next.subtitle; declaredDuration = next.duration
-        duration = next.duration ?? 0; position = 0
+        duration = next.duration ?? 0; position = 0; currentSubtitle = -1
         if let url = store.episodeStreamURL(fileId: next.fileId) {
-            player.media = mediaWithFilters(url)
-            player.play()
+            player.media = mediaWithFilters(url); player.play()
         }
         Task { await loadMeta() }
     }
 
-    // MARK: VLCMediaPlayerDelegate
-
-    // libVLC delivers delegate callbacks off the main thread; SwiftUI @Published
-    // MUST be mutated on main, so these hop before touching any state (an
-    // off-main @Published write crashes the app — the likely "closes on play").
-    nonisolated func mediaPlayerStateChanged(_ aNotification: Notification!) {
-        Task { @MainActor in self.handleState() }
-    }
-    nonisolated func mediaPlayerTimeChanged(_ aNotification: Notification!) {
-        Task { @MainActor in self.handleTime() }
-    }
+    // MARK: Delegate (hop to main — libVLC calls off-thread)
+    nonisolated func mediaPlayerStateChanged(_ n: Notification!) { Task { @MainActor in self.handleState() } }
+    nonisolated func mediaPlayerTimeChanged(_ n: Notification!) { Task { @MainActor in self.handleTime() } }
 
     private func handleState() {
         isPlaying = player.isPlaying
         switch player.state {
+        case .buffering: buffering = !player.isPlaying
         case .playing:
-            if onMain, !seekedToStart, startAt > 1 {
-                seekedToStart = true
-                player.time = VLCTime(int: Int32(startAt * 1000))
-            }
+            buffering = false
+            if onMain, !seekedToStart, startAt > 1 { seekedToStart = true; player.time = VLCTime(int: Int32(startAt * 1000)) }
             refreshAudioTracks()
         case .ended:
-            if onMain {
-                if !upNext.isEmpty { playNext() } else { finish(save: true); finishedPlayback = true }
-            } else if let u = mainURL { switchToMain(url: u) }   // pre-roll finished early
-        case .error:
-            finish(save: false); finishedPlayback = true
+            if onMain { if !upNext.isEmpty { playNext() } else { finish(save: true); finishedPlayback = true } }
+            else if let u = mainURL { switchToMain(url: u) }
+        case .error: finish(save: false); finishedPlayback = true
         default: break
         }
     }
-
     private func handleTime() {
         guard onMain else { return }
         position = Double(player.time.intValue) / 1000.0
         if duration <= 0 { duration = Double(player.media?.length.intValue ?? 0) / 1000.0 }
+        buffered = min(1, progress + 0.06)
         if let r = introRange { showSkipIntro = position >= r.start && position <= r.end }
-        if !upNext.isEmpty, duration > 0 {
-            showUpNext = position >= duration - upNextLead && position < duration
-        }
+        if !upNext.isEmpty, duration > 0 { showUpNext = position >= duration - upNextLead && position < duration }
         report(position: position)
     }
 
-    private var upNextLead: Double { max(20, min(60, duration * 0.04)) }
-    var progress: Double { duration > 0 ? min(1, max(0, position / duration)) : 0 }
-    var videoSizeText: String {
-        let s = player.videoSize
-        if s.width > 0 { return "\(Int(s.width))×\(Int(s.height))" }
-        if let w = info?.width, let h = info?.height { return "\(w)×\(h)" }
-        return "—"
-    }
-
-    func clock(_ s: Double) -> String {
-        guard s.isFinite, s >= 0 else { return "0:00" }
-        let t = Int(s), h = t/3600, m = (t%3600)/60, sec = t%60
-        return h > 0 ? String(format: "%d:%02d:%02d", h, m, sec) : String(format: "%d:%02d", m, sec)
-    }
-    var currentAudioLabel: String { audioOptions.first { $0.id == currentAudio }?.label ?? "—" }
-    var currentSubtitleLabel: String { subtitleOptions.first { $0.id == currentSubtitle }?.label ?? "Off" }
-
-    // Expose selected ids for the checkmarks.
-    var currentSub: Int { currentSubtitle }
-    var currentAud: Int { currentAudio }
-
-    // MARK: HDR / frame-rate display matching (what AVPlayer did for free)
-
-    private func applyDisplayCriteria(_ i: Store.MediaInfo) {
-        // NOTE: automatic HDR/frame-rate display switching (AVDisplayManager +
-        // AVDisplayCriteria) is temporarily disabled while we stabilize playback —
-        // it was a prime suspect for the "app closes on play" crash. The info
-        // overlay still reports the source's real range/fps below; we'll re-enable
-        // the actual display switch, guarded, once playback is confirmed stable.
-        if let fps = i.fps {
-            displayMatchText = "\(i.hdrText ?? "SDR") · \(String(format: "%.0f", fps))Hz (source)"
-        } else {
-            displayMatchText = i.hdrText ?? "SDR"
-        }
-    }
-
-    // MARK: Progress reporting (mirrors the proven AVPlayer coordinator)
-
+    // MARK: Reporting
     private var reportKind: String { live ? "live" : kind }
     private func report(position: Double) {
         guard position.isFinite else { return }
@@ -541,11 +611,9 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         guard let store else { return }
         let paused = !player.isPlaying
         let total = declaredDuration ?? (duration > 0 ? duration : nil)
-        Task {
-            await store.sessionHeartbeat(sessionId: sessionId, kind: reportKind, fileId: fileId,
-                                         title: mediaTitle, subtitle: mediaSubtitle, mode: "direct",
-                                         position: position, duration: total, paused: paused, live: live)
-        }
+        Task { await store.sessionHeartbeat(sessionId: sessionId, kind: reportKind, fileId: fileId, title: mediaTitle,
+                                            subtitle: mediaSubtitle, mode: "direct", position: position, duration: total,
+                                            paused: paused, live: live) }
     }
     private func finish(save: Bool) {
         guard !finished else { return }
@@ -558,10 +626,5 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
             Task { await store.saveProgress(ref, position: pos, duration: total, watched: watched ? true : nil) }
         }
     }
-
-    func teardown() {
-        hideTimer?.invalidate()
-        finish(save: true)
-        player.stop()
-    }
+    func teardown() { hideTimer?.invalidate(); finish(save: true); player.stop() }
 }
