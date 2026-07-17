@@ -1,5 +1,8 @@
 import SwiftUI
 import UIKit
+import AVKit
+import AVFoundation
+import CoreMedia
 import VLCKitSPM
 
 // One upcoming episode for the in-player "Up Next" autoplay queue.
@@ -54,6 +57,12 @@ enum PlayerFocus: Hashable {
     case menuRow(Int)
 }
 
+// A button with no focus/press visual at all — for the full-screen remote catcher,
+// so the select click works without tvOS painting a white focus highlight.
+private struct InvisibleButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View { configuration.label }
+}
+
 // MARK: - Player screen (SwiftUI over VLCKit), styled to match the web player
 
 struct PlayerView: View {
@@ -81,11 +90,12 @@ struct PlayerView: View {
             Color.black.ignoresSafeArea()
             VLCVideoView(model: m).ignoresSafeArea()
 
-            // Invisible catcher owns the remote only when nothing else is up. A
-            // plain Color (not a Button) has NO tvOS focus highlight — fixes the
-            // white flash when the chrome hides.
-            Color.clear
-                .focusable(!chromeUp && !m.showSkipIntro && !m.showUpNext)
+            // Invisible catcher owns the remote when nothing else is up. It's a
+            // Button (so the CENTER/select click pauses + shows the HUD) with a
+            // no-op style so there's NO tvOS focus highlight (no white flash).
+            Button(action: { m.togglePlay(); m.flashControls() }) { Color.clear }
+                .buttonStyle(InvisibleButtonStyle())
+                .disabled(chromeUp || m.showSkipIntro || m.showUpNext)
                 .focused($focus, equals: .catcher)
                 .onMoveCommand { _ in m.flashControls() }
                 .onPlayPauseCommand { m.togglePlay(); m.flashControls() }
@@ -162,7 +172,7 @@ struct PlayerView: View {
                         .font(.system(size: 28, weight: .medium).monospacedDigit())
                         .foregroundStyle(Color(hex: 0xeef1f8))
                     Spacer()
-                    utilityButton(.cc) { Text("CC").font(.system(size: 26, weight: .heavy)) } action: { m.toggleCC() }
+                    utilityButton(.cc) { Text("CC").font(.system(size: 26, weight: .heavy)) } action: { m.menu = .settings }
                     utilityButton(.gear) { Image(systemName: "gearshape.fill").font(.system(size: 30)) } action: { m.menu = .settings }
                 }
             }
@@ -291,15 +301,16 @@ struct PlayerView: View {
                     menuButton("‹ Back", 3, false) { m.menu = .settings; focus = .menuRow(0) }
                 default:
                     menuHeader("Subtitles")
+                    // AI first — it's what you see the moment you open captions.
+                    menuButton("✨  Generate with AI…", 0, false) { m.menu = .aiPicker; focus = .menuRow(0) }
                     ForEach(Array(m.subtitleRows.enumerated()), id: \.offset) { i, row in
-                        menuButton(row.label, i, row.id == m.currentSubtitle) { m.selectSubtitle(row.id); m.closeMenu(); focus = .catcher }
+                        menuButton(row.label, i + 1, row.id == m.currentSubtitle) { m.selectSubtitle(row.id); m.closeMenu(); focus = .catcher }
                     }
-                    let genIdx = m.subtitleRows.count
-                    menuButton("✨  Generate with AI…", genIdx, false) { m.menu = .aiPicker; focus = .menuRow(0) }
                     if m.audioOptions.count > 1 {
                         menuHeader("Audio")
+                        let base = m.subtitleRows.count + 1
                         ForEach(Array(m.audioOptions.enumerated()), id: \.offset) { j, a in
-                            menuButton(a.label, genIdx + 1 + j, a.id == m.currentAudio) { m.selectAudio(a.id); m.closeMenu(); focus = .catcher }
+                            menuButton(a.label, base + j, a.id == m.currentAudio) { m.selectAudio(a.id); m.closeMenu(); focus = .catcher }
                         }
                     }
                 }
@@ -457,28 +468,69 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
             }
         } else {
             onMain = true
-            player.media = mediaWithFilters(url)
+            player.media = mediaWithFilters(url, startTime: startAt)
         }
         player.play()
         flashControls()
         Task { await loadMeta() }
     }
 
-    private func mediaWithFilters(_ url: URL) -> VLCMedia {
+    // Resume via libVLC's :start-time option (reliable) instead of seeking right
+    // after play(), which sometimes restarted the file from 0.
+    private func mediaWithFilters(_ url: URL, startTime: Double? = nil) -> VLCMedia {
         let media = VLCMedia(url: url)
         for opt in store?.audioFilterOptions() ?? [] { media.addOption(opt) }
+        if let s = startTime, s > 1 { media.addOption(":start-time=\(Int(s))") }
         return media
     }
     private func switchToMain(url: URL) {
         guard !onMain else { return }
         onMain = true; seekedToStart = false
-        player.media = mediaWithFilters(url); player.play()
+        player.media = mediaWithFilters(url, startTime: startAt); player.play()
     }
 
     private func loadMeta() async {
         guard let store, let fileId else { return }
         if kind == "episode", let pm = await store.playMeta(kind: kind, fileId: fileId) { introRange = pm.intro }
+        if let mi = await store.mediaInfo(kind: kind, fileId: fileId) { applyDisplayCriteria(mi) }
         await reloadSubtitles()
+    }
+
+    // Switch the Apple TV into the content's HDR/frame-rate display mode — what
+    // AVPlayer did for free. Build a CMFormatDescription with the right color
+    // tags from the probed media info and hand it to the window's AVDisplayManager.
+    private var displayWindow: UIWindow?
+    private func applyDisplayCriteria(_ i: Store.MediaInfo) {
+        guard let fps = i.fps,
+              let window = UIApplication.shared.connectedScenes
+                .compactMap({ ($0 as? UIWindowScene)?.keyWindow }).first else { return }
+        let primaries: CFString, transfer: CFString, matrix: CFString
+        switch i.hdr {
+        case "hdr10", "dolbyvision":
+            primaries = kCMFormatDescriptionColorPrimaries_ITU_R_2020
+            transfer = kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ
+            matrix = kCMFormatDescriptionYCbCrMatrix_ITU_R_2020
+        case "hlg":
+            primaries = kCMFormatDescriptionColorPrimaries_ITU_R_2020
+            transfer = kCMFormatDescriptionTransferFunction_ITU_R_2100_HLG
+            matrix = kCMFormatDescriptionYCbCrMatrix_ITU_R_2020
+        default:
+            primaries = kCMFormatDescriptionColorPrimaries_ITU_R_709_2
+            transfer = kCMFormatDescriptionTransferFunction_ITU_R_709_2
+            matrix = kCMFormatDescriptionYCbCrMatrix_ITU_R_709_2
+        }
+        let ext: [CFString: Any] = [
+            kCMFormatDescriptionExtension_ColorPrimaries: primaries,
+            kCMFormatDescriptionExtension_TransferFunction: transfer,
+            kCMFormatDescriptionExtension_YCbCrMatrix: matrix
+        ]
+        var fmt: CMFormatDescription?
+        CMVideoFormatDescriptionCreate(allocator: kCFAllocatorDefault, codecType: kCMVideoCodecType_HEVC,
+            width: Int32(i.width ?? 1920), height: Int32(i.height ?? 1080),
+            extensions: ext as CFDictionary, formatDescriptionOut: &fmt)
+        guard let fmt else { return }
+        displayWindow = window
+        window.avDisplayManager.preferredDisplayCriteria = AVDisplayCriteria(refreshRate: Float(fps), formatDescription: fmt)
     }
     private func reloadSubtitles() async {
         guard let store, let fileId else { return }
@@ -582,7 +634,9 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         case .buffering: buffering = !player.isPlaying
         case .playing:
             buffering = false
-            if onMain, !seekedToStart, startAt > 1 { seekedToStart = true; player.time = VLCTime(int: Int32(startAt * 1000)) }
+            // Captions OFF by default: libVLC auto-enables the first embedded text
+            // track; force it off unless the viewer picked one.
+            if currentSubtitle < 0 { player.currentVideoSubTitleIndex = -1 }
             refreshAudioTracks()
         case .ended:
             if onMain { if !upNext.isEmpty { playNext() } else { finish(save: true); finishedPlayback = true } }
@@ -632,5 +686,10 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
             Task { await store.saveProgress(ref, position: pos, duration: total, watched: watched ? true : nil) }
         }
     }
-    func teardown() { hideTimer?.invalidate(); finish(save: true); player.stop() }
+    func teardown() {
+        hideTimer?.invalidate()
+        displayWindow?.avDisplayManager.preferredDisplayCriteria = nil   // let the TV revert
+        finish(save: true)
+        player.stop()
+    }
 }
