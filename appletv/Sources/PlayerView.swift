@@ -12,7 +12,7 @@ struct UpNextItem: Identifiable, Hashable {
     let ref: Store.PlayRef
     let title: String
     let subtitle: String?
-    let still: URL?
+    let still: String?
     let duration: Double?
 }
 
@@ -410,7 +410,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         // Load the server's WebVTT for this track as a slave, then select it.
         if let store, let fileId, let url = store.subtitleURL(kind: kind, fileId: fileId, idx: id) {
             let spu = player.addPlaybackSlave(url, type: .subtitle, enforce: true)
-            addedSubURLs[id] = spu
+            addedSubURLs[id] = Int(spu)
         }
     }
     func selectAudio(_ id: Int) { currentAudio = id; player.currentAudioTrackIndex = Int32(id) }

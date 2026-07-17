@@ -87,7 +87,19 @@ struct ShowDetailView: View {
                                   startAt: position ?? ep.resumePosition ?? 0,
                                   title: d.title,
                                   subtitle: "\(ep.tag) · \(ep.displayTitle)",
-                                  fileId: f.id)
+                                  fileId: f.id, upNext: upNextQueue(after: ep, in: d))
+        }
+    }
+
+    // Every playable episode after this one (in season/episode order) — feeds the
+    // player's in-player "Up Next" autoplay.
+    private func upNextQueue(after ep: Episode, in d: ShowDetail) -> [UpNextItem] {
+        let all = d.seasons.sorted { $0.season < $1.season }.flatMap { $0.episodes }
+        guard let idx = all.firstIndex(where: { $0.id == ep.id }) else { return [] }
+        return all[(idx + 1)...].compactMap { e in
+            guard let f = e.bestFile else { return nil }
+            return UpNextItem(fileId: f.id, ref: .episode(e.id), title: e.displayTitle,
+                              subtitle: e.tag, still: e.still, duration: e.duration)
         }
     }
 
