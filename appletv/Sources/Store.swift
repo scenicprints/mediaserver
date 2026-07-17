@@ -645,6 +645,47 @@ final class Store: ObservableObject {
         if previewMode { return [] }
         return await get("api/subtitles/list/\(kind)/\(fileId)", as: [SubtitleTrack].self) ?? []
     }
+    // A single subtitle track as WebVTT (server converts SRT/ASS/embedded on the
+    // fly). Loaded into VLCKit via addPlaybackSlave. `idx` is from subtitleTracks.
+    func subtitleURL(kind: String, fileId: Int, idx: Int) -> URL? {
+        guard let t = token else { return nil }
+        let base = kind == "episode" ? "api/subtitle/episode/\(fileId)" : "api/subtitle/\(fileId)"
+        return URL(string: "\(cleanBase)/\(base)?idx=\(idx)&token=\(t)")
+    }
+
+    // Real probed stream properties for the player's HDR/frame-rate display match
+    // + the "now playing" info overlay.
+    struct MediaInfo: Decodable {
+        let width: Int?; let height: Int?; let fps: Double?
+        let hdr: String?               // "sdr" | "hdr10" | "hlg" | "dolbyvision"
+        let bitDepth: Int?
+        let vcodec: String?; let acodec: String?; let channels: Int?; let channelLayout: String?
+        let size: Double?; let videoKbps: Int?
+        var resolutionText: String { guard let h = height else { return "—" }; return h >= 2000 ? "4K" : "\(h)p" }
+        var hdrText: String? {
+            switch hdr { case "hdr10": return "HDR10"; case "hlg": return "HLG"
+                         case "dolbyvision": return "Dolby Vision"; default: return nil }
+        }
+        var isHDR: Bool { hdr != nil && hdr != "sdr" }
+    }
+    func mediaInfo(kind: String, fileId: Int) async -> MediaInfo? {
+        if previewMode { return nil }
+        return await get("api/mediainfo/\(kind)/\(fileId)", as: MediaInfo.self)
+    }
+
+    // libVLC media options re-creating the old server-side audio filters on the
+    // direct-play path (night = dynamic-range compression, norm = volume
+    // normalization, dialogue boost = gain). Applied to the VLCMedia before play.
+    func audioFilterOptions() -> [String] {
+        var opts: [String] = []
+        var mods: [String] = []
+        if night { mods.append("compressor") }
+        if norm { mods.append("normvol") }
+        if !mods.isEmpty { opts.append(":audio-filter=\(mods.joined(separator: ","))") }
+        if dboost == "strong" { opts.append(":gain=4") }
+        else if dboost == "normal" { opts.append(":gain=2") }
+        return opts
+    }
 
     // ---- /api/play: the server's playback decision + Skip Intro/chapter data ----
     struct IntroRange: Decodable, Hashable { let start: Double; let end: Double }

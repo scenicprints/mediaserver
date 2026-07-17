@@ -989,6 +989,48 @@ app.get('/api/play/:kind/:fileId', async (req, reply) => {
   };
 });
 
+// Real, probed per-file media properties: resolution, fps, HDR type, bit depth,
+// codecs, size, avg video bitrate. The native tvOS (VLCKit) player uses this to
+// (a) switch the Apple TV into the matching HDR + frame-rate display mode — a
+// custom player must do this itself, AVPlayer did it for free — and (b) drive a
+// live "what's actually playing" overlay. Probe-backed, so it's exact, not the
+// filename-derived `quality` string.
+app.get('/api/mediainfo/:kind/:fileId', async (req, reply) => {
+  const { kind, fileId } = req.params;
+  const row = fileRow(kind, fileId);
+  if (!row) return reply.code(404).send({ error: 'not found' });
+  const p = await probe(row.path);
+  const streams = (p && p.streams) || [];
+  const v = streams.find((s) => s.codec_type === 'video') || {};
+  const a = streams.find((s) => s.codec_type === 'audio') || {};
+  let fps = null;
+  const mm = /^(\d+)\/(\d+)$/.exec(v.avg_frame_rate || v.r_frame_rate || '');
+  if (mm && +mm[2]) fps = Math.round((+mm[1] / +mm[2]) * 1000) / 1000;
+  const transfer = (v.color_transfer || '').toLowerCase();
+  const prim = (v.color_primaries || '').toLowerCase();
+  const tag = (v.codec_tag_string || '').toLowerCase();
+  const hasDovi = tag.startsWith('dv') ||
+    (v.side_data_list || []).some((s) => /dolby|dovi/i.test(JSON.stringify(s)));
+  let hdr = 'sdr';
+  if (hasDovi) hdr = 'dolbyvision';
+  else if (transfer === 'smpte2084' || prim === 'bt2020') hdr = 'hdr10';
+  else if (transfer === 'arib-std-b67') hdr = 'hlg';
+  const pix = v.pix_fmt || '';
+  const bitDepth = /10le|10be|p010/.test(pix) ? 10 : /12le|12be/.test(pix) ? 12 : 8;
+  let size = null; try { size = fs.statSync(row.path).size; } catch {}
+  let videoKbps = null;
+  if (v.bit_rate) videoKbps = Math.round(+v.bit_rate / 1000);
+  else if (size && p?.format?.duration) videoKbps = Math.round((size * 8) / +p.format.duration / 1000);
+  return {
+    width: v.width || null, height: v.height || null, fps,
+    hdr, bitDepth,
+    vcodec: v.codec_name || null,
+    acodec: a.codec_name || null, channels: a.channels || null,
+    channelLayout: a.channel_layout || null,
+    size, videoKbps
+  };
+});
+
 // Where does a transcode stream asked to start at ?start REALLY begin? Copied
 // (remuxed) video can only start on a keyframe — ffmpeg emits from the previous
 // one no matter what we ask — so the player calls this before seeking and uses
