@@ -461,18 +461,33 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         self.startAt = startAt; self.prerollURL = preroll; self.upNext = upNext
         self.mainURL = url; self.duration = duration ?? 0
         player.delegate = self
-        if let preroll {
+        flashControls()
+        Task { @MainActor in
+            // HDR: switch the TV into HDR/frame-rate mode BEFORE libVLC starts
+            // rendering. Applying it mid-play reconfigures the display under
+            // libVLC's video output and crashes ("app closes on play"). Only HDR
+            // sources trigger a switch, so SDR playback is unaffected/instant.
+            if preroll == nil, let fid = fileId,
+               let mi = await store?.mediaInfo(kind: kind, fileId: fid), mi.isHDR {
+                applyDisplayCriteria(mi)
+                try? await Task.sleep(nanoseconds: 1_200_000_000)   // let the mode settle
+            }
+            beginPlayback()
+            await loadMeta()
+        }
+    }
+
+    private func beginPlayback() {
+        if let preroll = prerollURL {
             player.media = VLCMedia(url: preroll)
             Timer.scheduledTimer(withTimeInterval: 12, repeats: false) { [weak self] _ in
                 Task { @MainActor in if let u = self?.mainURL { self?.switchToMain(url: u) } }
             }
-        } else {
+        } else if let u = mainURL {
             onMain = true
-            player.media = mediaWithFilters(url, startTime: startAt)
+            player.media = mediaWithFilters(u, startTime: startAt)
         }
         player.play()
-        flashControls()
-        Task { await loadMeta() }
     }
 
     // Resume via libVLC's :start-time option (reliable) instead of seeking right
@@ -492,9 +507,6 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     private func loadMeta() async {
         guard let store, let fileId else { return }
         if kind == "episode", let pm = await store.playMeta(kind: kind, fileId: fileId) { introRange = pm.intro }
-        // HDR auto display-switch (applyDisplayCriteria) is DISABLED — it traps on
-        // device ("app closes on play"). libVLC still decodes HDR; re-enable the
-        // TV mode-switch only via a crash-free path (see notes).
         await reloadSubtitles()
     }
 
