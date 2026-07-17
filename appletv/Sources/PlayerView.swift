@@ -433,6 +433,12 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     var progress: Double { duration > 0 ? min(1, max(0, position / duration)) : 0 }
     private var upNextLead: Double { max(20, min(60, duration * 0.04)) }
 
+    func clock(_ s: Double) -> String {
+        guard s.isFinite, s >= 0 else { return "0:00" }
+        let t = Int(s), h = t / 3600, mn = (t % 3600) / 60, sec = t % 60
+        return h > 0 ? String(format: "%d:%02d:%02d", h, mn, sec) : String(format: "%d:%02d", mn, sec)
+    }
+
     func bind(store: Store) { self.store = store }
     func attachDrawable(_ view: UIView) { player.drawable = view }
 
