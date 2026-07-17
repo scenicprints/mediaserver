@@ -80,7 +80,7 @@ final class VLCPlayerViewController: UIViewController, VLCMediaPlayerDelegate {
     private var ref: Store.PlayRef!
     private var kind = "movie"
     private var declaredDuration: Double?
-    private var title = ""
+    private var mediaTitle = ""       // not `title` — UIViewController already declares `var title: String?`
     private var subtitle: String?
     private var fileId: Int?
     private var live = false
@@ -106,7 +106,7 @@ final class VLCPlayerViewController: UIViewController, VLCMediaPlayerDelegate {
                    onExit: @escaping () -> Void) {
         self.mainURL = mainURL; self.prerollURL = prerollURL; self.startAt = startAt
         self.store = store; self.ref = ref; self.kind = kind
-        self.declaredDuration = declaredDuration; self.title = title
+        self.declaredDuration = declaredDuration; self.mediaTitle = title
         self.subtitle = subtitle; self.fileId = fileId; self.live = live
         self.onExit = onExit
     }
@@ -223,7 +223,7 @@ final class VLCPlayerViewController: UIViewController, VLCMediaPlayerDelegate {
         if let store {
             Task {
                 await store.sessionHeartbeat(sessionId: sessionId, kind: live ? "live" : kind,
-                                             fileId: fileId, title: title, subtitle: subtitle,
+                                             fileId: fileId, title: mediaTitle, subtitle: subtitle,
                                              mode: "direct", position: position, duration: dur,
                                              paused: paused, live: live)
             }
@@ -257,7 +257,7 @@ final class VLCPlayerViewController: UIViewController, VLCMediaPlayerDelegate {
         bar.layer.cornerRadius = 10
         osd.addSubview(bar)
 
-        titleLabel.text = title
+        titleLabel.text = mediaTitle
         titleLabel.textColor = .white
         titleLabel.font = .systemFont(ofSize: 30, weight: .semibold)
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
