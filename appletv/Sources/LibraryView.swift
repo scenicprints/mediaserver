@@ -16,10 +16,28 @@ struct LibraryView: View {
     private struct LibItem: Identifiable {
         let id: String; let title: String; let poster: String?; let sub: String?
         let progress: Double; let badges: [CardBadge]; let stream: [String]?; let route: Route
+        let year: Int?
     }
 
     private func sortKey(_ t: String) -> String {
         t.replacingOccurrences(of: #"^(the|a|an) "#, with: "", options: [.regularExpression, .caseInsensitive])
+    }
+    // Franchise base = the part before a "Subtitle" (colon/dash), so sequels
+    // cluster together. e.g. "Avengers: Endgame" -> "Avengers".
+    private func franchiseBase(_ t: String) -> String {
+        let s = sortKey(t)
+        for sep in [": ", " - "] {
+            if let r = s.range(of: sep) { return String(s[..<r.lowerBound]) }
+        }
+        return s
+    }
+    // A→Z, but titles in the same franchise sort in RELEASE order (by year) so
+    // "Avengers: Infinity War" (2018) precedes "Avengers: Endgame" (2019).
+    private func lessThan(_ a: LibItem, _ b: LibItem) -> Bool {
+        let cmp = franchiseBase(a.title).localizedCaseInsensitiveCompare(franchiseBase(b.title))
+        if cmp != .orderedSame { return cmp == .orderedAscending }
+        if (a.year ?? 0) != (b.year ?? 0) { return (a.year ?? 0) < (b.year ?? 0) }
+        return sortKey(a.title).localizedCaseInsensitiveCompare(sortKey(b.title)) == .orderedAscending
     }
     private func letter(_ t: String) -> String {
         let c = sortKey(t).uppercased().first.map(String.init) ?? "#"
@@ -29,25 +47,25 @@ struct LibraryView: View {
     private func movieItem(_ m: Movie) -> LibItem {
         let c = Browse.movieCard(m)
         return LibItem(id: c.id, title: m.title, poster: m.poster, sub: m.year.map(String.init),
-                       progress: m.progressFraction, badges: c.badges, stream: c.stream, route: c.route)
+                       progress: m.progressFraction, badges: c.badges, stream: c.stream, route: c.route, year: m.year)
     }
     private func showItem(_ s: Show) -> LibItem {
         let c = Browse.showCard(s)
         return LibItem(id: c.id, title: s.title, poster: s.poster, sub: s.year.map(String.init),
-                       progress: 0, badges: c.badges, stream: c.stream, route: c.route)
+                       progress: 0, badges: c.badges, stream: c.stream, route: c.route, year: s.year)
     }
 
     // The A-Z browse list: the current kind, streaming included (like the web).
     private var items: [LibItem] {
         let src: [LibItem] = kind == "movie" ? store.movies.map(movieItem) : store.shows.map(showItem)
-        return src.sorted { sortKey($0.title).localizedCaseInsensitiveCompare(sortKey($1.title)) == .orderedAscending }
+        return src.sorted(by: lessThan)
     }
     private var trimmed: String { query.trimmingCharacters(in: .whitespaces) }
     // Search spans EVERYTHING — both kinds, owned and streaming.
     private var filtered: [LibItem] {
         let all = store.movies.map(movieItem) + store.shows.map(showItem)
         return all.filter { $0.title.range(of: trimmed, options: .caseInsensitive) != nil }
-            .sorted { sortKey($0.title).localizedCaseInsensitiveCompare(sortKey($1.title)) == .orderedAscending }
+            .sorted(by: lessThan)
     }
     private var groups: [(String, [LibItem])] {
         Dictionary(grouping: items, by: { letter($0.title) }).sorted { $0.key < $1.key }

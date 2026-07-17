@@ -170,6 +170,15 @@ struct MovieFile: Identifiable, Decodable, Hashable {
     let quality: String?
     let filename: String?
     let size: Double?
+
+    // Human-readable size for the version picker (e.g. "18.4 GB", "720 MB").
+    var sizeText: String? {
+        guard let b = size, b > 0 else { return nil }
+        let gb = b / 1_000_000_000
+        if gb >= 1 { return String(format: "%.1f GB", gb) }
+        let mb = b / 1_000_000
+        return String(format: "%.0f MB", mb)
+    }
 }
 struct MovieDetail: Decodable {
     let id: Int

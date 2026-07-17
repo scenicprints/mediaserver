@@ -236,7 +236,9 @@ struct MovieDetailView: View {
         min >= 60 ? "\(min / 60)h \(min % 60)m" : "\(min)m"
     }
     private func versionLabel(_ f: MovieFile) -> String {
-        f.quality ?? f.filename ?? "Version"
+        let base = f.quality ?? f.filename ?? "Version"
+        if let s = f.sizeText { return "\(base) · \(s)" }
+        return base
     }
 
     private func load() async {
