@@ -613,41 +613,22 @@ final class Store: ObservableObject {
         return URL(string: "\(cleanBase)/api/stream/episode/\(fileId)?token=\(t)")
     }
 
-    // Pick the right URL for a file: AVPlayer plays mp4/m4v/mov containers
-    // directly (range streaming); anything else (mkv/avi/…) — or a file with
-    // subtitle tracks, which AVPlayer only renders as an HLS WebVTT rendition —
-    // goes through the server's HLS endpoint (master.m3u8 lists the CC tracks).
+    // The player is now VLCKit (libVLC), which direct-plays every container and
+    // codec (mkv, hev1-tagged HEVC, E-AC-3, …). So we ALWAYS stream the raw file
+    // with byte-range seeking (/api/stream) and never route through the server's
+    // HLS remux. (hlsURL is kept for any legacy/fallback caller.)
     func playbackURL(kind: String, file: MovieFile) -> URL? {
-        guard let t = token else { return nil }
-        let ext = (file.filename as NSString?)?.pathExtension.lowercased() ?? ""
-        let native: Set<String> = ["mp4", "m4v", "mov"]
-        if native.contains(ext) {
-            return kind == "episode" ? episodeStreamURL(fileId: file.id) : streamURL(fileId: file.id)
-        }
-        return hlsURL(kind: kind, fileId: file.id)
+        return kind == "episode" ? episodeStreamURL(fileId: file.id) : streamURL(fileId: file.id)
     }
     func hlsURL(kind: String, fileId: Int) -> URL? {
         guard let t = token else { return nil }
         return URL(string: "\(cleanBase)/api/hls/\(kind)/\(fileId)/master.m3u8?token=\(t)&\(audioQuery())")
     }
-    // Ask the SERVER whether AVPlayer can direct-play this file. Direct play needs
-    // a native container (mp4/m4v/mov) AND codecs AVPlayer reads as-is — crucially
-    // HEVC must be tagged 'hvc1' (a 'hev1' file direct-plays as audio-only, no
-    // video). Anything else routes to the HLS remux, which retags/repackages
-    // losslessly. The server decides because only it can probe the codec + tag.
-    struct PlayDecision: Decodable { let direct: Bool }
+    // VLCKit plays anything, so there's no direct-vs-remux decision to make —
+    // just hand back the raw byte-range stream. Kept async so call sites are
+    // unchanged.
     func resolvePlaybackURL(kind: String, file: MovieFile) async -> URL? {
-        if let d = await get("api/hls/decide/\(kind)/\(file.id)", as: PlayDecision.self) {
-            if d.direct { return kind == "episode" ? episodeStreamURL(fileId: file.id) : streamURL(fileId: file.id) }
-            return hlsURL(kind: kind, fileId: file.id)
-        }
-        // Server too old to decide (no endpoint): fall back to a container guess
-        // so the app still works — native → direct, else HLS.
-        let ext = (file.filename as NSString?)?.pathExtension.lowercased() ?? ""
-        if ["mp4", "m4v", "mov"].contains(ext) {
-            return kind == "episode" ? episodeStreamURL(fileId: file.id) : streamURL(fileId: file.id)
-        }
-        return hlsURL(kind: kind, fileId: file.id)
+        return kind == "episode" ? episodeStreamURL(fileId: file.id) : streamURL(fileId: file.id)
     }
 
     struct SubtitleTrack: Decodable, Hashable { let label: String; let idx: Int }

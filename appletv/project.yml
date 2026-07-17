@@ -8,6 +8,15 @@ options:
     tvOS: "17.0"
   createIntermediateGroups: true
 
+# VLCKit (libVLC) via a community SPM wrapper — CI resolves this and downloads the
+# prebuilt tvOS XCFramework. It lets the app DIRECT-PLAY every container/codec
+# (MKV, hev1-tagged HEVC, E-AC-3, …) with no server-side remux, the way Plex/Infuse
+# ship their own player. Module is `import VLCKitSPM` (exposes VLCMediaPlayer/VLCMedia).
+packages:
+  VLCKitSPM:
+    url: https://github.com/tylerjonesio/vlckit-spm
+    from: "3.6.0"
+
 settings:
   base:
     MARKETING_VERSION: "1.0"
@@ -21,6 +30,9 @@ targets:
     sources:
       - path: Sources
       - path: Resources
+    dependencies:
+      - package: VLCKitSPM
+        product: VLCKitSPM
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.scenicprints.marqueetv
