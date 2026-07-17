@@ -83,6 +83,7 @@ async function codecInfo(filePath) {
     vtag: v && String(v.codec_tag_string || '').toLowerCase(),
     vprofile: v && String(v.profile || ''),
     vlevel: v && parseInt(v.level, 10),
+    vhevc: v ? parseHevcConfig(v.extradata) : null,   // exact tier/level/constraint from the hvcC
     acodec: a && String(a.codec_name || '').toLowerCase(),
     duration: parseFloat(p && p.format && p.format.duration) || 0
   };
@@ -95,6 +96,49 @@ async function codecInfo(filePath) {
 // on the init segment (confirmed from the real Apple TV request log). Computed
 // per file from the probe: HEVC Main/Main10 (the library) map to exact strings
 // (Main10 L4.0 -> hvc1.2.4.L120.90); h264 falls back to a profile/level avc1.
+// Parse an HEVC hvcC (the codec extradata) into the fields the RFC 6381 codecs
+// string needs. ffprobe -show_data hands us the extradata as an offset hex dump
+// ("00000000: 0122 2000 ...  .\" ..."); we pull the raw bytes back out. Returns
+// null for non-hvcC extradata (e.g. Annex-B), so callers fall back to a guess.
+function parseHevcConfig(dump) {
+  if (!dump || typeof dump !== 'string') return null;
+  const bytes = [];
+  for (const line of dump.split('\n')) {
+    const m = /^[0-9a-f]{8}:\s+(.+?)\s{2,}/i.exec(line);   // hex columns, before the ASCII gutter
+    if (!m) continue;
+    for (const tok of m[1].trim().split(/\s+/)) {
+      for (let k = 0; k + 1 < tok.length; k += 2) bytes.push(parseInt(tok.substr(k, 2), 16));
+    }
+  }
+  if (bytes.length < 13 || bytes[0] !== 1) return null;     // configurationVersion must be 1
+  const b1 = bytes[1];
+  let compat = 0; for (let k = 2; k <= 5; k++) compat = (compat * 256 + bytes[k]) >>> 0;
+  return {
+    profileSpace: (b1 >> 6) & 3,
+    tierFlag: (b1 >> 5) & 1,
+    profileIdc: b1 & 0x1f,
+    compat,
+    constraint: bytes.slice(6, 12),
+    levelIdc: bytes[12],
+  };
+}
+
+// RFC 6381 codecs string for HEVC, computed from the real hvcC. general_profile_
+// compatibility_flags print in reverse bit order; trailing-zero constraint bytes
+// are dropped. e.g. Main10 L4.0 main-tier -> hvc1.2.4.L120.90; Main10 L5.0 high-
+// tier HDR -> hvc1.2.4.H150.B0. A tier/constraint that doesn't match the stream
+// makes AVPlayer reject the variant and loop on the init segment.
+function hevcCodecString(h) {
+  const space = ['', 'A', 'B', 'C'][h.profileSpace] || '';
+  let rev = 0; for (let k = 0; k < 32; k++) if (h.compat & (1 << k)) rev |= (1 << (31 - k));
+  rev >>>= 0;
+  const tier = h.tierFlag ? 'H' : 'L';
+  const cons = h.constraint.slice();
+  while (cons.length && cons[cons.length - 1] === 0) cons.pop();
+  const consStr = cons.map((b) => b.toString(16).toUpperCase().padStart(2, '0')).join('.');
+  return `hvc1.${space}${h.profileIdc}.${rev.toString(16)}.${tier}${h.levelIdc}${consStr ? '.' + consStr : ''}`;
+}
+
 function videoCodecTag(ci, transcodedToH264) {
   const level = ci.vlevel || 120;
   if (transcodedToH264 || ci.vcodec === 'h264') {
@@ -102,6 +146,9 @@ function videoCodecTag(ci, transcodedToH264) {
     const idc = p.includes('high') ? 0x64 : p.includes('main') ? 0x4d : p.includes('base') ? 0x42 : 0x64;
     return `avc1.${idc.toString(16).padStart(2, '0')}00${(level || 40).toString(16).padStart(2, '0')}`;
   }
+  // Prefer the exact string parsed from the hvcC; fall back to a Main/Main10
+  // guess only if the extradata wasn't a parseable hvcC.
+  if (ci.vhevc) return hevcCodecString(ci.vhevc);
   const p = (ci.vprofile || '').toLowerCase();
   const idc = p.includes('10') ? 2 : 1;          // Main 10 = 2, Main = 1
   const compat = idc === 2 ? '4' : '6';           // bit-reversed compatibility flags
@@ -226,7 +273,14 @@ function spawnFfmpeg(s, filePath, opts, ci) {
     cmd: s.lastArgs
   });
 
-  const proc = spawn(ff, args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+  // cwd MUST be the session dir: -hls_fmp4_init_filename is a bare relative name,
+  // and ffmpeg locates the init file's directory by splitting the playlist path
+  // on '/'. On Windows path.join() yields all-backslash paths (no '/'), so ffmpeg
+  // finds no directory and writes init.mp4 into its CWD instead of the session
+  // dir — the server then 500s on init.mp4 and AVPlayer loops on the EXT-X-MAP,
+  // never fetching a segment. Anchoring cwd to s.dir puts init.mp4 where we serve
+  // it from. (Segments/playlist use full paths, so they're unaffected.)
+  const proc = spawn(ff, args, { cwd: s.dir, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
   proc.stderr.on('data', (d) => { s.err = ((s.err || '') + d).slice(-4000); s.lastErr = s.err.trim(); });
   proc.on('error', (e) => logEvent('spawn_error', { file: path.basename(filePath), error: e.message }));
   proc.on('exit', (code) => {

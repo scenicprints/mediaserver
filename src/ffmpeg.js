@@ -141,7 +141,12 @@ export async function probe(filePath) {
   try { key = filePath + ':' + fs.statSync(filePath).mtimeMs; } catch { return null; }
   if (probeCache.has(key)) return probeCache.get(key);
   const out = await tryRun(ffprobePath, [
-    '-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', '-show_chapters', filePath
+    // -show_data exposes each stream's codec `extradata` (e.g. the HEVC hvcC),
+    // which we parse for the EXACT RFC 6381 codecs string (tier/constraint bits
+    // that stream=profile/level alone don't reveal). It only dumps small header
+    // extradata here (no -show_packets/-show_frames), so the cost is negligible.
+    '-v', 'error', '-print_format', 'json', '-show_data',
+    '-show_format', '-show_streams', '-show_chapters', filePath
   ]);
   let json = null;
   try { json = JSON.parse(out); } catch {}
