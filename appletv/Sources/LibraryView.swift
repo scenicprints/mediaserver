@@ -1,8 +1,8 @@
 import SwiftUI
 
-// The Library tab — Plex-style: a clean continuous poster grid with a Movies/TV
-// toggle, search, and a filter bar (Unwatched + genres). No A-Z letter headers or
-// side rail. Streaming titles keep their provider badge and open the service.
+// The Library tab — Plex-style continuous poster grid with a Movies/TV toggle,
+// search, a compact genre + Unwatched filter bar (click "More" to expand genres),
+// and an A-Z quick-jump rail. Streaming titles keep their provider badge.
 struct LibraryView: View {
     @EnvironmentObject var store: Store
     @Environment(\.openURL) private var openURL
@@ -11,6 +11,7 @@ struct LibraryView: View {
     @State private var query = ""
     @State private var selectedGenre: String? = nil
     @State private var unwatchedOnly = false
+    @State private var genresExpanded = false
     @FocusState private var searchFocused: Bool
     private let columns = [GridItem(.adaptive(minimum: Theme.posterWidth), spacing: Theme.cardSpacing)]
 
@@ -23,18 +24,20 @@ struct LibraryView: View {
     private func sortKey(_ t: String) -> String {
         t.replacingOccurrences(of: #"^(the|a|an) "#, with: "", options: [.regularExpression, .caseInsensitive])
     }
-    // Franchise base = the part before a "Subtitle" so sequels cluster together.
     private func franchiseBase(_ t: String) -> String {
         let s = sortKey(t)
         for sep in [": ", " - "] { if let r = s.range(of: sep) { return String(s[..<r.lowerBound]) } }
         return s
     }
-    // A→Z, but same-franchise titles sort in RELEASE order (year).
     private func lessThan(_ a: LibItem, _ b: LibItem) -> Bool {
         let cmp = franchiseBase(a.title).localizedCaseInsensitiveCompare(franchiseBase(b.title))
         if cmp != .orderedSame { return cmp == .orderedAscending }
         if (a.year ?? 0) != (b.year ?? 0) { return (a.year ?? 0) < (b.year ?? 0) }
         return sortKey(a.title).localizedCaseInsensitiveCompare(sortKey(b.title)) == .orderedAscending
+    }
+    private func letterOf(_ t: String) -> String {
+        let c = sortKey(t).uppercased().first.map(String.init) ?? "#"
+        return (c >= "A" && c <= "Z") ? c : "#"
     }
 
     private func movieItem(_ m: Movie) -> LibItem {
@@ -53,7 +56,6 @@ struct LibraryView: View {
     private var allItems: [LibItem] { (kind == "movie" ? store.movies.map(movieItem) : store.shows.map(showItem)) }
     private var trimmed: String { query.trimmingCharacters(in: .whitespaces) }
 
-    // Genres present in the current kind, most common first.
     private var availableGenres: [String] {
         var counts: [String: Int] = [:]
         for it in allItems { for g in it.genres { counts[g, default: 0] += 1 } }
@@ -67,27 +69,37 @@ struct LibraryView: View {
         if !trimmed.isEmpty { src = src.filter { $0.title.range(of: trimmed, options: .caseInsensitive) != nil } }
         return src
     }
+    // First item id for each present letter (for the A-Z jump).
+    private var letterAnchors: [(letter: String, id: String)] {
+        var seen = Set<String>(); var out: [(String, String)] = []
+        for it in visible { let L = letterOf(it.title); if seen.insert(L).inserted { out.append((L, it.id)) } }
+        return out
+    }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                MarqueeWordmark()
-                HStack(spacing: 20) {
-                    toggle
-                    searchField
-                    Spacer(minLength: 0)
-                    Text("\(visible.count)").font(.title3).foregroundStyle(Theme.muted)
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    MarqueeWordmark()
+                    HStack(spacing: 20) {
+                        toggle
+                        searchField
+                        Spacer(minLength: 0)
+                        Text("\(visible.count)").font(.title3).foregroundStyle(Theme.muted)
+                    }
+                    filterBar
+                    LazyVGrid(columns: columns, spacing: Theme.rowSpacing) {
+                        ForEach(visible) { card($0).id($0.id) }
+                    }
+                    if visible.isEmpty {
+                        Text(trimmed.isEmpty ? "Nothing matches those filters." : "No matches for “\(trimmed)”.")
+                            .foregroundStyle(Theme.muted).padding(.top, 20)
+                    }
                 }
-                filterBar
-                LazyVGrid(columns: columns, spacing: Theme.rowSpacing) {
-                    ForEach(visible) { card($0) }
-                }
-                if visible.isEmpty {
-                    Text(trimmed.isEmpty ? "Nothing matches those filters." : "No matches for “\(trimmed)”.")
-                        .foregroundStyle(Theme.muted).padding(.top, 20)
-                }
+                .padding(.leading, Theme.gutter).padding(.trailing, 96)
+                .padding(.top, 32).padding(.bottom, Theme.gutter)
             }
-            .padding(.horizontal, Theme.gutter).padding(.top, 32).padding(.bottom, Theme.gutter)
+            .overlay(alignment: .trailing) { if trimmed.isEmpty && !letterAnchors.isEmpty { azRail(proxy) } }
         }
         .task { if store.movies.isEmpty { await store.loadHome() } }
         .onAppear { Task { await store.refreshHome() } }
@@ -129,14 +141,18 @@ struct LibraryView: View {
         .overlay(Capsule().strokeBorder(searchFocused ? Theme.accent : .clear, lineWidth: 2))
     }
 
-    // Plex-style filter row: All · Unwatched · genres.
+    // Compact filter row: All · Unwatched · a few genres · More/Less.
     private var filterBar: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
+        let genres = genresExpanded ? availableGenres : Array(availableGenres.prefix(6))
+        return ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 12) {
                 pill("All", selectedGenre == nil && !unwatchedOnly) { selectedGenre = nil; unwatchedOnly = false }
                 pill("Unwatched", unwatchedOnly) { unwatchedOnly.toggle() }
-                ForEach(availableGenres, id: \.self) { g in
+                ForEach(genres, id: \.self) { g in
                     pill(g, selectedGenre == g) { selectedGenre = (selectedGenre == g ? nil : g) }
+                }
+                if availableGenres.count > 6 {
+                    pill(genresExpanded ? "Less" : "More…", false) { genresExpanded.toggle() }
                 }
             }
             .padding(.vertical, 6).padding(.horizontal, 2)
@@ -150,5 +166,19 @@ struct LibraryView: View {
                 .background(active ? AnyShapeStyle(Theme.grad) : AnyShapeStyle(Theme.card), in: Capsule())
         }
         .buttonStyle(.plain)
+    }
+
+    // A-Z quick-jump rail (right edge) — scrolls to the first title of each letter.
+    private func azRail(_ proxy: ScrollViewProxy) -> some View {
+        VStack(spacing: 2) {
+            ForEach(letterAnchors, id: \.letter) { a in
+                Button { withAnimation { proxy.scrollTo(a.id, anchor: .top) } } label: {
+                    Text(a.letter).font(.caption).fontWeight(.heavy).foregroundStyle(Theme.accent2)
+                        .frame(width: 46, height: 30)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.vertical, 14).background(Theme.card.opacity(0.65), in: Capsule()).padding(.trailing, 24)
     }
 }

@@ -492,7 +492,9 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     private func loadMeta() async {
         guard let store, let fileId else { return }
         if kind == "episode", let pm = await store.playMeta(kind: kind, fileId: fileId) { introRange = pm.intro }
-        if let mi = await store.mediaInfo(kind: kind, fileId: fileId) { applyDisplayCriteria(mi) }
+        // HDR auto display-switch (applyDisplayCriteria) is DISABLED — it traps on
+        // device ("app closes on play"). libVLC still decodes HDR; re-enable the
+        // TV mode-switch only via a crash-free path (see notes).
         await reloadSubtitles()
     }
 
