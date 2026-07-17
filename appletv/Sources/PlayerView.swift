@@ -193,7 +193,7 @@ final class VLCPlayerViewController: UIViewController, VLCMediaPlayerDelegate {
 
     func mediaPlayerTimeChanged(_ aNotification: Notification!) {
         guard onMain else { return }
-        let pos = Double(player.time?.intValue ?? 0) / 1000.0
+        let pos = Double(player.time.intValue) / 1000.0
         updateOSD(position: pos)
         report(position: pos)
     }
@@ -235,7 +235,7 @@ final class VLCPlayerViewController: UIViewController, VLCMediaPlayerDelegate {
         finished = true
         let sid = sessionId
         if let store { Task { await store.sessionEnd(sessionId: sid) } }
-        let pos = Double(player.time?.intValue ?? 0) / 1000.0
+        let pos = Double(player.time.intValue) / 1000.0
         if save, onMain, !live, pos > 1 {
             let total = totalDuration
             let watched = (total.map { pos / $0 } ?? 0) > 0.92
