@@ -244,11 +244,58 @@ struct CastTile: View {
 struct ActionRow<Content: View>: View {
     @ViewBuilder let content: () -> Content
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 18) { content() }
-                .padding(.vertical, 10)   // focus-scale headroom
+        // Wrap onto new rows instead of scrolling/cutting off at the screen edge.
+        FlowLayout(spacing: 18, lineSpacing: 16) { content() }
+            .padding(.vertical, 10)   // focus-scale headroom
+            .focusSection()
+    }
+}
+
+// A simple wrapping (flow) layout: lays children left-to-right, dropping to a new
+// row when the next child would overflow the available width. Keeps tvOS focus
+// navigation intact (the focus engine follows the placed frames).
+struct FlowLayout: Layout {
+    var spacing: CGFloat = 18
+    var lineSpacing: CGFloat = 16
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Void) -> CGSize {
+        let maxWidth = proposal.width ?? .greatestFiniteMagnitude
+        let rows = computeRows(subviews, maxWidth: maxWidth)
+        let width = rows.map(\.width).max() ?? 0
+        let height = rows.map(\.height).reduce(0, +) + CGFloat(max(0, rows.count - 1)) * lineSpacing
+        return CGSize(width: min(maxWidth, width), height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Void) {
+        var y = bounds.minY
+        for row in computeRows(subviews, maxWidth: bounds.width) {
+            var x = bounds.minX
+            for idx in row.items {
+                let size = subviews[idx].sizeThatFits(.unspecified)
+                subviews[idx].place(at: CGPoint(x: x, y: y), anchor: .topLeading, proposal: ProposedViewSize(size))
+                x += size.width + spacing
+            }
+            y += row.height + lineSpacing
         }
-        .focusSection()
+    }
+
+    private struct Row { var items: [Int] = []; var width: CGFloat = 0; var height: CGFloat = 0 }
+
+    private func computeRows(_ subviews: Subviews, maxWidth: CGFloat) -> [Row] {
+        var rows: [Row] = []
+        var row = Row()
+        for i in subviews.indices {
+            let size = subviews[i].sizeThatFits(.unspecified)
+            let addend = row.items.isEmpty ? size.width : spacing + size.width
+            if !row.items.isEmpty && row.width + addend > maxWidth {
+                rows.append(row); row = Row()
+            }
+            row.items.append(i)
+            row.width += (row.items.count == 1 ? size.width : spacing + size.width)
+            row.height = max(row.height, size.height)
+        }
+        if !row.items.isEmpty { rows.append(row) }
+        return rows
     }
 }
 

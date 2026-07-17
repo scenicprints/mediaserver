@@ -448,7 +448,17 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
 
     // MARK: VLCMediaPlayerDelegate
 
-    func mediaPlayerStateChanged(_ aNotification: Notification!) {
+    // libVLC delivers delegate callbacks off the main thread; SwiftUI @Published
+    // MUST be mutated on main, so these hop before touching any state (an
+    // off-main @Published write crashes the app — the likely "closes on play").
+    nonisolated func mediaPlayerStateChanged(_ aNotification: Notification!) {
+        Task { @MainActor in self.handleState() }
+    }
+    nonisolated func mediaPlayerTimeChanged(_ aNotification: Notification!) {
+        Task { @MainActor in self.handleTime() }
+    }
+
+    private func handleState() {
         isPlaying = player.isPlaying
         switch player.state {
         case .playing:
@@ -467,13 +477,11 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         }
     }
 
-    func mediaPlayerTimeChanged(_ aNotification: Notification!) {
+    private func handleTime() {
         guard onMain else { return }
         position = Double(player.time.intValue) / 1000.0
         if duration <= 0 { duration = Double(player.media?.length.intValue ?? 0) / 1000.0 }
-        // Skip Intro window
         if let r = introRange { showSkipIntro = position >= r.start && position <= r.end }
-        // Up Next window (Plex-style: no credits marker, so use the final stretch)
         if !upNext.isEmpty, duration > 0 {
             showUpNext = position >= duration - upNextLead && position < duration
         }
@@ -504,37 +512,16 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     // MARK: HDR / frame-rate display matching (what AVPlayer did for free)
 
     private func applyDisplayCriteria(_ i: Store.MediaInfo) {
-        guard let fps = i.fps, let window = hostWindow ?? UIApplication.shared.connectedScenes
-                .compactMap({ ($0 as? UIWindowScene)?.keyWindow }).first else {
-            displayMatchText = "unavailable"; return
+        // NOTE: automatic HDR/frame-rate display switching (AVDisplayManager +
+        // AVDisplayCriteria) is temporarily disabled while we stabilize playback —
+        // it was a prime suspect for the "app closes on play" crash. The info
+        // overlay still reports the source's real range/fps below; we'll re-enable
+        // the actual display switch, guarded, once playback is confirmed stable.
+        if let fps = i.fps {
+            displayMatchText = "\(i.hdrText ?? "SDR") · \(String(format: "%.0f", fps))Hz (source)"
+        } else {
+            displayMatchText = i.hdrText ?? "SDR"
         }
-        let primaries: CFString, transfer: CFString, matrix: CFString
-        switch i.hdr {
-        case "hdr10", "dolbyvision":
-            primaries = kCMFormatDescriptionColorPrimaries_ITU_R_2020
-            transfer = kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ
-            matrix = kCMFormatDescriptionYCbCrMatrix_ITU_R_2020
-        case "hlg":
-            primaries = kCMFormatDescriptionColorPrimaries_ITU_R_2020
-            transfer = kCMFormatDescriptionTransferFunction_ITU_R_2100_HLG
-            matrix = kCMFormatDescriptionYCbCrMatrix_ITU_R_2020
-        default:
-            primaries = kCMFormatDescriptionColorPrimaries_ITU_R_709_2
-            transfer = kCMFormatDescriptionTransferFunction_ITU_R_709_2
-            matrix = kCMFormatDescriptionYCbCrMatrix_ITU_R_709_2
-        }
-        let ext: [CFString: Any] = [
-            kCMFormatDescriptionExtension_ColorPrimaries: primaries,
-            kCMFormatDescriptionExtension_TransferFunction: transfer,
-            kCMFormatDescriptionExtension_YCbCrMatrix: matrix
-        ]
-        var fmt: CMFormatDescription?
-        CMVideoFormatDescriptionCreate(allocator: kCFAllocatorDefault, codecType: kCMVideoCodecType_HEVC,
-            width: Int32(i.width ?? 1920), height: Int32(i.height ?? 1080),
-            extensions: ext as CFDictionary, formatDescriptionOut: &fmt)
-        guard let fmt else { displayMatchText = "unavailable"; return }
-        window.avDisplayManager.preferredDisplayCriteria = AVDisplayCriteria(refreshRate: Float(fps), formatDescription: fmt)
-        displayMatchText = "\(i.hdrText ?? "SDR") · \(String(format: "%.0f", fps))Hz"
     }
 
     // MARK: Progress reporting (mirrors the proven AVPlayer coordinator)
@@ -574,7 +561,6 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
 
     func teardown() {
         hideTimer?.invalidate()
-        hostWindow?.avDisplayManager.preferredDisplayCriteria = nil
         finish(save: true)
         player.stop()
     }
