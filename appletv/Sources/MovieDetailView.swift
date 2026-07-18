@@ -32,7 +32,7 @@ struct MovieDetailView: View {
             // Refresh so Resume/Continue Watching reflect where playback stopped.
             Task { await load(); await store.loadHome() }
         }) { s in
-            PlayerView(session: s, store: store).ignoresSafeArea()
+            PlayerRouter(session: s, store: store).ignoresSafeArea()
         }
     }
 

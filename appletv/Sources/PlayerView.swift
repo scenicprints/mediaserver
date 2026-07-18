@@ -454,8 +454,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     }
 
     func bind(store: Store) { self.store = store }
-    func attachDrawable(_ view: UIView) { player.drawable = view; drawableView = view }
-    private weak var drawableView: UIView?
+    func attachDrawable(_ view: UIView) { player.drawable = view }
 
     func start(url: URL, startAt: Double, ref: Store.PlayRef, kind: String, duration: Double?,
                title: String, subtitle: String?, fileId: Int?, live: Bool,
@@ -467,15 +466,19 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         player.delegate = self
         flashControls()
         Task { @MainActor in
-            // HDR: switch the TV into HDR/frame-rate mode BEFORE libVLC starts
-            // rendering. Applying it mid-play reconfigures the display under
-            // libVLC's video output and crashes ("app closes on play"). Only HDR
-            // sources trigger a switch, so SDR playback is unaffected/instant.
-            if preroll == nil, let fid = fileId,
-               let mi = await store?.mediaInfo(kind: kind, fileId: fid), mi.isHDR {
-                applyDisplayCriteria(mi)
-                try? await Task.sleep(nanoseconds: 1_200_000_000)   // let the mode settle
-            }
+            // NOTE: we deliberately do NOT switch the TV into an HDR display mode
+            // here anymore. On tvOS, libVLC renders through OpenGL (no Metal vout)
+            // and the platform withholds the EDR APIs a custom renderer needs, so
+            // VLCKit ALWAYS tone-maps HDR down to SDR — it never emits real HDR
+            // pixels. So `AVDisplayManager.preferredDisplayCriteria` could only
+            // flip the panel into an HDR *container* over SDR pixels (washed out)
+            // or silently no-op — and, worse, that async display reconfigure
+            // collided with the resume seek and killed libVLC's video surface
+            // ("app closes when you press Resume on a 4K file"). Removing it makes
+            // resume crash-free; HDR still DECODES and shows correctly as
+            // tone-mapped SDR (exactly what VLC-for-Apple-TV ships). Real HDR
+            // output (the TV's HDR badge) requires the native AVPlayer path — see
+            // the HLS-remux route (src/hls.js) — not VLCKit.
             beginPlayback()
             await loadMeta()
         }
@@ -511,43 +514,6 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         await reloadSubtitles()
     }
 
-    // Switch the Apple TV into the content's HDR/frame-rate display mode — what
-    // AVPlayer did for free. Build a CMFormatDescription with the right color
-    // tags from the probed media info and hand it to the window's AVDisplayManager.
-    private var displayWindow: UIWindow?
-    private func applyDisplayCriteria(_ i: Store.MediaInfo) {
-        guard let fps = i.fps,
-              let window = drawableView?.window
-                ?? UIApplication.shared.connectedScenes.compactMap({ ($0 as? UIWindowScene)?.keyWindow }).first
-        else { return }
-        let primaries: CFString, transfer: CFString, matrix: CFString
-        switch i.hdr {
-        case "hdr10", "dolbyvision":
-            primaries = kCMFormatDescriptionColorPrimaries_ITU_R_2020
-            transfer = kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ
-            matrix = kCMFormatDescriptionYCbCrMatrix_ITU_R_2020
-        case "hlg":
-            primaries = kCMFormatDescriptionColorPrimaries_ITU_R_2020
-            transfer = kCMFormatDescriptionTransferFunction_ITU_R_2100_HLG
-            matrix = kCMFormatDescriptionYCbCrMatrix_ITU_R_2020
-        default:
-            primaries = kCMFormatDescriptionColorPrimaries_ITU_R_709_2
-            transfer = kCMFormatDescriptionTransferFunction_ITU_R_709_2
-            matrix = kCMFormatDescriptionYCbCrMatrix_ITU_R_709_2
-        }
-        let ext: [CFString: Any] = [
-            kCMFormatDescriptionExtension_ColorPrimaries: primaries,
-            kCMFormatDescriptionExtension_TransferFunction: transfer,
-            kCMFormatDescriptionExtension_YCbCrMatrix: matrix
-        ]
-        var fmt: CMFormatDescription?
-        CMVideoFormatDescriptionCreate(allocator: kCFAllocatorDefault, codecType: kCMVideoCodecType_HEVC,
-            width: Int32(i.width ?? 1920), height: Int32(i.height ?? 1080),
-            extensions: ext as CFDictionary, formatDescriptionOut: &fmt)
-        guard let fmt else { return }
-        displayWindow = window
-        window.avDisplayManager.preferredDisplayCriteria = AVDisplayCriteria(refreshRate: Float(fps), formatDescription: fmt)
-    }
     private func reloadSubtitles() async {
         guard let store, let fileId else { return }
         let tracks = await store.subtitleTracks(kind: kind, fileId: fileId)
@@ -713,7 +679,6 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     }
     func teardown() {
         hideTimer?.invalidate()
-        displayWindow?.avDisplayManager.preferredDisplayCriteria = nil   // let the TV revert
         finish(save: true)
         player.stop()
     }

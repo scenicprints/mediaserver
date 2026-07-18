@@ -67,7 +67,7 @@ struct ShowDetailView: View {
         .fullScreenCover(item: $session, onDismiss: {
             Task { await load(); await store.loadHome() }   // fresh resume state
         }) { s in
-            PlayerView(session: s, store: store).ignoresSafeArea()
+            PlayerRouter(session: s, store: store).ignoresSafeArea()
         }
         .fullScreenCover(item: $episodePage, onDismiss: {
             Task { await load() }                            // watched/resume may have changed
@@ -358,7 +358,7 @@ struct EpisodeDetailView: View {
             extra = await store.episodeExtra(episode.id)
         }
         .fullScreenCover(item: $session) { s in
-            PlayerView(session: s, store: store).ignoresSafeArea()
+            PlayerRouter(session: s, store: store).ignoresSafeArea()
         }
     }
 
