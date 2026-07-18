@@ -452,6 +452,13 @@ final class Store: ObservableObject {
         let d = JSONDecoder(); d.keyDecodingStrategy = .convertFromSnakeCase; return d
     }
 
+    // Crash forensics: fire-and-forget a one-line breadcrumb to the server
+    // (POST /api/clientlog). Used around risky sequences (the HDR display-mode
+    // switch) so if the app dies, the server's log shows the exact last step.
+    func crumb(_ step: String) {
+        Task { _ = try? await request("api/clientlog", method: "POST", body: ["step": step]) }
+    }
+
     // Added within the last 14 days → "NEW" (web isNew). addedAt is ms epoch.
     nonisolated static func isRecent(_ addedAt: Double?) -> Bool {
         guard let a = addedAt else { return false }

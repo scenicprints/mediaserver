@@ -541,10 +541,83 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     // AVPlayer (HDR) engine. Streams the HLS remux (real HDR + badge). Optional
     // pre-roll plays first via an AVQueuePlayer; when the queue advances to the
     // main item we mark `onMain` and apply the resume seek.
-    // AVPlayer already engages the tvOS HDR display switch on its own (the badge
-    // lights) once the content is HDR and the server tags the HLS master
-    // VIDEO-RANGE=PQ — no manual AVDisplayManager call needed (that crashed).
+    // HDR display switch — the researched, by-the-book sequence (Apple Tech Talk
+    // 503 + how Infuse/AetherEngine ship it):
+    //   1. A raw AVPlayerLayer does NOT auto-match the display; only
+    //      AVPlayerViewController does. Without the switch, tvOS 26 rejects the
+    //      VIDEO-RANGE=PQ variant outright (-11868 "NoCompatibleAlternates…" —
+    //      master fetched, media playlist never requested).
+    //   2. Set preferredDisplayCriteria BEFORE creating/assigning the
+    //      AVPlayerItem ("so AVPlayer configures itself based on the targeted
+    //      display mode" — Tech Talk 503).
+    //   3. Wait for displayModeSwitchInProgress to end, with a ~5s timeout.
+    //      HDMI mode switches take SECONDS on most TVs (Infuse waits ~4s); the
+    //      old fixed 700ms sleep started the player mid-renegotiation.
+    //   4. Revert (criteria = nil) only at orderly teardown, after player stop.
+    // Every step breadcrumbs to the server (POST /api/clientlog) so a failure
+    // names its exact step.
     private func beginAVPlayback() {
+        Task { @MainActor in
+            if let store, let fid = fileId,
+               let mi = await store.mediaInfo(kind: kind, fileId: fid), mi.isHDR {
+                store.crumb("hdr: begin \(mi.hdr ?? "?") \(mi.width ?? 0)x\(mi.height ?? 0)@\(mi.fps ?? 0)")
+                await switchDisplayToHDR(mi)
+            }
+            store?.crumb("av: creating player")
+            setupAVQueue()
+            store?.crumb("av: playing")
+        }
+    }
+
+    private var displayWindow: UIWindow?
+    @MainActor
+    private func switchDisplayToHDR(_ mi: Store.MediaInfo) async {
+        let window = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .first(where: { $0.activationState == .foregroundActive })?.keyWindow
+            ?? UIApplication.shared.connectedScenes.compactMap({ ($0 as? UIWindowScene)?.keyWindow }).first
+        guard let window else { store?.crumb("hdr: no key window — skipping switch"); return }
+        let dm = window.avDisplayManager
+        guard dm.isDisplayCriteriaMatchingEnabled else {
+            // tvOS Settings → Video and Audio → Match Content is OFF; a manual
+            // switch is a guaranteed no-op, so don't pretend.
+            store?.crumb("hdr: Match Content OFF in tvOS Settings — no switch possible")
+            return
+        }
+        guard let criteria = hdrCriteria(mi) else { store?.crumb("hdr: criteria build failed"); return }
+        displayWindow = window
+        store?.crumb("hdr: setting preferredDisplayCriteria")
+        dm.preferredDisplayCriteria = criteria
+        // The switch is async and may not have started yet — give it a beat to
+        // begin, then wait until it's no longer in progress (max 5s total).
+        let t0 = Date()
+        try? await Task.sleep(nanoseconds: 800_000_000)
+        while dm.isDisplayModeSwitchInProgress && Date().timeIntervalSince(t0) < 5 {
+            try? await Task.sleep(nanoseconds: 150_000_000)
+        }
+        store?.crumb("hdr: switch settled after \(String(format: "%.1f", Date().timeIntervalSince(t0)))s (inProgress=\(dm.isDisplayModeSwitchInProgress))")
+    }
+
+    // BT.2020 + PQ (or HLG) CMFormatDescription for AVDisplayCriteria.
+    private func hdrCriteria(_ i: Store.MediaInfo) -> AVDisplayCriteria? {
+        guard let fps = i.fps else { return nil }
+        let transfer: CFString = (i.hdr == "hlg")
+            ? kCMFormatDescriptionTransferFunction_ITU_R_2100_HLG
+            : kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ
+        let ext: [CFString: Any] = [
+            kCMFormatDescriptionExtension_ColorPrimaries: kCMFormatDescriptionColorPrimaries_ITU_R_2020,
+            kCMFormatDescriptionExtension_TransferFunction: transfer,
+            kCMFormatDescriptionExtension_YCbCrMatrix: kCMFormatDescriptionYCbCrMatrix_ITU_R_2020
+        ]
+        var fmt: CMFormatDescription?
+        CMVideoFormatDescriptionCreate(allocator: kCFAllocatorDefault, codecType: kCMVideoCodecType_HEVC,
+            width: Int32(i.width ?? 3840), height: Int32(i.height ?? 2160),
+            extensions: ext as CFDictionary, formatDescriptionOut: &fmt)
+        guard let fmt else { return nil }
+        return AVDisplayCriteria(refreshRate: Float(fps), formatDescription: fmt)
+    }
+
+    private func setupAVQueue() {
         // The HDR path always streams the HLS remux, not the raw VLC URL.
         let mainURLForAV: URL = (store?.hlsURL(kind: kind, fileId: fileId ?? -1)) ?? mainURL!
         self.mainURL = mainURLForAV
@@ -569,7 +642,16 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         // Ready → (on the MAIN item) resume-seek once, then keep playing.
         avStatusObs = mainItem.observe(\.status, options: [.new]) { [weak self] item, _ in
             Task { @MainActor in
-                guard let self, item.status == .readyToPlay else { return }
+                guard let self else { return }
+                if item.status == .failed {
+                    // Surface the REAL error to the server log (e.g. -11868
+                    // NoCompatibleAlternatesForExternalDisplay) — no more guessing.
+                    let e = item.error as NSError?
+                    self.store?.crumb("av: item FAILED \(e?.domain ?? "?") \(e?.code ?? 0): \(e?.localizedDescription ?? "?")")
+                    return
+                }
+                guard item.status == .readyToPlay else { return }
+                self.store?.crumb("av: item readyToPlay")
                 if item === self.av?.currentItem { self.avResumeIfNeeded() }
                 self.refreshAVTracks(item)
             }
@@ -902,6 +984,11 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
             if let avTimeObs { av?.removeTimeObserver(avTimeObs) }; avTimeObs = nil
             if let avEndObs { NotificationCenter.default.removeObserver(avEndObs) }; avEndObs = nil
             av?.pause(); av?.removeAllItems(); av = nil
+            // Revert the display mode AFTER the orderly stop (Tech Talk 503:
+            // "set preferredDisplayCriteria to nil"; AVPlayerViewController's
+            // model is revert-on-dismiss). Triggers one more HDMI switch.
+            displayWindow?.avDisplayManager.preferredDisplayCriteria = nil
+            displayWindow = nil
         } else {
             player.stop()
         }

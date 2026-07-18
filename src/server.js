@@ -704,6 +704,26 @@ app.post('/api/shows/:id/watched', async (req, reply) => {
   return { watched: next, episodes: eps.length };
 });
 
+// ---- Client breadcrumb log (crash forensics for the TV apps) ----
+// The tvOS player POSTs one-line breadcrumbs at each step of a risky sequence
+// (e.g. the HDR display-mode switch). If the app crashes, the last line in the
+// ring is the exact step that killed it — read it via GET /api/clientlog
+// (admin). In-memory ring only; survives app crashes because it lives here.
+const clientLog = [];
+app.post('/api/clientlog', async (req) => {
+  const step = String((req.body && req.body.step) || '').slice(0, 300);
+  if (!step) return { ok: false };
+  const rec = { t: new Date().toISOString(), user: req.user?.username || '?', step };
+  clientLog.push(rec);
+  if (clientLog.length > 200) clientLog.shift();
+  console.log(`[clientlog] ${rec.user}: ${step}`);
+  return { ok: true };
+});
+app.get('/api/clientlog', async (req, reply) => {
+  if (!req.user || req.user.role !== 'admin') return reply.code(403).send({ error: 'admin only' });
+  return { recent: clientLog.slice(-80) };
+});
+
 // ---- Self-update (git pull + restart, driven by run.bat) ----
 
 function gitInfo() {
