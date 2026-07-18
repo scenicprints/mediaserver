@@ -77,14 +77,37 @@ async function codecInfo(filePath) {
   const p = await probe(filePath);
   const streams = (p && p.streams) || [];
   const v = streams.find((s) => s.codec_type === 'video');
-  const a = streams.find((s) => s.codec_type === 'audio');
+
+  // Pick the best audio track to COPY. Prefer an Apple-native codec (E-AC-3,
+  // AC-3, AAC…) even if it isn't track 0, so we (a) never decode TrueHD/DTS-HD —
+  // which can crash ffmpeg ("quant_step_size larger than huff_lsbs") and stall
+  // the whole stream — and (b) keep real surround instead of a stereo AAC
+  // re-encode. `aMap` is the 0-based audio-stream index for `-map 0:a:N`.
+  const audio = streams.filter((s) => s.codec_type === 'audio');
+  const PREF = ['eac3', 'ac3', 'aac', 'alac', 'mp3'];
+  let aMap = 0, aStream = audio[0], bestRank = Infinity;
+  audio.forEach((s, i) => {
+    const rank = PREF.indexOf(String(s.codec_name || '').toLowerCase());
+    if (rank !== -1 && rank < bestRank) { bestRank = rank; aMap = i; aStream = s; }
+  });
+
+  // HDR signalling for the HLS master. Apple TV rejects an HDR variant that
+  // doesn't advertise VIDEO-RANGE; RESOLUTION is also required for a video
+  // variant. Derived from the probed color info.
+  const transfer = String((v && v.color_transfer) || '').toLowerCase();
+  const prim = String((v && v.color_primaries) || '').toLowerCase();
+  const videoRange = (transfer === 'smpte2084' || prim === 'bt2020') ? 'PQ'
+    : (transfer === 'arib-std-b67') ? 'HLG' : 'SDR';
+
   const info = {
     vcodec: v && String(v.codec_name || '').toLowerCase(),
     vtag: v && String(v.codec_tag_string || '').toLowerCase(),
     vprofile: v && String(v.profile || ''),
     vlevel: v && parseInt(v.level, 10),
     vhevc: v ? parseHevcConfig(v.extradata) : null,   // exact tier/level/constraint from the hvcC
-    acodec: a && String(a.codec_name || '').toLowerCase(),
+    width: (v && v.width) || null, height: (v && v.height) || null, videoRange,
+    acodec: aStream && String(aStream.codec_name || '').toLowerCase(),
+    aMap,
     duration: parseFloat(p && p.format && p.format.duration) || 0
   };
   probeCache.set(filePath, { at: Date.now(), info });
@@ -221,7 +244,10 @@ function spawnFfmpeg(s, filePath, opts, ci) {
   // GPU decode only helps when we must actually re-encode video; a copy needs no
   // decode at all (and the hwaccel path is exactly what mangled 10-bit HEVC).
   if (!vcopy && nvenc) args.push('-hwaccel', 'auto');
-  args.push('-i', filePath, '-map', '0:v:0', '-map', '0:a:0?', '-sn', '-dn');
+  // Map the best (Apple-native, copyable) audio track chosen in codecInfo — not
+  // blindly track 0 — so a TrueHD/DTS-HD track 0 doesn't force a crash-prone
+  // decode when the file also carries an AC-3/E-AC-3 track we can copy.
+  args.push('-i', filePath, '-map', '0:v:0', '-map', `0:a:${ci.aMap || 0}?`, '-sn', '-dn');
 
   if (vcopy) {
     args.push('-c:v', 'copy');
@@ -385,7 +411,12 @@ export function registerHls(app, db, helpers = {}) {
       lines.push(`#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="${name}",DEFAULT=NO,AUTOSELECT=NO${lang},URI="subs/${i}.m3u8${r.q}"`);
     });
     const subs = tracks.length ? ',SUBTITLES="subs"' : '';
-    lines.push(`#EXT-X-STREAM-INF:BANDWIDTH=20000000,CODECS="${codecs}"${subs}`);
+    // RESOLUTION + VIDEO-RANGE are REQUIRED by tvOS for a video variant — and an
+    // HDR (PQ/HLG) stream with no VIDEO-RANGE is rejected: AVPlayer reads the init
+    // then refuses to fetch any segment ("endless loading" on 4K HDR).
+    const res = (ci.width && ci.height) ? `,RESOLUTION=${ci.width}x${ci.height}` : '';
+    const vrange = ci.videoRange ? `,VIDEO-RANGE=${ci.videoRange}` : '';
+    lines.push(`#EXT-X-STREAM-INF:BANDWIDTH=20000000${res}${vrange},CODECS="${codecs}"${subs}`);
     lines.push(`index.m3u8${r.q}`);
     logEvent('master', { file: path.basename(r.row.path), codecs, subs: tracks.length });
     reply.header('Content-Type', 'application/vnd.apple.mpegurl');
