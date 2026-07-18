@@ -1,0 +1,46 @@
+name: ASC build status
+
+# Diagnostic: ask App Store Connect for the processing state of recent TestFlight
+# builds (PROCESSING / VALID / INVALID / FAILED), so we can tell whether an
+# uploaded build actually became installable. Uses the same App Store Connect API
+# key secrets as the TestFlight upload. Manual only; prints no secrets.
+on:
+  workflow_dispatch:
+
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Query App Store Connect builds
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8_BASE64: ${{ secrets.ASC_KEY_P8_BASE64 }}
+        run: |
+          python3 -m pip install --quiet pyjwt cryptography requests
+          python3 - <<'PY'
+          import os, time, base64, jwt, requests
+          kid = os.environ["ASC_KEY_ID"]; iss = os.environ["ASC_ISSUER_ID"]
+          if not kid or not iss or not os.environ.get("ASC_KEY_P8_BASE64"):
+              print("::error::App Store Connect secrets are not set."); raise SystemExit(1)
+          p8 = base64.b64decode(os.environ["ASC_KEY_P8_BASE64"]).decode()
+          tok = jwt.encode(
+              {"iss": iss, "iat": int(time.time()), "exp": int(time.time()) + 900, "aud": "appstoreconnect-v1"},
+              p8, algorithm="ES256", headers={"kid": kid, "typ": "JWT"})
+          h = {"Authorization": f"Bearer {tok}"}
+          r = requests.get("https://api.appstoreconnect.apple.com/v1/builds",
+                           headers=h,
+                           params={"limit": 15, "sort": "-uploadedDate",
+                                   "fields[builds]": "version,processingState,uploadedDate,expired,usesNonExemptEncryption"})
+          print("HTTP", r.status_code)
+          if r.status_code != 200:
+              print(r.text[:1000]); raise SystemExit(1)
+          data = r.json().get("data", [])
+          if not data:
+              print("No builds returned for this API key's team/app."); raise SystemExit(0)
+          print(f"{'BUILD':>6}  {'STATE':<12} {'UPLOADED':<22} EXPIRED")
+          for b in data:
+              a = b["attributes"]
+              print(f"{str(a.get('version')):>6}  {str(a.get('processingState')):<12} "
+                    f"{str(a.get('uploadedDate')):<22} {a.get('expired')}")
+          PY
