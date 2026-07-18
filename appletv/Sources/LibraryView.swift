@@ -56,10 +56,11 @@ struct LibraryView: View {
     private var allItems: [LibItem] { (kind == "movie" ? store.movies.map(movieItem) : store.shows.map(showItem)) }
     private var trimmed: String { query.trimmingCharacters(in: .whitespaces) }
 
+    // Top genres only (most common first) — keeps the filter bar condensed.
     private var availableGenres: [String] {
         var counts: [String: Int] = [:]
         for it in allItems { for g in it.genres { counts[g, default: 0] += 1 } }
-        return counts.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }.map(\.key)
+        return Array(counts.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }.map(\.key).prefix(12))
     }
 
     private var visible: [LibItem] {
@@ -143,7 +144,7 @@ struct LibraryView: View {
 
     // Compact filter row: All · Unwatched · a few genres · More/Less.
     private var filterBar: some View {
-        let genres = genresExpanded ? availableGenres : Array(availableGenres.prefix(6))
+        let genres = genresExpanded ? availableGenres : Array(availableGenres.prefix(4))
         return ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 12) {
                 pill("All", selectedGenre == nil && !unwatchedOnly) { selectedGenre = nil; unwatchedOnly = false }
@@ -151,7 +152,7 @@ struct LibraryView: View {
                 ForEach(genres, id: \.self) { g in
                     pill(g, selectedGenre == g) { selectedGenre = (selectedGenre == g ? nil : g) }
                 }
-                if availableGenres.count > 6 {
+                if availableGenres.count > 4 {
                     pill(genresExpanded ? "Less" : "More…", false) { genresExpanded.toggle() }
                 }
             }

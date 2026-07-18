@@ -302,7 +302,9 @@ struct PlayerView: View {
                 default:
                     menuHeader("Subtitles")
                     // AI first — it's what you see the moment you open captions.
-                    menuButton("✨  Generate with AI…", 0, false) { m.menu = .aiPicker; focus = .menuRow(0) }
+                    menuButton(m.aiActive ? "✨  Generating subtitles… \(m.aiPct)%" : "✨  Generate with AI…", 0, false) {
+                        if m.aiActive { m.menu = .aiProgress } else { m.menu = .aiPicker; focus = .menuRow(0) }
+                    }
                     ForEach(Array(m.subtitleRows.enumerated()), id: \.offset) { i, row in
                         menuButton(row.label, i + 1, row.id == m.currentSubtitle) { m.selectSubtitle(row.id); m.closeMenu(); focus = .catcher }
                     }
@@ -416,6 +418,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     @Published var currentAudio = 0
     @Published var aiPhase: String?
     @Published var aiPct = 0
+    @Published var aiActive = false
 
     private weak var store: Store?
     private var ref: Store.PlayRef?
@@ -451,7 +454,8 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     }
 
     func bind(store: Store) { self.store = store }
-    func attachDrawable(_ view: UIView) { player.drawable = view }
+    func attachDrawable(_ view: UIView) { player.drawable = view; drawableView = view }
+    private weak var drawableView: UIView?
 
     func start(url: URL, startAt: Double, ref: Store.PlayRef, kind: String, duration: Double?,
                title: String, subtitle: String?, fileId: Int?, live: Bool,
@@ -485,23 +489,20 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
             }
         } else if let u = mainURL {
             onMain = true
-            player.media = mediaWithFilters(u, startTime: startAt)
+            player.media = mediaWithFilters(u)
         }
         player.play()
     }
 
-    // Resume via libVLC's :start-time option (reliable) instead of seeking right
-    // after play(), which sometimes restarted the file from 0.
-    private func mediaWithFilters(_ url: URL, startTime: Double? = nil) -> VLCMedia {
+    private func mediaWithFilters(_ url: URL) -> VLCMedia {
         let media = VLCMedia(url: url)
         for opt in store?.audioFilterOptions() ?? [] { media.addOption(opt) }
-        if let s = startTime, s > 1 { media.addOption(":start-time=\(Int(s))") }
         return media
     }
     private func switchToMain(url: URL) {
         guard !onMain else { return }
         onMain = true; seekedToStart = false
-        player.media = mediaWithFilters(url, startTime: startAt); player.play()
+        player.media = mediaWithFilters(url); player.play()
     }
 
     private func loadMeta() async {
@@ -516,8 +517,9 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     private var displayWindow: UIWindow?
     private func applyDisplayCriteria(_ i: Store.MediaInfo) {
         guard let fps = i.fps,
-              let window = UIApplication.shared.connectedScenes
-                .compactMap({ ($0 as? UIWindowScene)?.keyWindow }).first else { return }
+              let window = drawableView?.window
+                ?? UIApplication.shared.connectedScenes.compactMap({ ($0 as? UIWindowScene)?.keyWindow }).first
+        else { return }
         let primaries: CFString, transfer: CFString, matrix: CFString
         switch i.hdr {
         case "hdr10", "dolbyvision":
@@ -601,7 +603,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     // MARK: AI subtitles (Whisper) — the flow the web player has
     func startAISubs(_ target: String) {
         guard let store, let fileId else { return }
-        menu = .aiProgress; aiPhase = "Starting"; aiPct = 0
+        menu = .aiProgress; aiPhase = "Starting"; aiPct = 0; aiActive = true
         Task {
             var job = await store.generateSubtitles(kind: kind, fileId: fileId)
             while let j = job, j.status == "running" {
@@ -609,10 +611,12 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
                 job = await store.subtitleJobStatus(kind: kind, fileId: fileId)
             }
+            aiActive = false
             if let j = job, j.status == "done" {
+                aiPct = 100
                 await reloadSubtitles()
                 if let newest = subtitleOptions.last(where: { $0.id >= 0 }) { selectSubtitle(newest.id) }
-                menu = .none
+                if menu == .aiProgress { menu = .none }
             } else {
                 aiPhase = job?.error ?? "Couldn't generate subtitles"
             }
@@ -661,6 +665,13 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     }
     private func handleTime() {
         guard onMain else { return }
+        // Resume: seek once, on the first time update (playback is running &
+        // seekable, so the seek sticks instead of restarting from 0).
+        if !seekedToStart, startAt > 1, player.isSeekable {
+            seekedToStart = true
+            player.time = VLCTime(int: Int32(startAt * 1000))
+            return
+        }
         position = Double(player.time.intValue) / 1000.0
         if duration <= 0 { duration = Double(player.media?.length.intValue ?? 0) / 1000.0 }
         buffered = min(1, progress + 0.06)
