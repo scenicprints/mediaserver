@@ -444,7 +444,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     @Published var buffered: Double = 0
     @Published var isPlaying = false
     @Published var buffering = false
-    @Published var controlsVisible = true
+    @Published var controlsVisible = false   // HUD starts hidden; shown on interaction
     @Published var menu: Menu = .none
     @Published var showSkipIntro = false
     @Published var showUpNext = false
@@ -503,7 +503,8 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         self.mainURL = url; self.duration = duration ?? 0
         self.useAV = useAVPlayer
         if !useAV { player.delegate = self }
-        flashControls()
+        // HUD stays hidden at start (no flashControls here) — it appears only when
+        // the viewer interacts with the remote.
         Task { @MainActor in
             // NOTE: we deliberately do NOT switch the TV into an HDR display mode
             // here anymore. On tvOS, libVLC renders through OpenGL (no Metal vout)
@@ -706,7 +707,8 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         hideTimer = Timer.scheduledTimer(withTimeInterval: 3.5, repeats: false) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                if self.menu == PlayerModel.Menu.none && self.enginePlaying { self.controlsVisible = false }
+                // Always auto-hide (unless a menu is up) so the HUD never sticks.
+                if self.menu == PlayerModel.Menu.none { self.controlsVisible = false }
             }
         }
     }
