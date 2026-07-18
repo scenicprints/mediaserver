@@ -458,6 +458,12 @@ final class Store: ObservableObject {
     func crumb(_ step: String) {
         Task { _ = try? await request("api/clientlog", method: "POST", body: ["step": step]) }
     }
+    // Awaited variant for crash forensics around a risky statement: the POST is
+    // on the server BEFORE the caller's next line runs, so if that line kills
+    // the app, the log's last entry names it unambiguously. (~10ms on LAN.)
+    func crumbSync(_ step: String) async {
+        _ = try? await request("api/clientlog", method: "POST", body: ["step": step])
+    }
 
     // Added within the last 14 days → "NEW" (web isNew). addedAt is ms epoch.
     nonisolated static func isRecent(_ addedAt: Double?) -> Bool {

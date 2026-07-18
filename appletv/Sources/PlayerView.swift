@@ -411,7 +411,7 @@ struct AVPlayerLayerHost: UIViewRepresentable {
     func makeUIView(context: Context) -> PlayerLayerUIView {
         let v = PlayerLayerUIView(); v.backgroundColor = .black
         v.playerLayer.videoGravity = .resizeAspect
-        model.attachAVLayer(v.playerLayer)
+        model.attachAVLayer(v.playerLayer, host: v)
         return v
     }
     func updateUIView(_ uiView: PlayerLayerUIView, context: Context) {}
@@ -492,7 +492,11 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
 
     func bind(store: Store) { self.store = store }
     func attachDrawable(_ view: UIView) { player.drawable = view }
-    func attachAVLayer(_ layer: AVPlayerLayer) { avLayer = layer; if let av { layer.player = av } }
+    func attachAVLayer(_ layer: AVPlayerLayer, host: UIView) {
+        avLayer = layer; avHostView = host
+        if let av { layer.player = av }
+    }
+    private weak var avHostView: UIView?
 
     func start(url: URL, startAt: Double, ref: Store.PlayRef, kind: String, duration: Double?,
                title: String, subtitle: String?, fileId: Int?, live: Bool,
@@ -560,10 +564,10 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         Task { @MainActor in
             if let store, let fid = fileId,
                let mi = await store.mediaInfo(kind: kind, fileId: fid), mi.isHDR {
-                store.crumb("hdr: begin \(mi.hdr ?? "?") \(mi.width ?? 0)x\(mi.height ?? 0)@\(mi.fps ?? 0)")
+                await store.crumbSync("hdr: begin \(mi.hdr ?? "?") \(mi.width ?? 0)x\(mi.height ?? 0)@\(mi.fps ?? 0)")
                 await switchDisplayToHDR(mi)
             }
-            store?.crumb("av: creating player")
+            await store?.crumbSync("av: creating player")
             setupAVQueue()
             store?.crumb("av: playing")
         }
@@ -572,22 +576,31 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     private var displayWindow: UIWindow?
     @MainActor
     private func switchDisplayToHDR(_ mi: Store.MediaInfo) async {
-        let window = UIApplication.shared.connectedScenes
-            .compactMap({ $0 as? UIWindowScene })
-            .first(where: { $0.activationState == .foregroundActive })?.keyWindow
-            ?? UIApplication.shared.connectedScenes.compactMap({ ($0 as? UIWindowScene)?.keyWindow }).first
-        guard let window else { store?.crumb("hdr: no key window — skipping switch"); return }
-        let dm = window.avDisplayManager
-        guard dm.isDisplayCriteriaMatchingEnabled else {
-            // tvOS Settings → Video and Audio → Match Content is OFF; a manual
-            // switch is a guaranteed no-op, so don't pretend.
-            store?.crumb("hdr: Match Content OFF in tvOS Settings — no switch possible")
-            return
+        // Wait for the player view to actually be IN a window — i.e. the
+        // fullScreenCover presentation has settled. Setting display criteria
+        // while the scene is mid-presentation is a prime crash suspect, and the
+        // host view's own window is the RIGHT window to switch (not whichever
+        // window happens to be key mid-animation).
+        let w0 = Date()
+        while avHostView?.window == nil && Date().timeIntervalSince(w0) < 2 {
+            try? await Task.sleep(nanoseconds: 100_000_000)
         }
-        guard let criteria = hdrCriteria(mi) else { store?.crumb("hdr: criteria build failed"); return }
+        let window = avHostView?.window
+            ?? UIApplication.shared.connectedScenes
+                .compactMap({ $0 as? UIWindowScene })
+                .first(where: { $0.activationState == .foregroundActive })?.keyWindow
+        guard let window else { await store?.crumbSync("hdr: no window after 2s — skipping switch"); return }
+        await store?.crumbSync("hdr: window ok (host=\(avHostView?.window != nil)) after \(String(format: "%.1f", Date().timeIntervalSince(w0)))s")
+
+        // Every step below is an AWAITED breadcrumb, so a crash names its line.
+        let dm = window.avDisplayManager
+        await store?.crumbSync("hdr: avDisplayManager ok, matchingEnabled=\(dm.isDisplayCriteriaMatchingEnabled)")
+        guard dm.isDisplayCriteriaMatchingEnabled else { return }   // Match Content OFF → no-op
+        guard let criteria = hdrCriteria(mi) else { await store?.crumbSync("hdr: criteria build FAILED"); return }
         displayWindow = window
-        store?.crumb("hdr: setting preferredDisplayCriteria")
+        await store?.crumbSync("hdr: SETTING preferredDisplayCriteria now")
         dm.preferredDisplayCriteria = criteria
+        await store?.crumbSync("hdr: criteria SET ok — waiting for mode switch")
         // The switch is async and may not have started yet — give it a beat to
         // begin, then wait until it's no longer in progress (max 5s total).
         let t0 = Date()
@@ -595,7 +608,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         while dm.isDisplayModeSwitchInProgress && Date().timeIntervalSince(t0) < 5 {
             try? await Task.sleep(nanoseconds: 150_000_000)
         }
-        store?.crumb("hdr: switch settled after \(String(format: "%.1f", Date().timeIntervalSince(t0)))s (inProgress=\(dm.isDisplayModeSwitchInProgress))")
+        await store?.crumbSync("hdr: switch settled after \(String(format: "%.1f", Date().timeIntervalSince(t0)))s (inProgress=\(dm.isDisplayModeSwitchInProgress))")
     }
 
     // BT.2020 + PQ (or HLG) CMFormatDescription for AVDisplayCriteria.
