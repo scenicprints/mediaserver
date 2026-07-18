@@ -31,11 +31,12 @@ struct PlaySession: Identifiable {
 }
 
 extension PlayerView {
-    init(session: PlaySession, store: Store) {
+    init(session: PlaySession, store: Store, useAVPlayer: Bool = false) {
         self.init(url: session.url, startAt: session.startAt, ref: session.ref,
                   duration: session.duration, store: store, prerollURL: session.preroll,
                   title: session.title, subtitle: session.subtitle,
-                  fileId: session.fileId, live: session.live, upNext: session.upNext)
+                  fileId: session.fileId, live: session.live, upNext: session.upNext,
+                  useAVPlayer: useAVPlayer)
     }
 }
 
@@ -77,6 +78,10 @@ struct PlayerView: View {
     var fileId: Int? = nil
     var live: Bool = false
     var upNext: [UpNextItem] = []
+    // HDR path: drive playback with AVPlayer (the only tvOS pipeline that outputs
+    // real HDR + lights the badge) instead of libVLC, but keep this exact same
+    // web-styled HUD on top. SDR stays on VLCKit (direct-plays every codec).
+    var useAVPlayer: Bool = false
 
     @Environment(\.dismiss) private var dismiss
     @StateObject private var m = PlayerModel()
@@ -88,7 +93,8 @@ struct PlayerView: View {
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            VLCVideoView(model: m).ignoresSafeArea()
+            if useAVPlayer { AVPlayerLayerHost(model: m).ignoresSafeArea() }
+            else { VLCVideoView(model: m).ignoresSafeArea() }
 
             // Invisible catcher owns the remote when nothing else is up. It's a
             // Button (so the CENTER/select click pauses + shows the HUD) with a
@@ -114,7 +120,7 @@ struct PlayerView: View {
             m.bind(store: store)
             m.start(url: url, startAt: startAt, ref: ref, kind: kind, duration: duration,
                     title: title, subtitle: subtitle, fileId: fileId, live: live,
-                    preroll: prerollURL, upNext: upNext)
+                    preroll: prerollURL, upNext: upNext, useAVPlayer: useAVPlayer)
             focus = .catcher
         }
         .onDisappear { m.teardown() }
@@ -393,6 +399,24 @@ struct VLCVideoView: UIViewRepresentable {
     func updateUIView(_ uiView: UIView, context: Context) {}
 }
 
+// AVPlayer video host — a UIView backed by an AVPlayerLayer. AVPlayer + this
+// layer output true HDR on tvOS (and light the badge); the model owns the
+// AVPlayer and attaches its layer here.
+final class PlayerLayerUIView: UIView {
+    override class var layerClass: AnyClass { AVPlayerLayer.self }
+    var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+}
+struct AVPlayerLayerHost: UIViewRepresentable {
+    let model: PlayerModel
+    func makeUIView(context: Context) -> PlayerLayerUIView {
+        let v = PlayerLayerUIView(); v.backgroundColor = .black
+        v.playerLayer.videoGravity = .resizeAspect
+        model.attachAVLayer(v.playerLayer)
+        return v
+    }
+    func updateUIView(_ uiView: PlayerLayerUIView, context: Context) {}
+}
+
 // MARK: - Player model
 
 @MainActor
@@ -401,6 +425,19 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     enum Menu { case none, settings, aiPicker, aiProgress }
 
     private let player = VLCMediaPlayer()
+
+    // AVPlayer engine (HDR path). When `useAV` is true, all the transport/track/
+    // time logic below routes to AVPlayer instead of libVLC; the HUD is identical.
+    private var useAV = false
+    private var av: AVQueuePlayer?
+    private weak var avLayer: AVPlayerLayer?
+    private var avStatusObs: NSKeyValueObservation?
+    private var avRateObs: NSKeyValueObservation?
+    private var avTimeObs: Any?
+    private var avEndObs: NSObjectProtocol?
+    private var avLegible: AVMediaSelectionGroup?
+    private var avAudible: AVMediaSelectionGroup?
+    private var avMainItem: AVPlayerItem?   // the current main content item (vs the pre-roll)
 
     @Published var position: Double = 0
     @Published var duration: Double = 0
@@ -455,15 +492,17 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
 
     func bind(store: Store) { self.store = store }
     func attachDrawable(_ view: UIView) { player.drawable = view }
+    func attachAVLayer(_ layer: AVPlayerLayer) { avLayer = layer; if let av { layer.player = av } }
 
     func start(url: URL, startAt: Double, ref: Store.PlayRef, kind: String, duration: Double?,
                title: String, subtitle: String?, fileId: Int?, live: Bool,
-               preroll: URL?, upNext: [UpNextItem]) {
+               preroll: URL?, upNext: [UpNextItem], useAVPlayer: Bool = false) {
         self.ref = ref; self.kind = kind; self.fileId = fileId; self.mediaTitle = title
         self.mediaSubtitle = subtitle; self.declaredDuration = duration; self.live = live
         self.startAt = startAt; self.prerollURL = preroll; self.upNext = upNext
         self.mainURL = url; self.duration = duration ?? 0
-        player.delegate = self
+        self.useAV = useAVPlayer
+        if !useAV { player.delegate = self }
         flashControls()
         Task { @MainActor in
             // NOTE: we deliberately do NOT switch the TV into an HDR display mode
@@ -485,6 +524,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     }
 
     private func beginPlayback() {
+        if useAV { beginAVPlayback(); return }
         if let preroll = prerollURL {
             player.media = VLCMedia(url: preroll)
             Timer.scheduledTimer(withTimeInterval: 12, repeats: false) { [weak self] _ in
@@ -495,6 +535,127 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
             player.media = mediaWithFilters(u)
         }
         player.play()
+    }
+
+    // AVPlayer (HDR) engine. Streams the HLS remux (real HDR + badge). Optional
+    // pre-roll plays first via an AVQueuePlayer; when the queue advances to the
+    // main item we mark `onMain` and apply the resume seek.
+    private func beginAVPlayback() {
+        // The HDR path always streams the HLS remux, not the raw VLC URL.
+        let mainURLForAV: URL = (store?.hlsURL(kind: kind, fileId: fileId ?? -1)) ?? mainURL!
+        self.mainURL = mainURLForAV
+        var items: [AVPlayerItem] = []
+        if let preroll = prerollURL { items.append(AVPlayerItem(url: preroll)) }
+        let mainItem = AVPlayerItem(url: mainURLForAV)
+        items.append(mainItem)
+        let q = AVQueuePlayer(items: items)
+        q.appliesMediaSelectionCriteriaAutomatically = false
+        self.av = q
+        self.avMainItem = mainItem
+        avLayer?.player = q
+
+        // onMain flips true once the pre-roll finishes and the main item is current.
+        onMain = (prerollURL == nil)
+        observeAV(main: mainItem)
+        q.play()
+    }
+
+    private func observeAV(main mainItem: AVPlayerItem) {
+        guard let q = av else { return }
+        // Ready → (on the MAIN item) resume-seek once, then keep playing.
+        avStatusObs = mainItem.observe(\.status, options: [.new]) { [weak self] item, _ in
+            Task { @MainActor in
+                guard let self, item.status == .readyToPlay else { return }
+                if item === self.av?.currentItem { self.avResumeIfNeeded() }
+                self.refreshAVTracks(item)
+            }
+        }
+        avRateObs = q.observe(\.timeControlStatus, options: [.new]) { [weak self] p, _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.isPlaying = (p.timeControlStatus == .playing)
+                self.buffering = (p.timeControlStatus == .waitingToPlayAtSpecifiedRate)
+            }
+        }
+        avTimeObs = q.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.5, preferredTimescale: 600), queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.avTick() }
+        }
+        avEndObs = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: nil, queue: .main) { [weak self] note in
+            Task { @MainActor in self?.avItemEnded(note.object as? AVPlayerItem) }
+        }
+    }
+
+    private func avResumeIfNeeded() {
+        guard useAV, onMain, !seekedToStart, startAt > 1 else { return }
+        seekedToStart = true
+        av?.seek(to: CMTime(seconds: startAt, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .positiveInfinity)
+    }
+
+    private func avItemEnded(_ item: AVPlayerItem?) {
+        guard useAV, let item else { return }
+        if item === avMainItem {
+            // Main content finished → Up Next or dismiss.
+            if !upNext.isEmpty { playNext() } else { finish(save: true); finishedPlayback = true }
+        } else {
+            // Pre-roll finished; the queue has advanced to the main item.
+            onMain = true; seekedToStart = false
+            avResumeIfNeeded()
+        }
+    }
+
+    // AVPlayer per-tick UI update — mirrors handleTime for the AV engine.
+    private func avTick() {
+        guard useAV, onMain, let q = av, q.currentItem != nil else { return }
+        let t = q.currentTime().seconds
+        if t.isFinite { position = max(0, t) }
+        if duration <= 0, let d = q.currentItem?.duration.seconds, d.isFinite, d > 0 { duration = d }
+        if let r = q.currentItem?.loadedTimeRanges.last?.timeRangeValue {
+            let end = r.start.seconds + r.duration.seconds
+            if duration > 0, end.isFinite { buffered = min(1, end / duration) }
+        }
+        if let r = introRange { showSkipIntro = position >= r.start && position <= r.end }
+        if !upNext.isEmpty, duration > 0 { showUpNext = position >= duration - upNextLead && position < duration }
+        report(position: position)
+    }
+
+    // Populate the subtitle + audio menus from the HLS media-selection groups.
+    private func refreshAVTracks(_ item: AVPlayerItem) {
+        let asset = item.asset
+        if let g = asset.mediaSelectionGroup(forMediaCharacteristic: .legible) {
+            avLegible = g
+            // "Off" first (id -1), then each rendition by its option index.
+            var subs: [TrackOption] = [TrackOption(id: -1, label: "Off")]
+            for (i, opt) in g.options.enumerated() { subs.append(TrackOption(id: i, label: opt.displayName)) }
+            subtitleOptions = subs
+            // Captions OFF by default unless the viewer picked one.
+            if currentSubtitle < 0 { item.select(nil, in: g) }
+        }
+        if let g = asset.mediaSelectionGroup(forMediaCharacteristic: .audible) {
+            avAudible = g
+            var auds: [TrackOption] = []
+            for (i, opt) in g.options.enumerated() { auds.append(TrackOption(id: i, label: opt.displayName)) }
+            if auds.count > 1 { audioOptions = auds }
+            if let sel = item.currentMediaSelection.selectedMediaOption(in: g), let idx = g.options.firstIndex(of: sel) { currentAudio = idx }
+        }
+    }
+
+    // After AI subtitles finish, re-fetch the HLS master (now lists the new
+    // WebVTT rendition) at the current position and turn the newest track on.
+    private func avReloadForNewSubtitles(selectNewest: Bool) {
+        guard useAV, let q = av, let url = store?.hlsURL(kind: kind, fileId: fileId ?? -1) else { return }
+        let at = q.currentTime()
+        let item = AVPlayerItem(url: url)
+        q.removeAllItems(); q.insert(item, after: nil)
+        avMainItem = item
+        avStatusObs = item.observe(\.status, options: [.new]) { [weak self] it, _ in
+            Task { @MainActor in
+                guard let self, it.status == .readyToPlay else { return }
+                self.av?.seek(to: at, toleranceBefore: .zero, toleranceAfter: .positiveInfinity)
+                self.refreshAVTracks(it)
+                if selectNewest, let g = self.avLegible, !g.options.isEmpty { self.selectSubtitle(g.options.count - 1) }
+            }
+        }
+        q.play()
     }
 
     private func mediaWithFilters(_ url: URL) -> VLCMedia {
@@ -511,7 +672,9 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     private func loadMeta() async {
         guard let store, let fileId else { return }
         if kind == "episode", let pm = await store.playMeta(kind: kind, fileId: fileId) { introRange = pm.intro }
-        await reloadSubtitles()
+        // AV builds its subtitle list from the HLS media-selection groups
+        // (refreshAVTracks); the VLC path pulls the server track list.
+        if !useAV { await reloadSubtitles() }
     }
 
     private func reloadSubtitles() async {
@@ -523,21 +686,35 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     }
 
     // MARK: Transport
-    func togglePlay() { if player.isPlaying { player.pause() } else { player.play() } }
-    func jump(_ s: Int) { if s < 0 { player.jumpBackward(Int32(-s)) } else { player.jumpForward(Int32(s)) } }
+    func togglePlay() {
+        if useAV { if av?.timeControlStatus == .paused { av?.play() } else { av?.pause() }; return }
+        if player.isPlaying { player.pause() } else { player.play() }
+    }
+    func jump(_ s: Int) {
+        if useAV {
+            guard let q = av else { return }
+            let t = max(0, q.currentTime().seconds + Double(s))
+            q.seek(to: CMTime(seconds: t, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .positiveInfinity)
+            return
+        }
+        if s < 0 { player.jumpBackward(Int32(-s)) } else { player.jumpForward(Int32(s)) }
+    }
+    private var enginePlaying: Bool { useAV ? (av?.timeControlStatus == .playing) : player.isPlaying }
     func flashControls() {
         controlsVisible = true
         hideTimer?.invalidate()
         hideTimer = Timer.scheduledTimer(withTimeInterval: 3.5, repeats: false) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                if self.menu == PlayerModel.Menu.none && self.player.isPlaying { self.controlsVisible = false }
+                if self.menu == PlayerModel.Menu.none && self.enginePlaying { self.controlsVisible = false }
             }
         }
     }
     func skipIntro() {
         guard let end = introRange?.end else { return }
-        player.time = VLCTime(int: Int32(end * 1000)); showSkipIntro = false
+        if useAV { av?.seek(to: CMTime(seconds: end, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .positiveInfinity) }
+        else { player.time = VLCTime(int: Int32(end * 1000)) }
+        showSkipIntro = false
     }
     func closeMenu() { menu = .none }
 
@@ -551,12 +728,25 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     }
     func selectSubtitle(_ id: Int) {
         currentSubtitle = id
+        if useAV {
+            guard let g = avLegible, let item = av?.currentItem else { return }
+            if id == -1 || id >= g.options.count { item.select(nil, in: g) }
+            else { item.select(g.options[id], in: g) }
+            return
+        }
         if id == -1 { player.currentVideoSubTitleIndex = -1; return }
         if let store, let fileId, let url = store.subtitleURL(kind: kind, fileId: fileId, idx: id) {
             _ = player.addPlaybackSlave(url, type: .subtitle, enforce: true)
         }
     }
-    func selectAudio(_ id: Int) { currentAudio = id; player.currentAudioTrackIndex = Int32(id) }
+    func selectAudio(_ id: Int) {
+        currentAudio = id
+        if useAV {
+            if let g = avAudible, let item = av?.currentItem, id >= 0, id < g.options.count { item.select(g.options[id], in: g) }
+            return
+        }
+        player.currentAudioTrackIndex = Int32(id)
+    }
     private func refreshAudioTracks() {
         let idxs = (player.audioTrackIndexes as? [NSNumber]) ?? []
         let names = (player.audioTrackNames as? [String]) ?? []
@@ -580,8 +770,14 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
             aiActive = false
             if let j = job, j.status == "done" {
                 aiPct = 100
-                await reloadSubtitles()
-                if let newest = subtitleOptions.last(where: { $0.id >= 0 }) { selectSubtitle(newest.id) }
+                if useAV {
+                    // Re-fetch the HLS master (now lists the new WebVTT rendition)
+                    // at the current position, then turn the new track on.
+                    avReloadForNewSubtitles(selectNewest: true)
+                } else {
+                    await reloadSubtitles()
+                    if let newest = subtitleOptions.last(where: { $0.id >= 0 }) { selectSubtitle(newest.id) }
+                }
                 if menu == .aiProgress { menu = .none }
             } else {
                 aiPhase = job?.error ?? "Couldn't generate subtitles"
@@ -602,7 +798,19 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         ref = next.ref; fileId = next.fileId; mediaTitle = next.title
         mediaSubtitle = next.subtitle; declaredDuration = next.duration
         duration = next.duration ?? 0; position = 0; currentSubtitle = -1
-        if let url = store.episodeStreamURL(fileId: next.fileId) {
+        if useAV {
+            // Swap the queue over to the next episode's HLS remux.
+            if let url = store.hlsURL(kind: "episode", fileId: next.fileId), let q = av {
+                q.removeAllItems()
+                let item = AVPlayerItem(url: url)
+                q.insert(item, after: nil)
+                avMainItem = item
+                avStatusObs = item.observe(\.status, options: [.new]) { [weak self] it, _ in
+                    Task { @MainActor in guard let self, it.status == .readyToPlay else { return }; self.refreshAVTracks(it) }
+                }
+                q.play()
+            }
+        } else if let url = store.episodeStreamURL(fileId: next.fileId) {
             player.media = mediaWithFilters(url); player.play()
         }
         Task { await loadMeta() }
@@ -658,9 +866,13 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         let watched = (total.map { position / $0 } ?? 0) > 0.92
         if let store, let ref { Task { await store.saveProgress(ref, position: position, duration: total, watched: watched ? true : nil) } }
     }
+    private var currentPositionSeconds: Double {
+        if useAV { let t = av?.currentTime().seconds ?? 0; return t.isFinite ? t : 0 }
+        return Double(player.time.intValue) / 1000.0
+    }
     private func heartbeat(position: Double) {
         guard let store else { return }
-        let paused = !player.isPlaying
+        let paused = !enginePlaying
         let total = declaredDuration ?? (duration > 0 ? duration : nil)
         Task { await store.sessionHeartbeat(sessionId: sessionId, kind: reportKind, fileId: fileId, title: mediaTitle,
                                             subtitle: mediaSubtitle, mode: "direct", position: position, duration: total,
@@ -670,7 +882,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         guard !finished else { return }
         finished = true
         if let store { let sid = sessionId; Task { await store.sessionEnd(sessionId: sid) } }
-        let pos = Double(player.time.intValue) / 1000.0
+        let pos = currentPositionSeconds
         if save, onMain, !live, pos > 1, let store, let ref {
             let total = declaredDuration ?? (duration > 0 ? duration : nil)
             let watched = (total.map { pos / $0 } ?? 0) > 0.92
@@ -680,6 +892,13 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     func teardown() {
         hideTimer?.invalidate()
         finish(save: true)
-        player.stop()
+        if useAV {
+            avStatusObs?.invalidate(); avRateObs?.invalidate()
+            if let avTimeObs { av?.removeTimeObserver(avTimeObs) }; avTimeObs = nil
+            if let avEndObs { NotificationCenter.default.removeObserver(avEndObs) }; avEndObs = nil
+            av?.pause(); av?.removeAllItems(); av = nil
+        } else {
+            player.stop()
+        }
     }
 }
