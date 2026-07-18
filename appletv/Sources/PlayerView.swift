@@ -541,25 +541,10 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     // AVPlayer (HDR) engine. Streams the HLS remux (real HDR + badge). Optional
     // pre-roll plays first via an AVQueuePlayer; when the queue advances to the
     // main item we mark `onMain` and apply the resume seek.
+    // AVPlayer already engages the tvOS HDR display switch on its own (the badge
+    // lights) once the content is HDR and the server tags the HLS master
+    // VIDEO-RANGE=PQ — no manual AVDisplayManager call needed (that crashed).
     private func beginAVPlayback() {
-        Task { @MainActor in
-            // tvOS 26 REJECTS a VIDEO-RANGE=PQ HLS variant unless the display is
-            // already in HDR mode (the Apple TV fetches the master then refuses to
-            // load a single segment). AVPlayerViewController switches the display
-            // automatically; our AVPlayerLayer doesn't — so switch it ourselves
-            // BEFORE loading the stream. Safe with AVPlayer: AVFoundation handles
-            // display reconfigures natively (the crash that hit VLCKit was its
-            // OpenGL video surface dying mid-switch — a different pipeline).
-            if let store, let fid = fileId,
-               let mi = await store.mediaInfo(kind: kind, fileId: fid), mi.isHDR {
-                applyHDRDisplayMode(mi)
-                try? await Task.sleep(nanoseconds: 700_000_000)   // let the mode settle
-            }
-            setupAVQueue()
-        }
-    }
-
-    private func setupAVQueue() {
         // The HDR path always streams the HLS remux, not the raw VLC URL.
         let mainURLForAV: URL = (store?.hlsURL(kind: kind, fileId: fileId ?? -1)) ?? mainURL!
         self.mainURL = mainURLForAV
@@ -577,33 +562,6 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         onMain = (prerollURL == nil)
         observeAV(main: mainItem)
         q.play()
-    }
-
-    // Switch the Apple TV into the content's HDR (PQ/HLG) display mode so tvOS
-    // will host the HDR HLS variant. Built from the probed color info.
-    private var displayWindow: UIWindow?
-    private func applyHDRDisplayMode(_ i: Store.MediaInfo) {
-        guard let fps = i.fps,
-              let window = UIApplication.shared.connectedScenes
-                .compactMap({ ($0 as? UIWindowScene)?.keyWindow }).first
-        else { return }
-        let primaries = kCMFormatDescriptionColorPrimaries_ITU_R_2020
-        let matrix = kCMFormatDescriptionYCbCrMatrix_ITU_R_2020
-        let transfer: CFString = (i.hdr == "hlg")
-            ? kCMFormatDescriptionTransferFunction_ITU_R_2100_HLG
-            : kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ
-        let ext: [CFString: Any] = [
-            kCMFormatDescriptionExtension_ColorPrimaries: primaries,
-            kCMFormatDescriptionExtension_TransferFunction: transfer,
-            kCMFormatDescriptionExtension_YCbCrMatrix: matrix
-        ]
-        var fmt: CMFormatDescription?
-        CMVideoFormatDescriptionCreate(allocator: kCFAllocatorDefault, codecType: kCMVideoCodecType_HEVC,
-            width: Int32(i.width ?? 3840), height: Int32(i.height ?? 2160),
-            extensions: ext as CFDictionary, formatDescriptionOut: &fmt)
-        guard let fmt else { return }
-        displayWindow = window
-        window.avDisplayManager.preferredDisplayCriteria = AVDisplayCriteria(refreshRate: Float(fps), formatDescription: fmt)
     }
 
     private func observeAV(main mainItem: AVPlayerItem) {
@@ -944,7 +902,6 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
             if let avTimeObs { av?.removeTimeObserver(avTimeObs) }; avTimeObs = nil
             if let avEndObs { NotificationCenter.default.removeObserver(avEndObs) }; avEndObs = nil
             av?.pause(); av?.removeAllItems(); av = nil
-            displayWindow?.avDisplayManager.preferredDisplayCriteria = nil   // let the TV revert
         } else {
             player.stop()
         }
