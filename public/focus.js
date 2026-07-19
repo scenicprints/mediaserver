@@ -128,7 +128,14 @@
     // row until its edge touched the viewport, so moving down left rows flush
     // against the bottom (then clipped by TV overscan) and never comfortably in
     // view; `center` keeps the active row in the middle of the screen.
-    if (!noScroll(el)) el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
+    // On a real TV, 'auto' resolves to instant (app.js sets scroll-behavior) —
+    // smooth-scroll animation frames are what make a TV WebView feel laggy.
+    const behavior = document.body.classList.contains('tv-mode') ? 'auto' : 'smooth';
+    if (!noScroll(el)) el.scrollIntoView({ block: 'center', inline: 'center', behavior });
+    // Nav tabs can overflow their strip on narrow/overscanned screens: slide the
+    // strip (inline only — 'nearest' never scrolls the page for the fixed bar)
+    // so focus never lands on a clipped, invisible tab.
+    else if (el.closest('.nav-links')) el.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'auto' });
   }
 
   // Pick a sensible landing spot when focus is (re)initialized on a screen:

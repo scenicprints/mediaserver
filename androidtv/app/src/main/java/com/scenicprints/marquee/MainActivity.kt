@@ -110,30 +110,63 @@ class MainActivity : Activity() {
         fun openApp(url: String) { runOnUiThread { openExternal(url) } }
     }
 
-    // Streaming domains we hand off to a native app. The bridge is only meant for
-    // these deep-links from our own UI, so we allowlist them (defense in depth).
-    private val streamHosts = listOf(
-        "netflix.com", "primevideo.com", "amazon.com", "disneyplus.com",
-        "hulu.com", "max.com", "tv.apple.com", "paramountplus.com", "peacocktv.com"
+    // Streaming domains we hand off to a native app, each mapped to its known
+    // Android TV package(s), best first. The bridge is only meant for these
+    // deep-links from our own UI, so this doubles as an allowlist. These must
+    // also be declared in the manifest's <queries> (Android 11+ hides other
+    // packages from us otherwise).
+    private val streamApps = mapOf(
+        "netflix.com" to listOf("com.netflix.ninja"),
+        "primevideo.com" to listOf("com.amazon.amazonvideo.livingroom", "com.amazon.avod.thirdpartyclient"),
+        "amazon.com" to listOf("com.amazon.amazonvideo.livingroom", "com.amazon.avod.thirdpartyclient"),
+        "disneyplus.com" to listOf("com.disney.disneyplus"),
+        "hulu.com" to listOf("com.hulu.livingroomplus", "com.hulu.plus"),
+        "max.com" to listOf("com.wbd.stream", "com.hbo.hbonow"),
+        "tv.apple.com" to listOf("com.apple.atve.androidtv.appletv"),
+        "paramountplus.com" to listOf("com.cbs.ott", "com.cbs.ca"),
+        "peacocktv.com" to listOf("com.peacocktv.peacockandroid")
     )
 
-    /** Launch an https streaming URL in its native app via an ACTION_VIEW intent —
-     *  Google TV routes it to the installed app through Android App Links. We
-     *  prefer a real (non-browser) app and fall back to the browser only if that's
-     *  all that can handle it. Fully guarded, so it can never crash the app. */
+    /** Launch a streaming URL in the service's real TV app. TV apps rarely
+     *  register web intent-filters for their site URLs, so a plain ACTION_VIEW
+     *  fell through to whatever calls itself a browser — on many TVs that's
+     *  "Downloader" (the bug this replaces). Instead: try the URL scoped to each
+     *  known package (lands in the app, on its title search if it takes URLs),
+     *  then just open the app, and NEVER hand the URL to a browser. */
     private fun openExternal(url: String) {
         val uri = try { Uri.parse(url) } catch (_: Exception) { return }
         if (uri.scheme != "https") return
         val host = (uri.host ?: "").removePrefix("www.")
-        if (streamHosts.none { host == it || host.endsWith(".$it") }) return
-        try {
-            val i = Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            if (Build.VERSION.SDK_INT >= 30) i.addFlags(Intent.FLAG_ACTIVITY_REQUIRE_NON_BROWSER)
-            startActivity(i)
-        } catch (_: Exception) {
-            // Only a browser (or nothing) can handle it — open it however we can.
-            try { startActivity(Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) } catch (_: Exception) {}
+        val pkgs = streamApps.entries.firstOrNull { host == it.key || host.endsWith(".${it.key}") }?.value ?: return
+        // 1) The URL, scoped to the service's own app.
+        for (pkg in pkgs) {
+            try {
+                startActivity(Intent(Intent.ACTION_VIEW, uri).setPackage(pkg).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                return
+            } catch (_: Exception) { /* not installed / doesn't take URLs — next */ }
         }
+        // 2) At least open the app itself (its TV launcher entry).
+        for (pkg in pkgs) {
+            try {
+                val launch = packageManager.getLeanbackLaunchIntentForPackage(pkg)
+                    ?: packageManager.getLaunchIntentForPackage(pkg)
+                if (launch != null) { startActivity(launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); return }
+            } catch (_: Exception) {}
+        }
+        // 3) Some other REAL app may claim the link (never a browser; only Android
+        //    11+ can promise that, so older devices stop at the toast instead).
+        if (Build.VERSION.SDK_INT >= 30) {
+            try {
+                startActivity(
+                    Intent(Intent.ACTION_VIEW, uri)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REQUIRE_NON_BROWSER)
+                )
+                return
+            } catch (_: Exception) {}
+        }
+        try {
+            android.widget.Toast.makeText(this, "That app isn't installed on this TV", android.widget.Toast.LENGTH_LONG).show()
+        } catch (_: Exception) {}
     }
 
     /** TV is always fullscreen: hide the status + navigation bars. */

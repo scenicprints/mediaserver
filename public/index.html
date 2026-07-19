@@ -52,6 +52,7 @@
         <button class="tab active" data-tab="general">General</button>
         <button class="tab" data-tab="audio">Audio</button>
         <button class="tab" data-tab="streaming">Streaming</button>
+        <button class="tab" data-tab="requests">Requests</button>
         <button class="tab admin-only" data-tab="sessions">Now Playing</button>
       </div>
 
@@ -95,7 +96,7 @@
 
         <div class="sub-account admin-only">
           <h3>Requests (Radarr &amp; Sonarr)</h3>
-          <p class="muted" id="arr-status">Connect Radarr (movies) and Sonarr (TV) so you can request titles from the Requests tab.</p>
+          <p class="muted" id="arr-status">Connect Radarr (movies) and Sonarr (TV) so you can request titles from the Requests tab up top or here in Settings.</p>
           <div class="arr-row"><input id="radarr-url" class="sa-input" placeholder="Radarr URL — e.g. http://localhost:7878" /><input id="radarr-key" class="sa-input" placeholder="Radarr API key" autocomplete="off" /></div>
           <div class="arr-row"><input id="sonarr-url" class="sa-input" placeholder="Sonarr URL — e.g. http://localhost:8989" /><input id="sonarr-key" class="sa-input" placeholder="Sonarr API key" autocomplete="off" /></div>
           <button class="btn primary" id="arr-save">Save &amp; test connection</button>
@@ -167,6 +168,12 @@
           <p class="muted">Merge your streaming services into Movies &amp; TV Shows. Streaming titles get a provider badge and open that service when you select them — they can't play in-app (that's DRM). Tap a source to show or hide it:</p>
           <div id="sources-list" class="sources-list"></div>
         </div>
+      </div>
+
+      <!-- Requests lives here too (not just the top bar): TVs overscan-crop the
+           ends of the bar, so on TV the ribbon tab is hidden and this is the way in. -->
+      <div class="tab-panel" data-panel="requests">
+        <div class="requests requests-embed"></div>
       </div>
 
       <div class="tab-panel" data-panel="sessions">

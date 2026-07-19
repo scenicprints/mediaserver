@@ -32,6 +32,15 @@ Invite code on the Dell: `lantern-6274`.
 **✅ Android TV app v1** shipped — WebView shell in `androidtv/`; GitHub Actions builds a debug
 APK to the **`marquee-tv-latest`** release for sideloading onto the friend's TCL Google TV.
 **✅ Forced update splash** (admin) with changelog + skip.
+**✅ Google TV polish pass (2026-07-19)** — from real TCL testing: Requests moved into
+**Settings ▸ Requests** (ribbon tab hidden on TV — overscan clipped it out of reach) and the
+ribbon got a vertical overscan inset + no-wrap tabs + scrollable strip under remote focus;
+**Live TV guide compacted on TV** (small preview marquee → ~5 channel rows visible even on a
+540px-tall viewport); **branded buffering splash** (MARQUEE wordmark + gradient progress bar);
+**TV performance pass** (no backdrop-filter blurs / big shadows, opacity dim instead of CSS
+filters, instant scrolling, 12-card rows, per-row layout+paint containment); native
+**streaming deep-links** now launch the real service app by package (Netflix/Disney+/… via
+`<queries>` + explicit intents) instead of falling through to a "browser" like Downloader.
 
 **🔜 Next:**
 1. **Verify the TV app on the real TCL** — D-pad nav (arrows/Enter → focus engine), the Back

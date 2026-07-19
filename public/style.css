@@ -694,18 +694,34 @@ button { font-family: inherit; }
    visual — it never intercepts remote/mouse input. */
 .vp-buffering {
   position: absolute; inset: 0; z-index: 7; pointer-events: none;
-  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px;
+  background:
+    radial-gradient(640px 320px at 50% 46%, rgba(108, 92, 255, 0.14), transparent 70%),
+    rgba(5, 6, 9, 0.62);
 }
-.vp-buffering .vp-spinner {
-  width: 62px; height: 62px; border-radius: 50%;
-  border: 5px solid rgba(255, 255, 255, 0.22); border-top-color: var(--accent);
-  animation: vp-spin 0.9s linear infinite;
+/* The wordmark, breathing softly — same gradient text as the nav brand. */
+.vp-buffering .vp-buf-brand {
+  font-size: 40px; font-weight: 800; letter-spacing: 10px; text-indent: 10px; /* indent recenters the letterspaced text */
+  background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent;
+  animation: buf-breathe 2.4s ease-in-out infinite;
 }
+@keyframes buf-breathe { 0%, 100% { opacity: 0.65; } 50% { opacity: 1; } }
+/* Gradient bar: determinate while the head-start cushion fills; .ind = a
+   sweeping indeterminate segment for mid-play rebuffers. */
+.vp-buffering .vp-buf-bar {
+  width: min(340px, 56vw); height: 4px; border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16); overflow: hidden;
+}
+.vp-buffering .vp-buf-bar i {
+  display: block; height: 100%; width: 0%; border-radius: 999px;
+  background: var(--grad); transition: width 0.3s ease;
+}
+.vp-buffering .vp-buf-bar.ind i { width: 40%; transition: none; animation: buf-sweep 1.2s ease-in-out infinite; }
+@keyframes buf-sweep { 0% { transform: translateX(-110%); } 100% { transform: translateX(290%); } }
 .vp-buffering .vp-buftext {
-  color: #fff; font-weight: 700; font-size: 15px; letter-spacing: 0.3px;
-  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.8);
+  color: #c9cfdf; font-weight: 600; font-size: 13px; letter-spacing: 1.5px; text-transform: uppercase;
+  font-variant-numeric: tabular-nums; text-shadow: 0 1px 6px rgba(0, 0, 0, 0.8);
 }
-@keyframes vp-spin { to { transform: rotate(360deg); } }
 /* Remote/keyboard focus ring — same language as the other .pfocus controls. */
 .vp-skipbtn.pfocus {
   background: rgba(255, 255, 255, 0.18); color: #fff; transform: scale(1.06);
@@ -776,8 +792,10 @@ body.tv-nav { cursor: none; }
 /* Cards: the focused poster scales up with a bright ring + accent glow, and
    its hover-info overlay reveals; siblings dim. Hover scaling is suppressed in
    remote mode so the two highlight systems never fight. */
-body.tv-nav .card { transition: transform 0.18s cubic-bezier(0.2, 0.7, 0.2, 1), filter 0.18s ease; }
-body.tv-nav .card:not(.tv-focus) { filter: brightness(0.58) saturate(0.85); }
+/* Dim with opacity, not filter: brightness()/saturate() forces a CPU repaint of
+   every card on each focus move, which visibly lags low-power TV WebViews. */
+body.tv-nav .card { transition: transform 0.15s cubic-bezier(0.2, 0.7, 0.2, 1), opacity 0.15s ease; }
+body.tv-nav .card:not(.tv-focus) { opacity: 0.58; }
 body.tv-nav .card:hover { transform: none; }
 .card.tv-focus { transform: scale(1.16); z-index: 8; }
 .card.tv-focus .poster {
@@ -825,6 +843,10 @@ body.tv-mode .nav, body.tv-nav .nav {
   gap: 16px;
 }
 body.tv-mode .nav-links, body.tv-nav .nav-links { gap: 2px; min-width: 0; }
+/* Never let a tab label wrap ("TV Shows" → two lines) — a wrapped tab doubles
+   the bar's height. The strip scrolls its overflow instead (focus.js slides a
+   clipped tab into view). */
+body.tv-mode .nav-link, body.tv-nav .nav-link { white-space: nowrap; }
 body.tv-mode .nav-search, body.tv-nav .nav-search { width: 150px; }
 body.tv-mode .nav-search:focus, body.tv-nav .nav-search:focus { width: 170px; }
 /* The brand and settings are the two edge-most items overscan would eat — never
@@ -938,3 +960,56 @@ body.tv-mode .vp-fs { display: none; }
 .sess-meta, .sess-eng, .sess-dev, .sess-diag { font-size: 12px; margin-top: 5px; line-height: 1.4; }
 .sess-eng, .sess-diag { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; font-size: 11.5px; }
 .sess-diag { color: var(--accent-2); }
+
+/* ---------- Requests inside the Settings sheet ---------- */
+/* The same Requests UI as the top-bar tab, rebuilt into a Settings panel (on TV
+   it's the only way in — overscan crops the ribbon). The sheet supplies its own
+   gutters, so drop the page ones. */
+.sheet .requests-embed { padding: 14px 0 4px; max-width: none; margin: 0; }
+.sheet .requests-embed .req-title { font-size: 22px; }
+.sheet .requests-embed .req-input { font-size: 15px; padding: 12px 16px; }
+
+/* ---------- TV mode: overscan + performance ---------- */
+/* TVs crop a few percent off every edge (overscan). The horizontal inset lives
+   up in the nav section; this is the VERTICAL inset so the bar isn't half-eaten
+   at the top of the screen. Page top-paddings grow to match (PAGE_TOP, app.js). */
+body.tv-mode .nav { padding-top: calc(14px + 2vh); }
+/* Requests lives in Settings ▸ Requests on TV: with seven tabs the strip
+   overflows an overscanned 960–1280px canvas and remote focus lands on clipped,
+   invisible tabs (the "can't get to Requests" bug). Six fit. */
+body.tv-mode .nav-link[data-view="requests"] { display: none; }
+
+/* -- Performance. This UI runs in a WebView on low-power TV SoCs (TCL etc).
+   backdrop-filter live-blurs everything behind the element every frame — the
+   biggest jank source — and huge blurred box-shadows are repainted on every
+   focus move. None of it reads at 10 feet, so TV mode goes matte. -- */
+body.tv-mode .nav { transition: none; }
+body.tv-mode .nav.scrolled { backdrop-filter: none; background: rgba(9, 10, 14, 0.97); }
+body.tv-mode .btn { backdrop-filter: none; }
+body.tv-mode .modal { backdrop-filter: none; background: rgba(6, 7, 10, 0.9); }
+body.tv-mode .update-overlay { backdrop-filter: none; }
+body.tv-mode .detail-close { backdrop-filter: none; }
+body.tv-mode .vp-transport button { backdrop-filter: none; }
+body.tv-mode .poster, body.tv-mode .coll-poster, body.tv-mode .sc-poster { box-shadow: none; }
+body.tv-mode .skel { animation: none; }
+/* Instant row scrolling: smooth-scroll animation frames are what make D-pad
+   navigation feel laggy on a TV (the page-level equivalent is set in app.js). */
+body.tv-mode .row-track { scroll-behavior: auto; }
+/* Isolate each row's layout+paint so a focus change in one row can't force
+   work across the whole page. */
+body.tv-mode .row { contain: layout paint; }
+
+/* -- Live TV: shrink the preview "marquee" so the guide gets the screen. TV
+   viewports can be as short as 540 CSS px; the old 40% + 250px-minimum preview
+   left room for barely 1.5 channel rows. -- */
+body.tv-mode .lt-preview { flex: 0 0 30%; min-height: 130px; }
+body.tv-mode .lt-preview-body { padding: 0 4vw 10px; max-width: 640px; }
+body.tv-mode .lt-chan-badge { margin-bottom: 5px; }
+body.tv-mode .lt-title { font-size: 22px; margin: 0 0 5px; }
+body.tv-mode .lt-over { display: none; }
+body.tv-mode .lt-meta { margin-bottom: 7px; }
+body.tv-mode .lt-prog { height: 4px; margin-bottom: 5px; }
+body.tv-mode .lt-times { margin-bottom: 8px; font-size: 11.5px; }
+body.tv-mode .lt-actions .btn { padding: 8px 16px; font-size: 13px; }
+body.tv-mode .lt-erow { height: 54px; }
+body.tv-mode .lt-hint { display: none; }

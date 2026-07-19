@@ -52,7 +52,18 @@ const TV_MODE = new URLSearchParams(location.search).has('tv') || localStorage.g
 if (TV_MODE) {
   localStorage.setItem('tvMode', '1');
   document.body.classList.add('tv-mode');
+  // TV WebViews (TCL etc.) drop frames on smooth scrolling — instant jumps feel
+  // snappier and are what tvOS-style focus engines do anyway. focus.js passes
+  // behavior:'auto', which resolves to whatever these computed styles say.
+  document.documentElement.style.scrollBehavior = 'auto';
+  // The TV nav bar carries an extra overscan inset (see style.css), so focus
+  // scrolling and page content need a taller clearance under it.
+  document.documentElement.style.scrollPaddingTop = '112px';
 }
+// TVs get a taller clearance under the nav (overscan inset) and shorter rows —
+// hundreds of cards in one page is what makes a low-power TV WebView feel laggy.
+const PAGE_TOP = TV_MODE ? '96px' : '78px';
+const ROW_N = TV_MODE ? 12 : 24;
 
 // ---------- Session persistence for the LG webOS TV app ONLY ----------
 // The LG webOS app runtime doesn't persist the server's HttpOnly login cookie
@@ -223,7 +234,7 @@ function seasonalRow(pool) {
   const items = pool.filter((p) => t.match(p.x)).sort((a, b) => (b.x.rating || 0) - (a.x.rating || 0));
   if (items.length < 3) return null;
   const cards = (n) => items.slice(0, n).map((p) => buildMediaCard(p.x, p.kind));
-  return { title: t.title, cards: cards(30), seeAll: () => ({ title: t.title, cards: cards(items.length) }) };
+  return { title: t.title, cards: cards(TV_MODE ? ROW_N : 30), seeAll: () => ({ title: t.title, cards: cards(items.length) }) };
 }
 
 function renderView() {
@@ -236,7 +247,7 @@ function renderView() {
   rowsEl.style.paddingTop = '';
   const top = [], rest = [];
   const byYear = (a, b) => (b.year || 0) - (a.year || 0);
-  const push = (arr, title, list, kind) => { if (list.length) arr.push({ title, kind, cards: mediaCards(list.slice(0, 24), kind), seeAll: () => ({ title, cards: mediaCards(list, kind) }) }); };
+  const push = (arr, title, list, kind) => { if (list.length) arr.push({ title, kind, cards: mediaCards(list.slice(0, ROW_N), kind), seeAll: () => ({ title, cards: mediaCards(list, kind) }) }); };
 
   if (currentView === 'movies') {
     setHero(movies.filter((m) => m.backdrop));
@@ -269,7 +280,7 @@ function renderView() {
     const mixed = [...movies.filter((m) => m.backdrop), ...shows.filter((s) => s.backdrop)].sort(byRating);
     setHero(mixed);
     if (continueItems.length) top.push({ title: 'Continue Watching', cards: continueCards(continueItems) });
-    top.push({ title: 'Recently Added', cards: mixedRecent(24) });
+    top.push({ title: 'Recently Added', cards: mixedRecent(ROW_N) });
     push(top, 'Recently Released', [...movies].sort(byYear), 'movie');
     push(top, 'Recommended', recommended(movies), 'movie');
     push(rest, 'Movies', [...movies].sort(byRating), 'movie');
@@ -292,7 +303,7 @@ function renderView() {
 let libraryKind = 'movie';
 function renderLibrary() {
   heroEl.classList.add('hidden');
-  rowsEl.style.paddingTop = '78px';
+  rowsEl.style.paddingTop = PAGE_TOP;
   rowsEl.innerHTML = '';
   const list = (libraryKind === 'tv' ? shows : movies).slice().sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: 'base' }));
   const groups = {};
@@ -335,7 +346,7 @@ function renderLibrary() {
 let collectionKind = 'movie';
 async function renderCollections() {
   heroEl.classList.add('hidden');
-  rowsEl.style.paddingTop = '78px';
+  rowsEl.style.paddingTop = PAGE_TOP;
   rowsEl.innerHTML = '';
   const wrap = document.createElement('div');
   wrap.className = 'library';
@@ -405,24 +416,24 @@ let reqProfiles = { radarr: null, sonarr: null };   // { profiles:[{id,name}], d
 let reqMovieProfile = null, reqTvProfile = null;     // chosen quality profile ids
 function stopRequestsPolling() { clearTimeout(reqQueueTimer); reqQueueTimer = null; }
 
-async function renderRequests() {
-  heroEl.classList.add('hidden');
-  rowsEl.style.paddingTop = '78px';
-  rowsEl.innerHTML = `
-    <div class="requests">
+// The Requests UI lives in two places — the top-bar tab and a Settings tab.
+// TVs overscan-crop the ends of the top bar, so on TV the ribbon tab is hidden
+// (style.css) and Settings ▸ Requests is the home for it. It therefore builds
+// into whatever container it's given and scopes every lookup to it.
+async function buildRequestsUI(box) {
+  box.innerHTML = `
       <div class="req-head">
         <h2 class="req-title">Request something</h2>
-        <p class="muted" id="req-sub">Can't find a movie or show? Search for it — it'll be sent to your downloaders and show up when it's ready.</p>
+        <p class="muted req-sub">Can't find a movie or show? Search for it — it'll be sent to your downloaders and show up when it's ready.</p>
         <div class="req-controls">
-          <input id="req-search" class="req-input" type="search" placeholder="Search for a movie or TV show to request…" autocomplete="off" />
-          <div id="req-quality" class="req-quality"></div>
+          <input class="req-input" type="search" placeholder="Search for a movie or TV show to request…" autocomplete="off" />
+          <div class="req-quality"></div>
         </div>
       </div>
-      <div id="req-queue" class="req-queue"></div>
-      <div id="req-results" class="req-results"></div>
-    </div>`;
-  const input = document.getElementById('req-search');
-  const results = document.getElementById('req-results');
+      <div class="req-queue"></div>
+      <div class="req-results"></div>`;
+  const input = box.querySelector('.req-input');
+  const results = box.querySelector('.req-results');
 
   let status;
   try { status = await (await fetch('/api/requests/status')).json(); } catch (_e) { status = {}; }
@@ -436,17 +447,22 @@ async function renderRequests() {
     results.innerHTML = `<div class="req-empty">
       <p><b>Requests need Radarr and/or Sonarr.</b></p>
       <p class="muted">${detail}</p>
-      <button class="btn primary" id="req-settings">⚙ Open Settings</button></div>`;
-    document.getElementById('req-settings').addEventListener('click', openSettings);
+      <button class="btn primary req-settings-btn">⚙ Open Settings</button></div>`;
+    results.querySelector('.req-settings-btn').addEventListener('click', () => {
+      // Already inside the Settings sheet (the Requests tab)? Jump to General,
+      // where the Radarr/Sonarr keys live. Otherwise open Settings.
+      const gen = box.closest('#settings') && document.querySelector('#settings .settings-tabs .tab[data-tab="general"]');
+      if (gen) gen.click(); else openSettings();
+    });
     input.disabled = true;
     return;
   }
-  document.getElementById('req-sub').textContent =
+  box.querySelector('.req-sub').textContent =
     `Connected to ${[radarrOk && 'Radarr (movies)', sonarrOk && 'Sonarr (TV)'].filter(Boolean).join(' and ')}. Search below.`;
 
   // Quality picker (one select per configured service).
   try { reqProfiles = await (await fetch('/api/requests/profiles')).json(); } catch (_e) {}
-  renderQualityPicker(radarrOk, sonarrOk);
+  renderQualityPicker(box, radarrOk, sonarrOk);
 
   // On a TV, don't auto-focus (it traps the remote in the field). Focus the box
   // only for mouse/desktop; a remote lands on it via the focus engine and Enter.
@@ -459,17 +475,26 @@ async function renderRequests() {
     reqSearchTimer = setTimeout(() => doRequestSearch(q, results), 350);
   });
 
-  // Live download queue, refreshed while this view is open.
+  // Live download queue, refreshed while this Requests UI is still on screen
+  // (its view/tab may close underneath us — offsetParent nulls when hidden).
+  const queueBox = box.querySelector('.req-queue');
   const pollQueue = async () => {
-    if (currentView !== 'requests') return;
-    await loadQueue();
+    if (!box.isConnected || !box.offsetParent) return;
+    await loadQueue(queueBox);
     reqQueueTimer = setTimeout(pollQueue, 8000);
   };
   pollQueue();
 }
 
-function renderQualityPicker(radarrOk, sonarrOk) {
-  const wrap = document.getElementById('req-quality'); if (!wrap) return;
+async function renderRequests() {
+  heroEl.classList.add('hidden');
+  rowsEl.style.paddingTop = PAGE_TOP;
+  rowsEl.innerHTML = '<div class="requests"></div>';
+  buildRequestsUI(rowsEl.querySelector('.requests'));
+}
+
+function renderQualityPicker(box, radarrOk, sonarrOk) {
+  const wrap = box.querySelector('.req-quality'); if (!wrap) return;
   reqMovieProfile = reqMovieProfile || (reqProfiles.radarr && reqProfiles.radarr.default) || null;
   reqTvProfile = reqTvProfile || (reqProfiles.sonarr && reqProfiles.sonarr.default) || null;
   // Segmented buttons, NOT a native <select> — a TV remote can't operate the OS
@@ -493,8 +518,8 @@ function renderQualityPicker(radarrOk, sonarrOk) {
   }));
 }
 
-async function loadQueue() {
-  const box = document.getElementById('req-queue'); if (!box) return;
+async function loadQueue(box) {
+  if (!box || !box.isConnected) return;
   let q;
   try { q = await (await fetch('/api/requests/queue')).json(); } catch (_e) { return; }
   if (!q.length) { box.innerHTML = ''; return; }
@@ -552,7 +577,7 @@ function requestCard(it) {
         body: JSON.stringify({ type: it.type, tmdbId: it.tmdbId, tvdbId: it.tvdbId, qualityProfileId })
       });
       const d = await r.json();
-      if (r.ok) { btn.textContent = d.already ? '✓ Already requested' : '✓ Requested — searching'; btn.classList.remove('primary'); btn.classList.add('req-done'); loadQueue(); }
+      if (r.ok) { btn.textContent = d.already ? '✓ Already requested' : '✓ Requested — searching'; btn.classList.remove('primary'); btn.classList.add('req-done'); const rq = card.closest('.requests'); if (rq) loadQueue(rq.querySelector('.req-queue')); }
       else { btn.textContent = '⚠ ' + (d.error || 'Failed'); btn.disabled = false; }
     } catch (_e) { btn.textContent = '⚠ Failed'; btn.disabled = false; }
   });
@@ -896,7 +921,7 @@ function showGridView(title, cards) {
   heroEl.classList.add('hidden');
   window.scrollTo({ top: 0 });
   rowsEl.innerHTML = '';
-  rowsEl.style.paddingTop = '78px';
+  rowsEl.style.paddingTop = PAGE_TOP;
   const sec = document.createElement('section');
   sec.className = 'row';
   sec.innerHTML = `<div class="row-head"><button class="btn sm" id="grid-back">‹ Back</button><h3 class="row-title" style="margin-left:8px">${escapeHtml(title)}</h3><span class="row-count">${cards.length}</span></div><div class="lib-grid"></div>`;
@@ -1072,7 +1097,7 @@ function cardEl(cfg) {
   card.className = 'card';
   card.innerHTML = `
     <div class="poster">
-      ${cfg.poster ? `<img src="${cfg.poster}" alt="" loading="lazy">` : `<span class="ph">${escapeHtml(cfg.title)}</span>`}
+      ${cfg.poster ? `<img src="${cfg.poster}" alt="" loading="lazy" decoding="async">` : `<span class="ph">${escapeHtml(cfg.title)}</span>`}
       ${cfg.badge || ''}
       ${cfg.pct > 1 ? `<div class="prog"><i style="width:${cfg.pct}%"></i></div>` : ''}
       <div class="card-info">
@@ -1716,7 +1741,11 @@ function openPlayer(ctx) {
     <button class="vp-skipbtn vp-skipcredits hidden" data-pf>Skip Credits ${ICONS.skipnext}</button>
     <div class="vp-menu hidden"></div>
     <div class="vp-upnext hidden"></div>
-    <div class="vp-buffering hidden"><div class="vp-spinner"></div><div class="vp-buftext">Buffering…</div></div>
+    <div class="vp-buffering hidden">
+      <div class="vp-buf-brand">MARQUEE</div>
+      <div class="vp-buf-bar"><i></i></div>
+      <div class="vp-buftext">Loading…</div>
+    </div>
     <div class="vp-error hidden"></div>`;
   const live = !!ctx.live;             // Live TV: a real broadcast — no time-travel controls
   if (live) vp.classList.add('vp-live');
@@ -1856,9 +1885,19 @@ function openPlayer(ctx) {
     } catch (_e) {}
     return 0;
   }
+  // The buffering overlay is a branded splash: the MARQUEE wordmark over a
+  // gradient bar — determinate (width %) while the head-start cushion fills,
+  // indeterminate (sweeping) on a mid-play rebuffer where there's no target.
   const bufOverlay = vp.querySelector('.vp-buffering');
+  const bufBar = vp.querySelector('.vp-buf-bar');
+  const bufFill = bufBar.querySelector('i');
   const bufText = vp.querySelector('.vp-buftext');
-  function showBuffering(pct) { bufText.textContent = pct == null ? 'Buffering…' : `Buffering… ${pct}%`; bufOverlay.classList.remove('hidden'); }
+  function showBuffering(pct) {
+    bufBar.classList.toggle('ind', pct == null);
+    if (pct != null) bufFill.style.width = pct + '%';
+    bufText.textContent = pct == null ? 'Buffering…' : `Loading… ${pct}%`;
+    bufOverlay.classList.remove('hidden');
+  }
   function hideBuffering() { bufOverlay.classList.add('hidden'); }
   // Resolve once `target` seconds are buffered ahead, or the file has buffered to its
   // end, or we hit `maxWaitMs` — whichever comes first (a slow link still starts).
@@ -2619,7 +2658,7 @@ search.addEventListener('input', () => {
   const q = search.value.trim().toLowerCase();
   if (!q) { renderView(); return; }
   heroEl.classList.add('hidden');
-  rowsEl.style.paddingTop = '78px';
+  rowsEl.style.paddingTop = PAGE_TOP;
   const mm = movies.filter((m) => m.title.toLowerCase().includes(q)).map((m) => buildMediaCard(m, 'movie'));
   const ss = shows.filter((s) => s.title.toLowerCase().includes(q)).map((s) => buildMediaCard(s, 'show'));
   drawRows([{ title: `Results for “${search.value.trim()}”`, cards: [...mm, ...ss] }]);
@@ -2804,6 +2843,9 @@ document.querySelectorAll('#settings .settings-tabs .tab').forEach((t) => t.addE
   document.querySelectorAll('#settings .tab-panel').forEach((p) => p.classList.toggle('active', p.dataset.panel === t.dataset.tab));
   // The "Now Playing" monitor only polls while its tab is the one on screen.
   if (t.dataset.tab === 'sessions') startSessionsPolling(); else stopSessionsPolling();
+  // Requests builds fresh each time its tab opens (it re-checks Radarr/Sonarr
+  // and restarts the queue poll, which stops itself when the tab hides).
+  if (t.dataset.tab === 'requests') { stopRequestsPolling(); buildRequestsUI(document.querySelector('#settings .tab-panel[data-panel="requests"] .requests')); }
 }));
 
 // ---- Admin "Now Playing" monitor: live playback sessions across all users ----
