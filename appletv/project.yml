@@ -32,6 +32,33 @@ schemes:
         - MarqueeTVTests
 
 targets:
+  # Top Shelf — the home-screen Continue Watching row (app extension).
+  MarqueeTopShelf:
+    type: app-extension
+    platform: tvOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: TopShelf
+    info:
+      path: TopShelf/Info.plist
+      properties:
+        CFBundleDisplayName: Marquee
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.tv-top-shelf
+          NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).ContentProvider"
+    entitlements:
+      path: TopShelf/MarqueeTopShelf.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.scenicprints.marqueetv
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.scenicprints.marqueetv.topshelf
+        SWIFT_VERSION: "5.0"
+        CODE_SIGN_STYLE: Automatic
+
   # HLS format matrix (simulator-only, run by .github/workflows/hls-matrix.yml).
   MarqueeTVTests:
     type: bundle.unit-test
@@ -51,9 +78,15 @@ targets:
     sources:
       - path: Sources
       - path: Resources
+    entitlements:
+      path: MarqueeTV.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.scenicprints.marqueetv
     dependencies:
       - package: VLCKitSPM
         product: VLCKitSPM
+      - target: MarqueeTopShelf
       # EXPLICIT AVKit link — `window.avDisplayManager` (the HDR display-mode
       # switch) is an AVKit category on UIWindow; with auto-linking it can be
       # left out of the binary and the first access crashes with "unrecognized

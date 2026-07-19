@@ -339,13 +339,26 @@ final class Store: ObservableObject {
     // The server's public HTTPS address (via Caddy/DuckDNS). Overridable in Settings.
     static let defaultServer = "https://marqu33.duckdns.org"
 
+    // Mirrored into the shared app-group defaults so the Top Shelf extension
+    // (a separate process) can call /api/continue with the same session.
+    static let appGroup = "group.com.scenicprints.marqueetv"
+
     @Published var serverURL: String {
-        didSet { UserDefaults.standard.set(serverURL, forKey: "serverURL") }
+        didSet {
+            UserDefaults.standard.set(serverURL, forKey: "serverURL")
+            UserDefaults(suiteName: Store.appGroup)?.set(serverURL, forKey: "serverURL")
+        }
     }
     @Published var token: String? {
         didSet {
-            if let t = token { UserDefaults.standard.set(t, forKey: "authToken") }
-            else { UserDefaults.standard.removeObject(forKey: "authToken") }
+            let shared = UserDefaults(suiteName: Store.appGroup)
+            if let t = token {
+                UserDefaults.standard.set(t, forKey: "authToken")
+                shared?.set(t, forKey: "authToken")
+            } else {
+                UserDefaults.standard.removeObject(forKey: "authToken")
+                shared?.removeObject(forKey: "authToken")
+            }
         }
     }
     @Published var user: User?
@@ -377,6 +390,11 @@ final class Store: ObservableObject {
         dboost = UserDefaults.standard.string(forKey: "dboost") ?? "normal"
         night = UserDefaults.standard.bool(forKey: "night")
         norm = UserDefaults.standard.bool(forKey: "norm")
+        // didSet doesn't fire during init — mirror the restored session into the
+        // app group explicitly so the Top Shelf extension has it from first run.
+        let shared = UserDefaults(suiteName: Store.appGroup)
+        shared?.set(serverURL, forKey: "serverURL")
+        if let t = token { shared?.set(t, forKey: "authToken") }
     }
 
     // ---- CI preview: populate sample data straight from TMDB (public CDN), so
