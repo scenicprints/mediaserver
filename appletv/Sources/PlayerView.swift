@@ -634,6 +634,9 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         // The HDR path always streams the HLS remux, not the raw VLC URL.
         let mainURLForAV: URL = (store?.hlsURL(kind: kind, fileId: fileId ?? -1)) ?? mainURL!
         self.mainURL = mainURLForAV
+        if let t = store?.token {
+            store?.crumb("av: item url=\(mainURLForAV.absoluteString.replacingOccurrences(of: t, with: "TOKEN")) preroll=\(prerollURL != nil)")
+        }
         var items: [AVPlayerItem] = []
         if let preroll = prerollURL { items.append(AVPlayerItem(url: preroll)) }
         let mainItem = AVPlayerItem(url: mainURLForAV)
@@ -657,10 +660,20 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
             Task { @MainActor in
                 guard let self else { return }
                 if item.status == .failed {
-                    // Surface the REAL error to the server log (e.g. -11868
-                    // NoCompatibleAlternatesForExternalDisplay) — no more guessing.
+                    // Surface the REAL error to the server log, including WHICH
+                    // URL failed and the player's own error log — no more guessing.
                     let e = item.error as NSError?
-                    self.store?.crumb("av: item FAILED \(e?.domain ?? "?") \(e?.code ?? 0): \(e?.localizedDescription ?? "?")")
+                    let failing = (e?.userInfo["NSErrorFailingURLStringKey"] as? String)
+                        ?? (e?.userInfo[NSURLErrorFailingURLStringErrorKey] as? String) ?? "-"
+                    let under = (e?.userInfo[NSUnderlyingErrorKey] as? NSError).map { "\($0.domain) \($0.code)" } ?? "-"
+                    let logEv = item.errorLog()?.events.last.map {
+                        "code=\($0.errorStatusCode) dom=\($0.errorDomain) uri=\($0.uri ?? "-") \($0.errorComment ?? "")"
+                    } ?? "-"
+                    let red = { (s: String) -> String in
+                        guard let t = self.store?.token, !t.isEmpty else { return s }
+                        return s.replacingOccurrences(of: t, with: "TOKEN")
+                    }
+                    self.store?.crumb("av: item FAILED \(e?.domain ?? "?") \(e?.code ?? 0): \(e?.localizedDescription ?? "?") | failingURL=\(red(failing)) | underlying=\(under) | errlog=\(red(logEv))")
                     return
                 }
                 guard item.status == .readyToPlay else { return }
