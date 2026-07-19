@@ -565,6 +565,9 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
             if let store, let fid = fileId,
                let mi = await store.mediaInfo(kind: kind, fileId: fid), mi.isHDR {
                 await store.crumbSync("hdr: begin \(mi.hdr ?? "?") \(mi.width ?? 0)x\(mi.height ?? 0)@\(mi.fps ?? 0)")
+                // Start the server's remux NOW — it produces segments during the
+                // ~3s display switch, so AVPlayer's first fetch isn't a cold start.
+                store.warmHLS(kind: kind, fileId: fid)
                 await switchDisplayToHDR(mi)
             }
             await store?.crumbSync("av: creating player")
@@ -653,9 +656,11 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         q.play()
     }
 
-    // Master-simplification bisection level (?mvar=) — bumped on item failure so
-    // one play attempt walks the ladder and names the attribute tvOS rejects.
+    // Master-simplification level (?mvar=) + retry counter. The bisection found
+    // the culprit (VIDEO-RANGE, now gone server-side); the ladder remains as a
+    // safety net (level 2 = drop subtitle renditions).
     private var avMvar = 1
+    private var avTry = 0
 
     private func observeMainItem(_ item: AVPlayerItem) {
         avStatusObs = item.observe(\.status, options: [.new]) { [weak self] it, _ in
@@ -678,15 +683,24 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
                 guard let t = self.store?.token, !t.isEmpty else { return s }
                 return s.replacingOccurrences(of: t, with: "TOKEN")
             }
-            store?.crumb("av: item FAILED (mvar=\(avMvar)) \(e?.domain ?? "?") \(e?.code ?? 0): \(e?.localizedDescription ?? "?") | failingURL=\(red(failing)) | underlying=\(under) | errlog=\(red(logEv))")
-            // Bisection: retry with the next-simpler master until something plays.
-            if avMvar < 5, let q = av, let url = store?.hlsURL(kind: kind, fileId: fileId ?? -1, mvar: avMvar + 1) {
-                avMvar += 1
-                store?.crumb("av: retrying with simplified master mvar=\(avMvar)")
+            store?.crumb("av: item FAILED (mvar=\(avMvar), try=\(avTry)) \(e?.domain ?? "?") \(e?.code ?? 0): \(e?.localizedDescription ?? "?") | failingURL=\(red(failing)) | underlying=\(under) | errlog=\(red(logEv))")
+            // Retry gently: the bisection showed early failures can be cold-start
+            // races (-12927 while ffmpeg's first segments land), and an instant
+            // 5-deep retry storm defeats itself. Same level again after a beat,
+            // then descend the simplification ladder; ≤6 attempts total.
+            guard avTry < 6, let q = av else { return }
+            if avTry >= 2 && avMvar < 2 { avMvar += 1 }   // after 2 tries, drop subtitle renditions too
+            avTry += 1
+            guard let url = store?.hlsURL(kind: kind, fileId: fileId ?? -1, mvar: avMvar) else { return }
+            let mv = avMvar, tn = avTry
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 1_500_000_000)   // let the remux produce segments
+                guard !self.finished else { return }
+                self.store?.crumb("av: retry #\(tn) (mvar=\(mv))")
                 let next = AVPlayerItem(url: url)
                 q.removeAllItems(); q.insert(next, after: nil)
-                avMainItem = next
-                observeMainItem(next)
+                self.avMainItem = next
+                self.observeMainItem(next)
                 q.play()
             }
             return

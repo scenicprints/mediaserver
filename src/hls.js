@@ -419,11 +419,13 @@ export function registerHls(app, db, helpers = {}) {
       lines.push(`#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="${name}",DEFAULT=NO,AUTOSELECT=NO${lang},URI="subs/${i}.m3u8${r.q}"`);
     });
     const subs = tracks.length ? ',SUBTITLES="subs"' : '';
-    // RESOLUTION + VIDEO-RANGE: an HDR (PQ/HLG) stream must advertise its range
-    // or tvOS won't host it — but these are also bisection suspects (mvar 3/4).
-    const res = (mvar < 4 && ci.width && ci.height) ? `,RESOLUTION=${ci.width}x${ci.height}` : '';
-    const vrange = (mvar < 3 && ci.videoRange) ? `,VIDEO-RANGE=${ci.videoRange}` : '';
-    lines.push(`#EXT-X-STREAM-INF:BANDWIDTH=20000000${res}${vrange},CODECS="${codecs}"${subs}`);
+    // NO RESOLUTION / VIDEO-RANGE — settled EMPIRICALLY by the client-side
+    // master bisection on the real Apple TV (tvOS 26): VIDEO-RANGE=PQ makes
+    // AVPlayer fail -1002 at master parse (media playlist never requested);
+    // the bare BANDWIDTH+CODECS variant is the shape that PLAYED. HDR still
+    // works because the tvOS client switches the display itself and the HEVC
+    // bitstream carries its own PQ color metadata.
+    lines.push(`#EXT-X-STREAM-INF:BANDWIDTH=20000000,CODECS="${codecs}"${subs}`);
     lines.push(`index.m3u8${r.q}`);
     logEvent('master', { file: path.basename(r.row.path), codecs, subs: tracks.length, mvar });
     reply.header('Content-Type', 'application/vnd.apple.mpegurl');

@@ -642,6 +642,13 @@ final class Store: ObservableObject {
     func playbackURL(kind: String, file: MovieFile) -> URL? {
         return kind == "episode" ? episodeStreamURL(fileId: file.id) : streamURL(fileId: file.id)
     }
+    // Kick the server's HLS remux for this file WITHOUT waiting — called while
+    // the HDR display switch is settling (~3s), so ffmpeg has segments ready by
+    // the time AVPlayer asks (cold-start races were failing first plays).
+    func warmHLS(kind: String, fileId: Int) {
+        Task { _ = try? await request("api/hls/\(kind)/\(fileId)/index.m3u8?\(audioQuery())") }
+    }
+
     func hlsURL(kind: String, fileId: Int, mvar: Int = 1) -> URL? {
         guard let t = token else { return nil }
         let x = mvar > 1 ? "&mvar=\(mvar)" : ""
