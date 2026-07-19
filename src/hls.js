@@ -264,8 +264,8 @@ function spawnFfmpeg(s, filePath, opts, ci) {
 
   if (vcopy) {
     args.push('-c:v', 'copy');
-    // (MPEG-TS segments don't use the hvc1/hev1 sample-entry tag — that was an
-    // fMP4 concern; ffmpeg auto-inserts hevc_mp4toannexb for the TS copy.)
+    // AVPlayer only decodes HEVC tagged 'hvc1' in fMP4; retag on the copy.
+    if (ci.vcodec === 'hevc' || ci.vcodec === 'h265') args.push('-tag:v', 'hvc1');
   } else {
     // Truly-unsupported video (rare: VC-1, MPEG-2…): re-encode to H.264 with
     // IDR keyframes on the 6s grid.
@@ -283,16 +283,19 @@ function spawnFfmpeg(s, filePath, opts, ci) {
     if (opts.forceStereo) args.push('-ac', '2');
   }
 
-  // MPEG-TS HLS — what Plex ACTUALLY serves the Apple TV (captured live from
-  // this machine's Plex for the same file: container=mpegts, HEVC+E-AC-3
-  // copied). Our previous fMP4 shape was rejected by tvOS 26 with -12927
-  // right after the init segment on every play; TS has no init at all.
-  // ffmpeg writes its own keyframe-aligned playlist to ff.m3u8; we serve a
+  // Fragmented-MP4 segments, consumed via the MEDIA playlist DIRECTLY (no
+  // master). The tvOS-simulator format matrix settled it: our fMP4 media is
+  // fine (fmp4_media_direct → readyToPlay, video track, 3840x1920) and every
+  // failure (-1002/-11868/-12927) came from AVPlayer's multivariant-master
+  // eligibility machinery rejecting the lone variant. TS is NOT an option:
+  // AVPlayer's TS demuxer ignores HEVC video (plays audio only). ffmpeg
+  // writes its own keyframe-aligned playlist to ff.m3u8; we serve a
   // token-rewritten copy of it.
   args.push(
     '-f', 'hls',
     '-hls_time', String(SEG_SECONDS),
-    '-hls_segment_type', 'mpegts',
+    '-hls_segment_type', 'fmp4',
+    '-hls_fmp4_init_filename', 'init.mp4',
     // EVENT, not VOD: AVPlayer fetches a VOD playlist ONCE, so while the remux
     // is still producing segments it would see only the first one or two and
     // stall. An EVENT playlist tells AVPlayer to re-fetch as it grows; we append
@@ -300,7 +303,7 @@ function spawnFfmpeg(s, filePath, opts, ci) {
     '-hls_playlist_type', 'event',
     '-hls_list_size', '0',
     '-hls_flags', 'independent_segments',
-    '-hls_segment_filename', path.join(s.dir, 'seg%05d.ts'),
+    '-hls_segment_filename', path.join(s.dir, 'seg%05d.m4s'),
     path.join(s.dir, 'ff.m3u8')
   );
 

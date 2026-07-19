@@ -649,15 +649,13 @@ final class Store: ObservableObject {
         Task { _ = try? await request("api/hls/\(kind)/\(fileId)/index.m3u8?\(audioQuery())") }
     }
 
-    // Failure-ladder rungs: 1 = normal | 2 = no subtitle renditions |
-    // 3 = also re-encode audio to AAC (bisection for CoreMedia -12927,
-    // which reports tie to copied-audio A/V alignment quirks).
+    // The MEDIA playlist, consumed DIRECTLY (no master). The tvOS-simulator
+    // format matrix proved AVPlayer plays our fMP4 media fine this way, while
+    // EVERY master-playlist variant was rejected by the multivariant
+    // eligibility machinery (-1002/-11868/-12927).
     func hlsURL(kind: String, fileId: Int, mvar: Int = 1) -> URL? {
         guard let t = token else { return nil }
-        var x = ""
-        if mvar >= 2 { x += "&mvar=2" }
-        if mvar >= 3 { x += "&aac=1" }
-        return URL(string: "\(cleanBase)/api/hls/\(kind)/\(fileId)/master.m3u8?token=\(t)&\(audioQuery())\(x)")
+        return URL(string: "\(cleanBase)/api/hls/\(kind)/\(fileId)/index.m3u8?token=\(t)&\(audioQuery())")
     }
     // VLCKit plays anything, so there's no direct-vs-remux decision to make —
     // just hand back the raw byte-range stream. Kept async so call sites are

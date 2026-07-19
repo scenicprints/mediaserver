@@ -663,10 +663,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         q.play()
     }
 
-    // Master-simplification level (?mvar=) + retry counter. The bisection found
-    // the culprit (VIDEO-RANGE, now gone server-side); the ladder remains as a
-    // safety net (level 2 = drop subtitle renditions).
-    private var avMvar = 1
+    // Cold-start retry counter for the direct media-playlist item.
     private var avTry = 0
 
     private func observeMainItem(_ item: AVPlayerItem) {
@@ -690,21 +687,17 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
                 guard let t = self.store?.token, !t.isEmpty else { return s }
                 return s.replacingOccurrences(of: t, with: "TOKEN")
             }
-            store?.crumb("av: item FAILED (mvar=\(avMvar), try=\(avTry)) \(e?.domain ?? "?") \(e?.code ?? 0): \(e?.localizedDescription ?? "?") | failingURL=\(red(failing)) | underlying=\(under) | errlog=\(red(logEv))")
-            // Retry gently: the bisection showed early failures can be cold-start
-            // races (-12927 while ffmpeg's first segments land), and an instant
-            // 5-deep retry storm defeats itself. Same level again after a beat,
-            // then descend the simplification ladder; ≤6 attempts total.
-            guard avTry < 6, let q = av else { return }
-            // Two tries per rung: 1 normal → 2 no-subs → 3 AAC audio.
+            store?.crumb("av: item FAILED (try=\(avTry)) \(e?.domain ?? "?") \(e?.code ?? 0): \(e?.localizedDescription ?? "?") | failingURL=\(red(failing)) | underlying=\(under) | errlog=\(red(logEv))")
+            // Cold-start safety net: the media playlist may not have segments in
+            // its first second of life — retry the same URL a few times, spaced.
+            guard avTry < 4, let q = av else { return }
             avTry += 1
-            if avTry % 2 == 0 && avMvar < 3 { avMvar += 1 }
-            guard let url = store?.hlsURL(kind: kind, fileId: fileId ?? -1, mvar: avMvar) else { return }
-            let mv = avMvar, tn = avTry
+            guard let url = store?.hlsURL(kind: kind, fileId: fileId ?? -1) else { return }
+            let tn = avTry
             Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 1_500_000_000)   // let the remux produce segments
+                try? await Task.sleep(nanoseconds: 2_000_000_000)   // let the remux produce segments
                 guard !self.finished else { return }
-                self.store?.crumb("av: retry #\(tn) (mvar=\(mv))")
+                self.store?.crumb("av: retry #\(tn)")
                 let next = AVPlayerItem(url: url)
                 q.removeAllItems(); q.insert(next, after: nil)
                 self.avMainItem = next
@@ -714,7 +707,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
             return
         }
         guard item.status == .readyToPlay else { return }
-        store?.crumb("av: item readyToPlay (mvar=\(avMvar))")
+        store?.crumb("av: item readyToPlay (try=\(avTry))")
         if item === av?.currentItem { avResumeIfNeeded() }
         refreshAVTracks(item)
         // NOW switch the display into HDR — playback is established, so the
