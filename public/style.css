@@ -1013,3 +1013,34 @@ body.tv-mode .lt-times { margin-bottom: 8px; font-size: 11.5px; }
 body.tv-mode .lt-actions .btn { padding: 8px 16px; font-size: 13px; }
 body.tv-mode .lt-erow { height: 54px; }
 body.tv-mode .lt-hint { display: none; }
+
+/* ---------- Diagnostics (admin flight recorder) ---------- */
+.diag-devices { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+.diag-dev {
+  background: var(--panel-2); border: 1px solid var(--line); color: var(--text); cursor: pointer;
+  padding: 7px 12px; border-radius: 999px; font-size: 12.5px; font-weight: 600;
+  display: inline-flex; align-items: center; gap: 7px;
+}
+.diag-dev.on { background: var(--grad); border-color: transparent; color: #fff; }
+.diag-dev .diag-errn { color: #ffb3c0; font-weight: 800; }
+.diag-dev .diag-seen { color: rgba(255, 255, 255, 0.55); font-size: 11px; font-weight: 600; }
+.diag-dev:not(.on) .diag-seen { color: var(--muted); }
+.diag-filters { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.diag-f {
+  background: none; border: 1px solid var(--line); color: var(--muted); cursor: pointer;
+  padding: 5px 11px; border-radius: 999px; font-size: 12px; font-weight: 700;
+}
+.diag-f.on { color: var(--text); border-color: var(--accent); background: rgba(108, 92, 255, 0.14); }
+.diag-events { display: flex; flex-direction: column; max-height: 44vh; overflow-y: auto; border: 1px solid var(--line); border-radius: 10px; }
+.diag-row {
+  display: flex; align-items: baseline; gap: 10px; padding: 7px 12px;
+  border-bottom: 1px solid rgba(38, 43, 56, 0.55); font-size: 12px; line-height: 1.45;
+}
+.diag-row:last-child { border-bottom: none; }
+.diag-when { flex: 0 0 62px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.diag-type { flex: 0 0 56px; font-weight: 800; letter-spacing: 0.4px; text-transform: uppercase; font-size: 10px; color: var(--accent-2); }
+.diag-row.t-error .diag-type, .diag-row.t-native .diag-type { color: var(--hot); }
+.diag-row.t-buffer .diag-type { color: #ffc14d; }
+.diag-row.t-vitals .diag-type { color: #7ee0a2; }
+.diag-msg { flex: 1; min-width: 0; word-break: break-word; font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; font-size: 11.5px; color: #cfd6e4; }
+.diag-who { flex: 0 0 auto; color: var(--muted); font-weight: 700; }

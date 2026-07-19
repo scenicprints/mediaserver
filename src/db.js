@@ -229,5 +229,24 @@ export function openDb(dbPath) {
     );
   `);
 
+  // ---- Client telemetry: the app's flight recorder ----
+  // The TV apps run in other people's living rooms — when something breaks
+  // there, this is the only way to see it. Every client batches events here
+  // (errors, playback/buffer health, lag vitals, deep-link outcomes, device
+  // info); admins read them in Settings ▸ Diagnostics. Ring-buffered by the
+  // server on insert (row + age caps) so it can never grow unbounded.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS telemetry (
+      id      INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts      INTEGER NOT NULL,
+      user_id INTEGER,
+      device  TEXT,
+      type    TEXT NOT NULL,
+      data    TEXT
+    );
+  `);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_tele_ts ON telemetry(ts);');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_tele_dev ON telemetry(device, id);');
+
   return db;
 }

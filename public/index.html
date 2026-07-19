@@ -54,6 +54,7 @@
         <button class="tab" data-tab="streaming">Streaming</button>
         <button class="tab" data-tab="requests">Requests</button>
         <button class="tab admin-only" data-tab="sessions">Now Playing</button>
+        <button class="tab admin-only" data-tab="diag">Diagnostics</button>
       </div>
 
       <div class="tab-panel active" data-panel="general">
@@ -187,6 +188,19 @@
         </div>
       </div>
 
+      <div class="tab-panel" data-panel="diag">
+        <div class="sub-account" style="border-top:none;margin-top:4px;padding-top:0">
+          <div class="sess-head">
+            <h3 style="margin:0">Device flight recorder</h3>
+            <span class="muted" id="diag-count">…</span>
+          </div>
+          <p class="muted">Every app phones home its errors, playback and buffering health, lag numbers, and deep-link results — so a TV in someone else's living room can be debugged from here. Pick a device, then filter. Refreshes automatically.</p>
+          <div id="diag-devices" class="diag-devices"></div>
+          <div id="diag-filters" class="diag-filters"></div>
+          <div id="diag-events" class="diag-events"></div>
+        </div>
+      </div>
+
       <div class="settings-footer">
         <span class="muted" id="version">version …</span>
         <button class="btn" id="update-btn">⟳ Check for updates</button>
@@ -293,6 +307,7 @@
     });
   </script>
 
+  <script src="/telemetry.js"></script>
   <script src="/app.js"></script>
   <script src="/focus.js"></script>
 </body>

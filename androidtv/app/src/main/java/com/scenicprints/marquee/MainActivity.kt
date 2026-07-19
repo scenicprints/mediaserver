@@ -44,6 +44,15 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
+        // Flight recorder: an uncaught native exception is recorded first, then
+        // handed to the system (the app still crashes — but the NEXT launch
+        // reports it to the server's telemetry, so remote crashes aren't silent).
+        val prevHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { t, e ->
+            recordNativeEvent("crash", e.toString() + "\n" + e.stackTrace.take(6).joinToString("\n"))
+            prevHandler?.uncaughtException(t, e)
+        }
+
         web = WebView(this)
         setContentView(web)
         goImmersive()
@@ -68,6 +77,17 @@ class MainActivity : Activity() {
         web.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 return false // keep every server page inside this WebView
+            }
+            override fun onPageFinished(view: WebView, url: String) {
+                flushPendingNative() // report a crash/renderer-death from a previous run
+            }
+            override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail): Boolean {
+                // The WebView renderer died (usually OOM on a low-RAM TV). Record
+                // it and rebuild the activity instead of letting the app be killed.
+                val why = if (Build.VERSION.SDK_INT >= 26 && detail.didCrash()) "renderer crashed" else "renderer killed (likely OOM)"
+                recordNativeEvent("renderer-gone", why)
+                recreate()
+                return true
             }
         }
         web.webChromeClient = WebChromeClient()
@@ -104,10 +124,43 @@ class MainActivity : Activity() {
 
     /** Exposed to the web app as `window.MarqueeTV`. The web UI calls openApp()
      *  for a streaming deep-link; we fire it from the native side so the OS can
-     *  route it to the installed app. */
+     *  route it to the installed app. appVersion() feeds the telemetry boot event. */
     inner class TvBridge {
         @JavascriptInterface
         fun openApp(url: String) { runOnUiThread { openExternal(url) } }
+        @JavascriptInterface
+        fun appVersion(): String = try {
+            val info = packageManager.getPackageInfo(packageName, 0)
+            val code = if (Build.VERSION.SDK_INT >= 28) info.longVersionCode else info.versionCode.toLong()
+            "${info.versionName} ($code)"
+        } catch (_: Exception) { "?" }
+    }
+
+    // ---- Flight recorder (native side) ----
+    // The web telemetry (window.tele) can't witness a native crash or a dead
+    // WebView renderer, so those are captured here, parked in SharedPreferences,
+    // and injected into the page's recorder on the next healthy page load.
+    private fun recordNativeEvent(type: String, detail: String) {
+        try {
+            getSharedPreferences("marquee", MODE_PRIVATE).edit()
+                .putString("pendingNative", JSONObject().put("type", type).put("stack", detail.take(1500)).toString())
+                .apply()
+        } catch (_: Exception) {}
+    }
+    private fun flushPendingNative() {
+        try {
+            val sp = getSharedPreferences("marquee", MODE_PRIVATE)
+            val pending = sp.getString("pendingNative", null) ?: return
+            sp.edit().remove("pendingNative").apply()
+            web.evaluateJavascript("window.tele&&window.tele('native',$pending);", null)
+        } catch (_: Exception) {}
+    }
+    /** Tell the page how a deep-link actually resolved (JSON-safe: package names only). */
+    private fun teleDeeplink(result: String) {
+        try {
+            val safe = result.replace(Regex("[^A-Za-z0-9_.:-]"), "")
+            web.evaluateJavascript("window.tele&&window.tele('deeplink',{result:'$safe'});", null)
+        } catch (_: Exception) {}
     }
 
     // Streaming domains we hand off to a native app, each mapped to its known
@@ -142,6 +195,7 @@ class MainActivity : Activity() {
         for (pkg in pkgs) {
             try {
                 startActivity(Intent(Intent.ACTION_VIEW, uri).setPackage(pkg).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                teleDeeplink("url:$pkg")
                 return
             } catch (_: Exception) { /* not installed / doesn't take URLs — next */ }
         }
@@ -150,7 +204,11 @@ class MainActivity : Activity() {
             try {
                 val launch = packageManager.getLeanbackLaunchIntentForPackage(pkg)
                     ?: packageManager.getLaunchIntentForPackage(pkg)
-                if (launch != null) { startActivity(launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); return }
+                if (launch != null) {
+                    startActivity(launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                    teleDeeplink("launch:$pkg")
+                    return
+                }
             } catch (_: Exception) {}
         }
         // 3) Some other REAL app may claim the link (never a browser; only Android
@@ -161,9 +219,11 @@ class MainActivity : Activity() {
                     Intent(Intent.ACTION_VIEW, uri)
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REQUIRE_NON_BROWSER)
                 )
+                teleDeeplink("nonbrowser")
                 return
             } catch (_: Exception) {}
         }
+        teleDeeplink("none:notinstalled")
         try {
             android.widget.Toast.makeText(this, "That app isn't installed on this TV", android.widget.Toast.LENGTH_LONG).show()
         } catch (_: Exception) {}

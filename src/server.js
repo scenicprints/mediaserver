@@ -97,6 +97,7 @@ const assetVer = (f) => { try { return fs.statSync(path.join(PUBLIC_DIR, f)).mti
 function renderIndex() {
   return fs.readFileSync(path.join(PUBLIC_DIR, 'index.html'), 'utf8')
     .replace('href="/style.css"', `href="/style.css?v=${assetVer('style.css')}"`)
+    .replace('src="/telemetry.js"', `src="/telemetry.js?v=${assetVer('telemetry.js')}"`)
     .replace('src="/app.js"', `src="/app.js?v=${assetVer('app.js')}"`)
     .replace('src="/focus.js"', `src="/focus.js?v=${assetVer('focus.js')}"`);
 }
@@ -1250,6 +1251,81 @@ app.get('/api/admin/sessions', async (req, reply) => {
     .sort((a, b) => (a.username || '').localeCompare(b.username || '') || a.startedAt - b.startedAt)
     .map((s) => ({ ...s, watchingForSec: Math.round((now - s.startedAt) / 1000), staleSec: Math.round((now - s.lastSeen) / 1000) }));
   return { now, count: list.length, sessions: list };
+});
+
+// ---- Client telemetry: the app's flight recorder ----
+// TV apps run in other people's living rooms; when something breaks there, these
+// events are the only way to see it. Clients (public/telemetry.js) batch-post;
+// admins read them in Settings ▸ Diagnostics. Any signed-in user may report —
+// only about itself, and the payload is size-capped and stored as opaque JSON.
+const TELE_MAX_ROWS = 20000;                 // ring-buffer row cap
+const TELE_MAX_AGE = 14 * 86400e3;           // and nothing older than 2 weeks
+let teleSincePrune = 0;
+app.post('/api/telemetry', async (req, reply) => {
+  const b = req.body || {};
+  const device = String(b.device || '').slice(0, 64);
+  const events = Array.isArray(b.events) ? b.events.slice(0, 100) : [];
+  const ins = db.prepare('INSERT INTO telemetry (ts, user_id, device, type, data) VALUES (?, ?, ?, ?, ?)');
+  const now = Date.now();
+  for (const e of events) {
+    const type = String((e && e.type) || '').slice(0, 24);
+    if (!type) continue;
+    const ts = Number(e.ts) > 0 && Number(e.ts) <= now + 60000 ? Number(e.ts) : now;
+    let data = '{}';
+    try { data = JSON.stringify(e.data == null ? {} : e.data).slice(0, 4000); } catch { /* opaque */ }
+    ins.run(ts, req.user.id, device, type, data);
+  }
+  // Prune every few hundred inserts, not on every batch.
+  if ((teleSincePrune += events.length) > 500) {
+    teleSincePrune = 0;
+    db.prepare('DELETE FROM telemetry WHERE ts < ?').run(now - TELE_MAX_AGE);
+    db.prepare('DELETE FROM telemetry WHERE id <= (SELECT COALESCE(MAX(id), 0) FROM telemetry) - ?').run(TELE_MAX_ROWS);
+  }
+  return { ok: true };
+});
+
+// Admin: every device that has reported, newest first, with its latest boot
+// info (user, UA, viewport, app version) and a 24h error count.
+app.get('/api/admin/telemetry/devices', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const rows = db.prepare(`
+    SELECT device, MAX(ts) AS lastSeen, COUNT(*) AS events,
+           SUM(CASE WHEN type IN ('error', 'native') AND ts > ? THEN 1 ELSE 0 END) AS errors24h
+    FROM telemetry GROUP BY device ORDER BY lastSeen DESC LIMIT 40
+  `).all(Date.now() - 86400e3);
+  const bootQ = db.prepare("SELECT data, user_id FROM telemetry WHERE device = ? AND type = 'boot' ORDER BY id DESC LIMIT 1");
+  const userQ = db.prepare('SELECT username FROM users WHERE id = ?');
+  return rows.map((r) => {
+    const boot = bootQ.get(r.device);
+    let info = {};
+    try { info = boot ? JSON.parse(boot.data) : {}; } catch { /* ignore */ }
+    const u = boot ? userQ.get(boot.user_id) : null;
+    return { ...r, info, username: u ? u.username : null };
+  });
+});
+
+// Admin: recent events, filterable by device and type, newest first.
+app.get('/api/admin/telemetry/events', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const device = String(req.query.device || '');
+  const types = String(req.query.types || '').split(',').map((s) => s.trim()).filter(Boolean);
+  const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 200));
+  const where = [], args = [];
+  if (device) { where.push('device = ?'); args.push(device); }
+  if (types.length) { where.push(`type IN (${types.map(() => '?').join(',')})`); args.push(...types); }
+  const rows = db.prepare(
+    `SELECT id, ts, user_id, device, type, data FROM telemetry ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY id DESC LIMIT ${limit}`
+  ).all(...args);
+  const users = new Map();
+  for (const r of rows) {
+    if (!users.has(r.user_id)) {
+      const u = db.prepare('SELECT username FROM users WHERE id = ?').get(r.user_id);
+      users.set(r.user_id, u ? u.username : null);
+    }
+    r.username = users.get(r.user_id);
+    try { r.data = JSON.parse(r.data); } catch { r.data = {}; }
+  }
+  return rows;
 });
 
 // ---- Pre-roll: a video that plays before every MOVIE (not TV, not Live TV) ----

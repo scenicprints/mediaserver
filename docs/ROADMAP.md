@@ -32,6 +32,13 @@ Invite code on the Dell: `lantern-6274`.
 **✅ Android TV app v1** shipped — WebView shell in `androidtv/`; GitHub Actions builds a debug
 APK to the **`marquee-tv-latest`** release for sideloading onto the friend's TCL Google TV.
 **✅ Forced update splash** (admin) with changelog + skip.
+**✅ Telemetry flight recorder (2026-07-19)** — every client (TV apps especially) phones home
+errors, playback/buffer health, lag vitals (fps, long-task stalls, heap), nav, and deep-link
+outcomes (`public/telemetry.js` → `POST /api/telemetry`, ring-buffered `telemetry` table);
+admin **Settings ▸ Diagnostics** browses per-device with filters, auto-refresh. Android app
+additionally captures native crashes + WebView renderer deaths (recorded in prefs, injected
+into telemetry on next launch, renderer death auto-recovers via `recreate()`) and reports
+which app a deep-link actually resolved to.
 **✅ Google TV polish pass (2026-07-19)** — from real TCL testing: Requests moved into
 **Settings ▸ Requests** (ribbon tab hidden on TV — overscan clipped it out of reach) and the
 ribbon got a vertical overscan inset + no-wrap tabs + scrollable strip under remote focus;

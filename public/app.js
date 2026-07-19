@@ -65,6 +65,10 @@ if (TV_MODE) {
 const PAGE_TOP = TV_MODE ? '96px' : '78px';
 const ROW_N = TV_MODE ? 12 : 24;
 
+// Flight recorder (telemetry.js, loaded first). Guarded so a stale-cached page
+// without it can't crash here; events land in Settings ▸ Diagnostics (admin).
+const tele = window.tele || function () {};
+
 // ---------- Session persistence for the LG webOS TV app ONLY ----------
 // The LG webOS app runtime doesn't persist the server's HttpOnly login cookie
 // across relaunches, so a normal login loops back to the sign-in screen. The fix
@@ -194,6 +198,7 @@ document.querySelectorAll('.nav-link').forEach((b) =>
 
 function setView(view) {
   stopActivePlayer(); // switching top-level views must not leave a player running
+  tele('nav', { view });
   currentView = view;
   document.querySelectorAll('.nav-link').forEach((b) => b.classList.toggle('active', b.dataset.view === view));
   search.value = '';
@@ -1053,7 +1058,11 @@ function openService(slug, title) {
   const p = STREAM_PROVIDERS[slug];
   const url = p && p.search ? p.search(encodeURIComponent(title || '')) : null;
   if (!url) return;
-  if (window.MarqueeTV && typeof window.MarqueeTV.openApp === 'function') window.MarqueeTV.openApp(url);
+  const native = window.MarqueeTV && typeof window.MarqueeTV.openApp === 'function';
+  // The native side reports back its own outcome (which app actually opened)
+  // as a second `deeplink` event with a `result`.
+  tele('deeplink', { service: slug, title, native: !!native });
+  if (native) window.MarqueeTV.openApp(url);
   else window.open(url, '_blank', 'noopener');
 }
 function openStream(it) { openService((it.providers || [])[0], it.title); }
@@ -1789,6 +1798,8 @@ function openPlayer(ctx) {
   const errEl = vp.querySelector('.vp-error');
   video.addEventListener('error', () => {
     if (!video.getAttribute('src')) return;
+    const ve = video.error || {};
+    tele('player', { ev: 'error', title: ctx.title, mode: play.mode, code: ve.code, msg: String(ve.message || '').slice(0, 200), at: Math.round(cur()) });
     errEl.innerHTML = play.reason === 'no-ffmpeg'
       ? `<b>The browser can't play this file format.</b><span>Install the playback engine (one click in ⚙ Settings on the server) and it will play everything — MKV, HEVC, AVI, surround audio…</span>`
       : `<b>Playback failed.</b><span>This file may be corrupt or use a codec the player can't read.</span>`;
@@ -1941,6 +1952,7 @@ function openPlayer(ctx) {
     showBuffering(0);
     await waitForBuffer(HEAD_START, HEAD_MAX_WAIT, (pct) => showBuffering(pct));
     recordFill(be0, t0);
+    tele('buffer', { kind: 'head', ms: Math.round(performance.now() - t0), net: netRatio ? +netRatio.toFixed(2) : undefined });
     hideBuffering();
     attemptPlay();
   }
@@ -1955,6 +1967,7 @@ function openPlayer(ctx) {
     showBuffering();
     await waitForBuffer(RESUME_BUFFER, RESUME_MAX_WAIT);
     recordFill(be0, t0);
+    tele('buffer', { kind: 'rebuffer', ms: Math.round(performance.now() - t0), at: Math.round(cur()), net: netRatio ? +netRatio.toFixed(2) : undefined });
     hideBuffering();
     if (!userPaused) attemptPlay();
     rebuffering = false;
@@ -2063,6 +2076,7 @@ function openPlayer(ctx) {
       : { mode: 'direct', duration: (info && info.duration) || null, url: ctx.streamBase + f.id, reason: (info && info.reason) || null, size: (info && info.size) || null };
     curEngine = (info && info.engine) || null;
     renderEngineBadge(info && info.engine); // admin-only: shows direct-play vs what's being transcoded
+    tele('player', { ev: 'load', title: ctx.title, kind: ctx.searchKind, mode: play.mode, reason: play.reason || undefined, quality: f.quality || undefined, live: ctx.live || undefined, at: Math.round(at || 0) });
     // Chapter-based Skip Intro / Skip Credits (precise when the file has named
     // chapters — common in .mkv rips).
     const chaps = (info && info.chapters) || [];
@@ -2523,7 +2537,7 @@ function openPlayer(ctx) {
 
   // close + keyboard (remote-friendly: arrows seek / open the menu, Enter is
   // play-pause, Backspace is the remote's Back button)
-  function close() { save(); if (document.fullscreenElement) document.exitFullscreen(); vp.remove(); activePlayer = null; document.body.style.overflow = 'hidden'; }
+  function close() { tele('player', { ev: 'close', title: ctx.title, at: Math.round(cur()), dur: Math.round(dur()) }); save(); if (document.fullscreenElement) document.exitFullscreen(); vp.remove(); activePlayer = null; document.body.style.overflow = 'hidden'; }
   vp.querySelector('.vp-back').addEventListener('click', close);
   vp._onKey = (e) => {
     // Pre-roll is not skippable — swallow playback keys while it's running (Back
@@ -2747,8 +2761,8 @@ const osStatus = document.getElementById('os-status');
 const osSave = document.getElementById('os-save');
 const pickerState = { path: null, parent: null, type: 'movie' };
 
-document.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', () => { document.getElementById(b.dataset.close).classList.add('hidden'); if (b.dataset.close === 'settings') stopSessionsPolling(); }));
-[settingsModal, picker].forEach((m) => m.addEventListener('click', (e) => { if (e.target === m) { m.classList.add('hidden'); if (m === settingsModal) stopSessionsPolling(); } }));
+document.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', () => { document.getElementById(b.dataset.close).classList.add('hidden'); if (b.dataset.close === 'settings') { stopSessionsPolling(); stopDiagPolling(); } }));
+[settingsModal, picker].forEach((m) => m.addEventListener('click', (e) => { if (e.target === m) { m.classList.add('hidden'); if (m === settingsModal) { stopSessionsPolling(); stopDiagPolling(); } } }));
 document.querySelectorAll('[data-add]').forEach((b) => b.addEventListener('click', () => openPicker(b.dataset.add)));
 settingsBtn.addEventListener('click', openSettings);
 
@@ -2756,8 +2770,9 @@ async function openSettings() {
   settingsModal.classList.remove('hidden');
   paintAudio();
   loadVersion(); checkForUpdate(); loadSettings(); loadFfmpeg(); loadWhisper(); loadIntro(); loadArr(); loadSources(); loadPreroll();
-  // Resume the live monitor if settings reopens on the "Now Playing" tab.
+  // Resume the live monitors if settings reopens on their tab.
   if (document.querySelector('#settings .settings-tabs .tab[data-tab="sessions"].active')) startSessionsPolling();
+  if (document.querySelector('#settings .settings-tabs .tab[data-tab="diag"].active')) startDiagPolling();
   await renderLibraries();
 }
 
@@ -2841,8 +2856,9 @@ for (const [key, attr] of AUDIO_GROUPS)
 document.querySelectorAll('#settings .settings-tabs .tab').forEach((t) => t.addEventListener('click', () => {
   document.querySelectorAll('#settings .settings-tabs .tab').forEach((x) => x.classList.toggle('active', x === t));
   document.querySelectorAll('#settings .tab-panel').forEach((p) => p.classList.toggle('active', p.dataset.panel === t.dataset.tab));
-  // The "Now Playing" monitor only polls while its tab is the one on screen.
+  // The "Now Playing" / Diagnostics monitors only poll while their tab is on screen.
   if (t.dataset.tab === 'sessions') startSessionsPolling(); else stopSessionsPolling();
+  if (t.dataset.tab === 'diag') startDiagPolling(); else stopDiagPolling();
   // Requests builds fresh each time its tab opens (it re-checks Radarr/Sonarr
   // and restarts the queue poll, which stops itself when the tab hides).
   if (t.dataset.tab === 'requests') { stopRequestsPolling(); buildRequestsUI(document.querySelector('#settings .tab-panel[data-panel="requests"] .requests')); }
@@ -2946,6 +2962,86 @@ async function loadSessions() {
         <div class="sess-dev muted">${escapeHtml(deviceLabel(s.userAgent, s.tv))} · ${escapeHtml(s.ip || '')} · ${escapeHtml(health)}${s.subtitleTrack && s.subtitleTrack !== 'off' ? ' · CC ' + escapeHtml(s.subtitleTrack) : ''} · ${escapeHtml(s.audioMode || '')}</div>
       </div>`;
   }).join('');
+}
+
+// ---- Diagnostics: the telemetry flight recorder (admin) ----
+// Reads what every app phoned home (telemetry.js): errors, playback health,
+// buffering, lag vitals, deep-link outcomes — per device, filterable, live.
+let diagTimer = null;
+let diagDevice = '';       // '' = all devices
+let diagFilter = 'all';
+const DIAG_FILTERS = [
+  ['all', 'All', null],
+  ['errors', 'Errors', 'error,native'],
+  ['player', 'Player', 'player'],
+  ['buffer', 'Buffering', 'buffer'],
+  ['net', 'Network', 'net'],
+  ['vitals', 'Lag', 'vitals'],
+  ['nav', 'Nav', 'nav,boot'],
+  ['deeplink', 'Deep links', 'deeplink']
+];
+function startDiagPolling() { loadDiag(); clearInterval(diagTimer); diagTimer = setInterval(loadDiag, 8000); }
+function stopDiagPolling() { clearInterval(diagTimer); diagTimer = null; }
+const diagAgo = (ts) => {
+  const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  return s < 60 ? s + 's ago' : s < 3600 ? Math.round(s / 60) + 'm ago' : s < 86400 ? Math.round(s / 3600) + 'h ago' : Math.round(s / 86400) + 'd ago';
+};
+// One readable line per event — the interesting fields, not raw JSON.
+function diagLine(e) {
+  const d = e.data || {};
+  switch (e.type) {
+    case 'error': return `${d.msg || '?'}${d.src ? ' — ' + d.src : ''}`;
+    case 'native': return `${d.type || 'native'}: ${(d.stack || d.msg || '').split('\n')[0]}`;
+    case 'boot': return `${d.viewport || ''}${d.tv ? ' · TV' : ''}${d.appVer ? ' · app ' + d.appVer : ''} · ${d.ua || ''}`;
+    case 'nav': return `→ ${d.view || '?'}`;
+    case 'player':
+      if (d.ev === 'load') return `▶ ${d.title || ''} · ${d.mode}${d.quality ? ' · ' + d.quality : ''}${d.live ? ' · LIVE' : ''}${d.at ? ' · from ' + fmtDur(d.at) : ''}`;
+      if (d.ev === 'error') return `✖ ${d.title || ''} · media error ${d.code != null ? d.code : ''} ${d.msg || ''} @ ${fmtDur(d.at)}`;
+      if (d.ev === 'close') return `⏹ ${d.title || ''} @ ${fmtDur(d.at)}${d.dur ? ' / ' + fmtDur(d.dur) : ''}`;
+      return JSON.stringify(d);
+    case 'buffer': return `${d.kind === 'head' ? 'start cushion' : '⏳ REBUFFER'} ${((d.ms || 0) / 1000).toFixed(1)}s${d.at != null ? ' @ ' + fmtDur(d.at) : ''}${d.net ? ' · net ' + d.net + '×' : ''}`;
+    case 'net': return `${d.failed ? '✖ failed' : d.slow ? '🐢 ' + d.ms + 'ms' : 'HTTP ' + d.status} · ${d.url || ''}${d.msg ? ' · ' + d.msg : ''}`;
+    case 'vitals': return `${d.fps != null ? d.fps + ' fps' : ''}${d.longTasks ? ` · ${d.longTasks} stalls (worst ${d.longestMs}ms)` : ''}${d.heapMB ? ` · heap ${d.heapMB}MB` : ''}`;
+    case 'deeplink': return d.result ? `result: ${d.result}` : `${d.service || '?'} · ${d.title || ''}${d.native === false ? ' · (browser)' : ''}`;
+    default: return JSON.stringify(d).slice(0, 200);
+  }
+}
+async function loadDiag() {
+  const devBox = document.getElementById('diag-devices');
+  const evBox = document.getElementById('diag-events');
+  const fBox = document.getElementById('diag-filters');
+  const countEl = document.getElementById('diag-count');
+  if (!devBox) return;
+  let devices = [];
+  try { const r = await fetch('/api/admin/telemetry/devices'); if (!r.ok) return; devices = await r.json(); } catch (_e) { return; }
+  if (countEl) countEl.textContent = devices.length ? `${devices.length} device${devices.length === 1 ? '' : 's'}` : 'nothing reported yet';
+  if (diagDevice && !devices.some((d) => d.device === diagDevice)) diagDevice = '';
+  devBox.innerHTML = [{ device: '', username: null, info: {}, lastSeen: 0, label: 'All devices' }, ...devices].map((d) => {
+    const label = d.label || `${d.username ? d.username + ' · ' : ''}${deviceLabel((d.info || {}).ua, (d.info || {}).tv)}`;
+    return `<button class="diag-dev${(d.device || '') === diagDevice ? ' on' : ''}" data-dev="${escapeHtml(d.device || '')}">
+      ${escapeHtml(label)}${d.errors24h ? ` <span class="diag-errn">${d.errors24h}⚠</span>` : ''}
+      ${d.lastSeen ? `<span class="diag-seen">${diagAgo(d.lastSeen)}</span>` : ''}
+    </button>`;
+  }).join('');
+  devBox.querySelectorAll('.diag-dev').forEach((b) => b.addEventListener('click', () => { diagDevice = b.dataset.dev; loadDiag(); }));
+  fBox.innerHTML = DIAG_FILTERS.map(([key, label]) =>
+    `<button class="diag-f${key === diagFilter ? ' on' : ''}" data-f="${key}">${label}</button>`).join('');
+  fBox.querySelectorAll('.diag-f').forEach((b) => b.addEventListener('click', () => { diagFilter = b.dataset.f; loadDiag(); }));
+
+  const types = (DIAG_FILTERS.find(([k]) => k === diagFilter) || [])[2];
+  const qs = new URLSearchParams();
+  if (diagDevice) qs.set('device', diagDevice);
+  if (types) qs.set('types', types);
+  let events = [];
+  try { const r = await fetch('/api/admin/telemetry/events?' + qs); if (!r.ok) return; events = await r.json(); } catch (_e) { return; }
+  evBox.innerHTML = events.length ? events.map((e) => `
+    <div class="diag-row t-${escapeHtml(e.type)}">
+      <span class="diag-when" title="${new Date(e.ts).toLocaleString()}">${diagAgo(e.ts)}</span>
+      <span class="diag-type">${escapeHtml(e.type)}</span>
+      <span class="diag-msg">${escapeHtml(diagLine(e))}</span>
+      ${!diagDevice ? `<span class="diag-who">${escapeHtml(e.username || '')}</span>` : ''}
+    </div>`).join('')
+    : '<div class="sess-empty muted">No events for this filter yet.</div>';
 }
 
 // ---- Requests: Radarr/Sonarr connection settings ----
