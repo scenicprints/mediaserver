@@ -395,6 +395,10 @@ final class Store: ObservableObject {
         let shared = UserDefaults(suiteName: Store.appGroup)
         shared?.set(serverURL, forKey: "serverURL")
         if let t = token { shared?.set(t, forKey: "authToken") }
+        // Verify the round-trip: if the app-group entitlement isn't actually
+        // active, the write above silently goes nowhere — breadcrumb the truth.
+        let ok = (shared?.string(forKey: "authToken") != nil)
+        if token != nil { crumb("app: creds → app group (readback=\(ok ? "ok" : "FAILED — entitlement missing?"))") }
     }
 
     // ---- CI preview: populate sample data straight from TMDB (public CDN), so
