@@ -560,15 +560,22 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     //   4. Revert (criteria = nil) only at orderly teardown, after player stop.
     // Every step breadcrumbs to the server (POST /api/clientlog) so a failure
     // names its exact step.
+    // Switch-AFTER-ready ordering (what AVPlayerViewController actually does:
+    // it derives display criteria from the stream's init segment, i.e. it
+    // switches MID-playback, never before loading). Creating the player right
+    // after a manual HDMI mode switch proved flaky — the identical stream
+    // nondeterministically failed -12927 seconds after a switch and played
+    // when the pipeline was quiet. So: play first on a stable display, then
+    // switch once the item is readyToPlay (video keeps rolling; brief blink;
+    // badge lights).
+    private var avPendingHDR: Store.MediaInfo?
     private func beginAVPlayback() {
         Task { @MainActor in
             if let store, let fid = fileId,
                let mi = await store.mediaInfo(kind: kind, fileId: fid), mi.isHDR {
-                await store.crumbSync("hdr: begin \(mi.hdr ?? "?") \(mi.width ?? 0)x\(mi.height ?? 0)@\(mi.fps ?? 0)")
-                // Start the server's remux NOW — it produces segments during the
-                // ~3s display switch, so AVPlayer's first fetch isn't a cold start.
-                store.warmHLS(kind: kind, fileId: fid)
-                await switchDisplayToHDR(mi)
+                await store.crumbSync("hdr: begin \(mi.hdr ?? "?") \(mi.width ?? 0)x\(mi.height ?? 0)@\(mi.fps ?? 0) — switch deferred until readyToPlay")
+                store.warmHLS(kind: kind, fileId: fid)   // head start for the remux
+                avPendingHDR = mi
             }
             await store?.crumbSync("av: creating player")
             setupAVQueue()
@@ -710,6 +717,12 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         store?.crumb("av: item readyToPlay (mvar=\(avMvar))")
         if item === av?.currentItem { avResumeIfNeeded() }
         refreshAVTracks(item)
+        // NOW switch the display into HDR — playback is established, so the
+        // mode change happens under a rolling pipeline (the PVC choreography).
+        if let mi = avPendingHDR {
+            avPendingHDR = nil
+            Task { @MainActor in await switchDisplayToHDR(mi) }
+        }
     }
 
     private func observeAV(main mainItem: AVPlayerItem) {
