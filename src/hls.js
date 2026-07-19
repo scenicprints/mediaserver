@@ -238,8 +238,8 @@ async function waitForPlaylist(s, ff) {
   while (Date.now() - t0 < WAIT_MS) {
     let txt = '';
     try { txt = fs.readFileSync(ff, 'utf8'); } catch {}
-    if (/\.m4s/.test(txt)) return txt;
-    if (!running(s)) return /\.m4s/.test(txt) ? txt : null;  // died before a segment
+    if (/\.(m4s|ts)/.test(txt)) return txt;
+    if (!running(s)) return /\.(m4s|ts)/.test(txt) ? txt : null;  // died before a segment
     await sleep(200);
     s.lastAccess = Date.now();
   }
@@ -489,10 +489,10 @@ export function registerHls(app, db, helpers = {}) {
       logEvent('no_segments', { file: path.basename(r.row.path), why, exit: s.lastExit ?? null });
       return reply.code(500).send({ error: `playback failed: ${why}` });
     }
-    logEvent('playlist_served', { file: path.basename(r.row.path), segments: (pl.match(/\.m4s/g) || []).length, running: running(s) });
+    logEvent('playlist_served', { file: path.basename(r.row.path), segments: (pl.match(/\.(m4s|ts)/g) || []).length, running: running(s) });
     pl = pl
       .replace(/URI="init\.mp4"/g, `URI="init.mp4${r.q}"`)
-      .replace(/^(seg\d+\.m4s)\s*$/gm, (m, f) => `${f}${r.q}`);
+      .replace(/^(seg\d+\.(?:m4s|ts))\s*$/gm, (m, f) => `${f}${r.q}`);
     if (!running(s) && !/#EXT-X-ENDLIST/.test(pl)) pl += '#EXT-X-ENDLIST\n';
     reply.header('Content-Type', 'application/vnd.apple.mpegurl');
     return reply.send(pl);
@@ -501,7 +501,7 @@ export function registerHls(app, db, helpers = {}) {
   // init.mp4 (fMP4 header) or a media segment.
   app.get('/api/hls/:kind/:fileId/:seg', async (req, reply) => {
     const name = req.params.seg;
-    if (!/^(init\.mp4|seg\d+\.m4s)$/.test(name)) return reply.code(400).send({ error: 'bad segment' });
+    if (!/^(init\.mp4|seg\d+\.(?:m4s|ts))$/.test(name)) return reply.code(400).send({ error: 'bad segment' });
     const r = resolve(req, reply);
     if (!r) return;
     const ci = await codecInfo(r.row.path);
