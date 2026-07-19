@@ -16,9 +16,10 @@ enum CardBadge: Hashable {
 // The MARQUEE gradient wordmark. Lives at the top of each page's scroll content
 // (it scrolls away with the page — it is NOT pinned over everything).
 struct MarqueeWordmark: View {
+    var size: CGFloat = 34   // Live TV uses a compact one so the guide gets the room
     var body: some View {
         Text("MARQUEE")
-            .font(.system(size: 34, weight: .heavy)).kerning(1.5)
+            .font(.system(size: size, weight: .heavy)).kerning(1.5)
             .foregroundStyle(Theme.grad)
             .accessibilityHidden(true)
     }

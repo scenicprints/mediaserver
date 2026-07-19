@@ -190,8 +190,10 @@ struct LiveTVView: View {
                 }
             } else {
                 // The marquee preview is PINNED — it carries what you're looking
-                // at while only the guide rows scroll underneath it.
-                VStack(alignment: .leading, spacing: 18) {
+                // at while only the guide rows scroll underneath it. Kept COMPACT
+                // (small wordmark, short hero) so the guide shows several
+                // channels at once instead of ~1.5.
+                VStack(alignment: .leading, spacing: 10) {
                     if channels.indices.contains(selected) { preview(channels[selected]) }
                     guide
                         .frame(maxHeight: .infinity)
@@ -212,15 +214,15 @@ struct LiveTVView: View {
         let on = LiveTV.nowOn(ch, now.timeIntervalSince1970)
         ZStack(alignment: .topLeading) {
             previewArt(ch, on: on)
-            MarqueeWordmark()
-                .padding(.leading, Theme.gutter).padding(.top, 46)
+            MarqueeWordmark(size: 20)
+                .padding(.leading, Theme.gutter).padding(.top, 24)
         }
     }
 
     @ViewBuilder private func previewArt(_ ch: LiveChannel, on: (item: LiveItem, offset: Double, endsIn: Double, idx: Int)) -> some View {
         ZStack(alignment: .bottomLeading) {
             ArtImage(url: on.item.backdrop ?? on.item.still ?? on.item.poster, aspect: 16.0 / 9.0)
-                .frame(height: 560).frame(maxWidth: .infinity).clipped()
+                .frame(height: 300).frame(maxWidth: .infinity).clipped()
                 .overlay {
                     LinearGradient(stops: [
                         .init(color: Theme.bg, location: 0.0),
@@ -236,30 +238,32 @@ struct LiveTVView: View {
                         .init(color: .clear, location: 0.55)
                     ], startPoint: .leading, endPoint: .trailing)
                 }
-            VStack(alignment: .leading, spacing: 14) {
-                HStack(spacing: 14) {
-                    Text("\(ch.number)").font(.headline).fontWeight(.heavy)
-                        .padding(.horizontal, 12).padding(.vertical, 6)
-                        .background(Theme.accent, in: RoundedRectangle(cornerRadius: 8))
-                    Text(ch.name).font(.title3).fontWeight(.heavy).kerning(2)
-                    HStack(spacing: 6) { Circle().fill(.red).frame(width: 12, height: 12); Text("LIVE").font(.caption).fontWeight(.bold) }
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 12) {
+                    Text("\(ch.number)").font(.subheadline).fontWeight(.heavy)
+                        .padding(.horizontal, 10).padding(.vertical, 4)
+                        .background(Theme.accent, in: RoundedRectangle(cornerRadius: 7))
+                    Text(ch.name).font(.callout).fontWeight(.heavy).kerning(2)
+                    HStack(spacing: 6) { Circle().fill(.red).frame(width: 10, height: 10); Text("LIVE").font(.caption2).fontWeight(.bold) }
                 }
-                Text(on.item.title).font(.system(size: 52, weight: .bold)).shadow(radius: 10).lineLimit(1)
                 HStack(spacing: 14) {
+                    Text(on.item.title).font(.system(size: 30, weight: .bold)).shadow(radius: 10).lineLimit(1)
                     if let y = on.item.year { Chip(String(y)) }
                     if let r = on.item.rating, r > 0 { Chip(String(format: "★ %.1f", r)) }
                     if let s = on.item.sub { Chip(s) }
                 }
-                ProgressView(value: min(on.offset / on.item.duration, 1))
-                    .tint(Theme.accent).frame(maxWidth: 560)
-                Text("\(Int(on.offset / 60)) min in · Up next \(clock(now.timeIntervalSince1970 + on.endsIn))")
-                    .font(.callout).foregroundStyle(.secondary)
-                Button { tuned = TunedLive(item: on.item, offset: on.offset) } label: {
-                    Label("Tune In", systemImage: "play.fill").font(.headline).padding(.horizontal, 18)
+                HStack(spacing: 14) {
+                    ProgressView(value: min(on.offset / on.item.duration, 1))
+                        .tint(Theme.accent).frame(maxWidth: 340)
+                    Text("\(Int(on.offset / 60)) min in · Up next \(clock(now.timeIntervalSince1970 + on.endsIn))")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button { tuned = TunedLive(item: on.item, offset: on.offset) } label: {
+                        Label("Tune In", systemImage: "play.fill").font(.subheadline).padding(.horizontal, 12)
+                    }
+                    .buttonStyle(.borderedProminent).tint(Theme.accent)
                 }
-                .buttonStyle(.borderedProminent).tint(Theme.accent).padding(.top, 4)
             }
-            .padding(.horizontal, Theme.gutter).padding(.bottom, 36)
+            .padding(.horizontal, Theme.gutter).padding(.bottom, 18)
         }
     }
 
