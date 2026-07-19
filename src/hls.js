@@ -103,6 +103,12 @@ async function codecInfo(filePath) {
   const videoRange = (transfer === 'smpte2084' || prim === 'bt2020') ? 'PQ'
     : (transfer === 'arib-std-b67') ? 'HLG' : 'SDR';
 
+  let fps = null;
+  const fr = /^(\d+)\/(\d+)$/.exec(String((v && (v.avg_frame_rate || v.r_frame_rate)) || ''));
+  if (fr && +fr[2]) fps = +fr[1] / +fr[2];
+  let size = 0; try { size = fs.statSync(filePath).size; } catch {}
+  const duration = parseFloat(p && p.format && p.format.duration) || 0;
+
   const info = {
     vcodec: v && String(v.codec_name || '').toLowerCase(),
     vtag: v && String(v.codec_tag_string || '').toLowerCase(),
@@ -110,9 +116,12 @@ async function codecInfo(filePath) {
     vlevel: v && parseInt(v.level, 10),
     vhevc: v ? parseHevcConfig(v.extradata) : null,   // exact tier/level/constraint from the hvcC
     width: (v && v.width) || null, height: (v && v.height) || null, videoRange,
+    fps,
+    // Real overall bitrate (+10% headroom) for the master's BANDWIDTH, like Plex.
+    bandwidth: duration > 0 && size > 0 ? Math.round((size * 8 / duration) * 1.1) : 20000000,
     acodec: aStream && String(aStream.codec_name || '').toLowerCase(),
     aMap,
-    duration: parseFloat(p && p.format && p.format.duration) || 0
+    duration
   };
   probeCache.set(filePath, { at: Date.now(), info });
   return info;
@@ -255,10 +264,8 @@ function spawnFfmpeg(s, filePath, opts, ci) {
 
   if (vcopy) {
     args.push('-c:v', 'copy');
-    // AVPlayer only decodes HEVC tagged 'hvc1'; a file tagged 'hev1' plays
-    // audio with NO VIDEO. Re-tag on the copy (bitstream is identical) — this
-    // is THE fix for HEVC files that direct-played as audio-only.
-    if (ci.vcodec === 'hevc' || ci.vcodec === 'h265') args.push('-tag:v', 'hvc1');
+    // (MPEG-TS segments don't use the hvc1/hev1 sample-entry tag — that was an
+    // fMP4 concern; ffmpeg auto-inserts hevc_mp4toannexb for the TS copy.)
   } else {
     // Truly-unsupported video (rare: VC-1, MPEG-2…): re-encode to H.264 with
     // IDR keyframes on the 6s grid.
@@ -276,14 +283,16 @@ function spawnFfmpeg(s, filePath, opts, ci) {
     if (opts.forceStereo) args.push('-ac', '2');
   }
 
-  // Fragmented-MP4 HLS, VOD. AVPlayer requires HEVC in fMP4 (not mpegts) anyway.
+  // MPEG-TS HLS — what Plex ACTUALLY serves the Apple TV (captured live from
+  // this machine's Plex for the same file: container=mpegts, HEVC+E-AC-3
+  // copied). Our previous fMP4 shape was rejected by tvOS 26 with -12927
+  // right after the init segment on every play; TS has no init at all.
   // ffmpeg writes its own keyframe-aligned playlist to ff.m3u8; we serve a
   // token-rewritten copy of it.
   args.push(
     '-f', 'hls',
     '-hls_time', String(SEG_SECONDS),
-    '-hls_segment_type', 'fmp4',
-    '-hls_fmp4_init_filename', 'init.mp4',
+    '-hls_segment_type', 'mpegts',
     // EVENT, not VOD: AVPlayer fetches a VOD playlist ONCE, so while the remux
     // is still producing segments it would see only the first one or two and
     // stall. An EVENT playlist tells AVPlayer to re-fetch as it grows; we append
@@ -291,7 +300,7 @@ function spawnFfmpeg(s, filePath, opts, ci) {
     '-hls_playlist_type', 'event',
     '-hls_list_size', '0',
     '-hls_flags', 'independent_segments',
-    '-hls_segment_filename', path.join(s.dir, 'seg%05d.m4s'),
+    '-hls_segment_filename', path.join(s.dir, 'seg%05d.ts'),
     path.join(s.dir, 'ff.m3u8')
   );
 
@@ -424,15 +433,19 @@ export function registerHls(app, db, helpers = {}) {
       lines.push(`#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="${name}",DEFAULT=NO,AUTOSELECT=NO${lang},URI="subs/${i}.m3u8${r.q}"`);
     });
     const subs = tracks.length ? ',SUBTITLES="subs"' : '';
-    // NO RESOLUTION / VIDEO-RANGE — settled EMPIRICALLY by the client-side
-    // master bisection on the real Apple TV (tvOS 26): VIDEO-RANGE=PQ makes
-    // AVPlayer fail -1002 at master parse (media playlist never requested);
-    // the bare BANDWIDTH+CODECS variant is the shape that PLAYED. HDR still
-    // works because the tvOS client switches the display itself and the HEVC
-    // bitstream carries its own PQ color metadata.
-    lines.push(`#EXT-X-STREAM-INF:BANDWIDTH=20000000,CODECS="${codecs}"${subs}`);
+    // PLEX'S EXACT MASTER SHAPE — captured live from this machine's Plex for
+    // the same file (its Apple TV direct-stream, which demonstrably plays):
+    //   #EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=25026000,RESOLUTION=3840x1920,
+    //   FRAME-RATE=23.976000,VIDEO-RANGE=PQ
+    // Notably: NO CODECS attribute, real BANDWIDTH, and MPEG-TS media segments
+    // (see spawnFfmpeg) — our old fMP4+CODECS shape drew -1002/-12927 from
+    // tvOS 26 on every play.
+    const res = (ci.width && ci.height) ? `,RESOLUTION=${ci.width}x${ci.height}` : '';
+    const fr = ci.fps ? `,FRAME-RATE=${ci.fps.toFixed(3)}` : '';
+    const vrange = ci.videoRange ? `,VIDEO-RANGE=${ci.videoRange}` : '';
+    lines.push(`#EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=${ci.bandwidth || 20000000}${res}${fr}${vrange}${subs}`);
     lines.push(`index.m3u8${r.q}`);
-    logEvent('master', { file: path.basename(r.row.path), codecs, subs: tracks.length, mvar });
+    logEvent('master', { file: path.basename(r.row.path), codecs, subs: tracks.length, mvar, ts: true });
     reply.header('Content-Type', 'application/vnd.apple.mpegurl');
     return reply.send(lines.join('\n') + '\n');
   });
@@ -502,7 +515,7 @@ export function registerHls(app, db, helpers = {}) {
       return reply.code(running(s) ? 504 : 500).send({ error: 'segment not available' });
     }
     s.lastAccess = Date.now();
-    reply.header('Content-Type', 'video/mp4');
+    reply.header('Content-Type', name.endsWith('.ts') ? 'video/mp2t' : 'video/mp4');
     return reply.send(fs.createReadStream(file));
   });
 }
