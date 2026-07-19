@@ -6,3 +6,4 @@ config.json
 sample-media/
 sample-tv/
 *.zip
+appletv/ci-fixtures/

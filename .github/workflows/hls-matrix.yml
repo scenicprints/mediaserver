@@ -1,0 +1,78 @@
+name: HLS format matrix
+
+# Reproduces the Apple TV HLS format failures on the tvOS SIMULATOR so stream
+# shapes can be iterated without a physical device: synthesizes 4K HDR10 HEVC +
+# E-AC-3 fixtures with ffmpeg (matching the library's real file parameters),
+# serves them over local HTTP, and runs HLSFormatTests which prints one
+# "HLSMATRIX ..." verdict line per variant.
+on:
+  workflow_dispatch:
+
+jobs:
+  matrix:
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: appletv
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select newest Xcode
+        run: |
+          XC="$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+          sudo xcode-select -s "$XC"
+          xcodebuild -version
+
+      - name: Install tools
+        run: brew install xcodegen ffmpeg
+
+      - name: Synthesize fixtures (4K HDR10 HEVC Main10 + E-AC-3 5.1)
+        run: |
+          mkdir -p ci-fixtures/src
+          # 14s clip mimicking the library's real files: 3840x1920, 10-bit PQ/BT.2020, 23.976fps, E-AC-3 5.1
+          ffmpeg -y -hide_banner -loglevel error \
+            -f lavfi -i "testsrc2=size=3840x1920:rate=24000/1001:duration=14" \
+            -f lavfi -i "sine=frequency=440:duration=14" \
+            -c:v libx265 -pix_fmt yuv420p10le -preset ultrafast -tag:v hvc1 \
+            -x265-params "colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc" \
+            -c:a eac3 -ac 6 -b:a 640k \
+            ci-fixtures/src/clip.mp4
+          for MODE in fmp4 cmaf ts; do mkdir -p "ci-fixtures/$MODE"; done
+          ffmpeg -y -hide_banner -loglevel error -i ci-fixtures/src/clip.mp4 -map 0:v:0 -map 0:a:0 \
+            -c:v copy -tag:v hvc1 -c:a copy -f hls -hls_time 6 -hls_segment_type fmp4 \
+            -hls_fmp4_init_filename init.mp4 -hls_playlist_type vod -hls_list_size 0 \
+            -hls_flags independent_segments -hls_segment_filename ci-fixtures/fmp4/seg%05d.m4s ci-fixtures/fmp4/media.m3u8
+          ffmpeg -y -hide_banner -loglevel error -i ci-fixtures/src/clip.mp4 -map 0:v:0 -map 0:a:0 \
+            -c:v copy -tag:v hvc1 -c:a copy -movflags +cmaf -f hls -hls_time 6 -hls_segment_type fmp4 \
+            -hls_fmp4_init_filename init.mp4 -hls_playlist_type vod -hls_list_size 0 \
+            -hls_flags independent_segments -hls_segment_filename ci-fixtures/cmaf/seg%05d.m4s ci-fixtures/cmaf/media.m3u8
+          ffmpeg -y -hide_banner -loglevel error -i ci-fixtures/src/clip.mp4 -map 0:v:0 -map 0:a:0 \
+            -c:v copy -c:a copy -f hls -hls_time 6 -hls_segment_type mpegts \
+            -hls_playlist_type vod -hls_list_size 0 \
+            -hls_flags independent_segments -hls_segment_filename ci-fixtures/ts/seg%05d.ts ci-fixtures/ts/media.m3u8
+          for D in fmp4 cmaf; do
+            printf '#EXTM3U\n#EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=27538769,RESOLUTION=3840x1920,FRAME-RATE=23.976,VIDEO-RANGE=PQ,CODECS="hvc1.2.4.H150.90,ec-3"\nmedia.m3u8\n' > "ci-fixtures/$D/master-codecs.m3u8"
+            printf '#EXTM3U\n#EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=27538769,RESOLUTION=3840x1920,FRAME-RATE=23.976,VIDEO-RANGE=PQ\nmedia.m3u8\n' > "ci-fixtures/$D/master-plain.m3u8"
+          done
+          printf '#EXTM3U\n#EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=27538769,RESOLUTION=3840x1920,FRAME-RATE=23.976,VIDEO-RANGE=PQ\nmedia.m3u8\n' > "ci-fixtures/ts/master-plain.m3u8"
+          ls -la ci-fixtures/fmp4
+
+      - name: Serve fixtures
+        run: |
+          (cd ci-fixtures && python3 -m http.server 8791 &)
+          sleep 2
+          curl -s -o /dev/null -w "fixture server: %{http_code}\n" http://127.0.0.1:8791/fmp4/media.m3u8
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Run matrix on tvOS simulator
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project MarqueeTV.xcodeproj \
+            -scheme MarqueeTVTests \
+            -destination 'platform=tvOS Simulator,name=Apple TV 4K (3rd generation)' \
+            CODE_SIGNING_ALLOWED=NO 2>&1 | tee /tmp/test.log | grep -E "HLSMATRIX|Test Suite|error:" || true
+          echo "===== MATRIX RESULTS ====="
+          grep -a "HLSMATRIX" /tmp/test.log || echo "no matrix lines found (test may have failed to run)"
