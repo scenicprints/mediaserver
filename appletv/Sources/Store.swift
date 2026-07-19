@@ -642,9 +642,10 @@ final class Store: ObservableObject {
     func playbackURL(kind: String, file: MovieFile) -> URL? {
         return kind == "episode" ? episodeStreamURL(fileId: file.id) : streamURL(fileId: file.id)
     }
-    func hlsURL(kind: String, fileId: Int) -> URL? {
+    func hlsURL(kind: String, fileId: Int, mvar: Int = 1) -> URL? {
         guard let t = token else { return nil }
-        return URL(string: "\(cleanBase)/api/hls/\(kind)/\(fileId)/master.m3u8?token=\(t)&\(audioQuery())")
+        let x = mvar > 1 ? "&mvar=\(mvar)" : ""
+        return URL(string: "\(cleanBase)/api/hls/\(kind)/\(fileId)/master.m3u8?token=\(t)&\(audioQuery())\(x)")
     }
     // VLCKit plays anything, so there's no direct-vs-remux decision to make —
     // just hand back the raw byte-range stream. Kept async so call sites are

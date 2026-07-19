@@ -399,9 +399,17 @@ export function registerHls(app, db, helpers = {}) {
     const atag = audioCodecTag(acopy ? ci.acodec : 'aac');  // copied codec, else aac
     const codecs = `${vtag},${atag}`;
 
+    // A/B bisection knob (?mvar=N): the tvOS client auto-retries a failing
+    // master with progressively simpler ones, so ONE play attempt names the
+    // attribute tvOS 26 chokes on (its -1002 carries no detail).
+    //   1 = full master  |  2 = no subtitle renditions  |  3 = also no
+    //   VIDEO-RANGE  |  4 = also no RESOLUTION  |  5 = BANDWIDTH+CODECS only
+    const mvar = Math.max(1, Math.min(5, parseInt((req.query || {}).mvar, 10) || 1));
+
     const lines = ['#EXTM3U', '#EXT-X-VERSION:7'];
     let tracks = [];
     try { tracks = (await allSubtitleTracks(r.row.path)).slice(0, 12); } catch {}
+    if (mvar >= 2) tracks = [];
     const seen = new Map();
     tracks.forEach((t, i) => {
       let name = String(t.label || `Subtitles ${i + 1}`).replace(/"/g, "'");
@@ -411,14 +419,13 @@ export function registerHls(app, db, helpers = {}) {
       lines.push(`#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="${name}",DEFAULT=NO,AUTOSELECT=NO${lang},URI="subs/${i}.m3u8${r.q}"`);
     });
     const subs = tracks.length ? ',SUBTITLES="subs"' : '';
-    // RESOLUTION + VIDEO-RANGE are REQUIRED by tvOS for a video variant — and an
-    // HDR (PQ/HLG) stream with no VIDEO-RANGE is rejected: AVPlayer reads the init
-    // then refuses to fetch any segment ("endless loading" on 4K HDR).
-    const res = (ci.width && ci.height) ? `,RESOLUTION=${ci.width}x${ci.height}` : '';
-    const vrange = ci.videoRange ? `,VIDEO-RANGE=${ci.videoRange}` : '';
+    // RESOLUTION + VIDEO-RANGE: an HDR (PQ/HLG) stream must advertise its range
+    // or tvOS won't host it — but these are also bisection suspects (mvar 3/4).
+    const res = (mvar < 4 && ci.width && ci.height) ? `,RESOLUTION=${ci.width}x${ci.height}` : '';
+    const vrange = (mvar < 3 && ci.videoRange) ? `,VIDEO-RANGE=${ci.videoRange}` : '';
     lines.push(`#EXT-X-STREAM-INF:BANDWIDTH=20000000${res}${vrange},CODECS="${codecs}"${subs}`);
     lines.push(`index.m3u8${r.q}`);
-    logEvent('master', { file: path.basename(r.row.path), codecs, subs: tracks.length });
+    logEvent('master', { file: path.basename(r.row.path), codecs, subs: tracks.length, mvar });
     reply.header('Content-Type', 'application/vnd.apple.mpegurl');
     return reply.send(lines.join('\n') + '\n');
   });

@@ -653,35 +653,53 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         q.play()
     }
 
+    // Master-simplification bisection level (?mvar=) — bumped on item failure so
+    // one play attempt walks the ladder and names the attribute tvOS rejects.
+    private var avMvar = 1
+
+    private func observeMainItem(_ item: AVPlayerItem) {
+        avStatusObs = item.observe(\.status, options: [.new]) { [weak self] it, _ in
+            Task { @MainActor in self?.handleAVItemStatus(it) }
+        }
+    }
+
+    private func handleAVItemStatus(_ item: AVPlayerItem) {
+        if item.status == .failed {
+            // Surface the REAL error to the server log, including WHICH URL
+            // failed and the player's own error log — no more guessing.
+            let e = item.error as NSError?
+            let failing = (e?.userInfo["NSErrorFailingURLStringKey"] as? String)
+                ?? (e?.userInfo[NSURLErrorFailingURLStringErrorKey] as? String) ?? "-"
+            let under = (e?.userInfo[NSUnderlyingErrorKey] as? NSError).map { "\($0.domain) \($0.code)" } ?? "-"
+            let logEv = item.errorLog()?.events.last.map {
+                "code=\($0.errorStatusCode) dom=\($0.errorDomain) uri=\($0.uri ?? "-") \($0.errorComment ?? "")"
+            } ?? "-"
+            let red = { (s: String) -> String in
+                guard let t = self.store?.token, !t.isEmpty else { return s }
+                return s.replacingOccurrences(of: t, with: "TOKEN")
+            }
+            store?.crumb("av: item FAILED (mvar=\(avMvar)) \(e?.domain ?? "?") \(e?.code ?? 0): \(e?.localizedDescription ?? "?") | failingURL=\(red(failing)) | underlying=\(under) | errlog=\(red(logEv))")
+            // Bisection: retry with the next-simpler master until something plays.
+            if avMvar < 5, let q = av, let url = store?.hlsURL(kind: kind, fileId: fileId ?? -1, mvar: avMvar + 1) {
+                avMvar += 1
+                store?.crumb("av: retrying with simplified master mvar=\(avMvar)")
+                let next = AVPlayerItem(url: url)
+                q.removeAllItems(); q.insert(next, after: nil)
+                avMainItem = next
+                observeMainItem(next)
+                q.play()
+            }
+            return
+        }
+        guard item.status == .readyToPlay else { return }
+        store?.crumb("av: item readyToPlay (mvar=\(avMvar))")
+        if item === av?.currentItem { avResumeIfNeeded() }
+        refreshAVTracks(item)
+    }
+
     private func observeAV(main mainItem: AVPlayerItem) {
         guard let q = av else { return }
-        // Ready → (on the MAIN item) resume-seek once, then keep playing.
-        avStatusObs = mainItem.observe(\.status, options: [.new]) { [weak self] item, _ in
-            Task { @MainActor in
-                guard let self else { return }
-                if item.status == .failed {
-                    // Surface the REAL error to the server log, including WHICH
-                    // URL failed and the player's own error log — no more guessing.
-                    let e = item.error as NSError?
-                    let failing = (e?.userInfo["NSErrorFailingURLStringKey"] as? String)
-                        ?? (e?.userInfo[NSURLErrorFailingURLStringErrorKey] as? String) ?? "-"
-                    let under = (e?.userInfo[NSUnderlyingErrorKey] as? NSError).map { "\($0.domain) \($0.code)" } ?? "-"
-                    let logEv = item.errorLog()?.events.last.map {
-                        "code=\($0.errorStatusCode) dom=\($0.errorDomain) uri=\($0.uri ?? "-") \($0.errorComment ?? "")"
-                    } ?? "-"
-                    let red = { (s: String) -> String in
-                        guard let t = self.store?.token, !t.isEmpty else { return s }
-                        return s.replacingOccurrences(of: t, with: "TOKEN")
-                    }
-                    self.store?.crumb("av: item FAILED \(e?.domain ?? "?") \(e?.code ?? 0): \(e?.localizedDescription ?? "?") | failingURL=\(red(failing)) | underlying=\(under) | errlog=\(red(logEv))")
-                    return
-                }
-                guard item.status == .readyToPlay else { return }
-                self.store?.crumb("av: item readyToPlay")
-                if item === self.av?.currentItem { self.avResumeIfNeeded() }
-                self.refreshAVTracks(item)
-            }
-        }
+        observeMainItem(mainItem)
         avRateObs = q.observe(\.timeControlStatus, options: [.new]) { [weak self] p, _ in
             Task { @MainActor in
                 guard let self else { return }
