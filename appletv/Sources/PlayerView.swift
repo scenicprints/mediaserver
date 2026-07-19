@@ -689,8 +689,9 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
             // 5-deep retry storm defeats itself. Same level again after a beat,
             // then descend the simplification ladder; ≤6 attempts total.
             guard avTry < 6, let q = av else { return }
-            if avTry >= 2 && avMvar < 2 { avMvar += 1 }   // after 2 tries, drop subtitle renditions too
+            // Two tries per rung: 1 normal → 2 no-subs → 3 AAC audio.
             avTry += 1
+            if avTry % 2 == 0 && avMvar < 3 { avMvar += 1 }
             guard let url = store?.hlsURL(kind: kind, fileId: fileId ?? -1, mvar: avMvar) else { return }
             let mv = avMvar, tn = avTry
             Task { @MainActor in

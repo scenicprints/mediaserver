@@ -59,14 +59,18 @@ function logEvent(event, data = {}) {
 }
 
 function audioOptsFromQuery(q) {
-  return { forceStereo: q.audio !== 'surround' };
+  // aac=1: re-encode audio to AAC even when the source codec is copyable.
+  // Bisection rung for CoreMedia -12927, which public reports tie to A/V
+  // track duration/alignment mismatches — a copied E-AC-3 track keeps the
+  // source's timing quirks; an AAC re-encode resets them.
+  return { forceStereo: q.audio !== 'surround', forceAac: q.aac === '1' };
 }
 function fileRow(db, kind, fileId) {
   const table = kind === 'episode' ? 'episode_files' : 'movie_files';
   return db.prepare(`SELECT path FROM ${table} WHERE id = ?`).get(fileId);
 }
 function key(kind, fileId, opts) {
-  return `${kind}-${fileId}-${opts.forceStereo ? 's' : 'x'}`.replace(/[^a-z0-9-]/gi, '');
+  return `${kind}-${fileId}-${opts.forceStereo ? 's' : 'x'}${opts.forceAac ? 'a' : ''}`.replace(/[^a-z0-9-]/gi, '');
 }
 
 // Probe once (cached ~10 min): the video/audio codec names + duration decide
@@ -184,7 +188,7 @@ function audioCodecTag(acodec) {
 // Propagate the query the segment/init/subtitle URIs need (AVPlayer resolves
 // them relative to the playlist and drops the query — including ?token=).
 function passQuery(q) {
-  const keep = ['token', 'audio'];
+  const keep = ['token', 'audio', 'aac'];
   const parts = [];
   for (const k of keep) if (q[k] != null && q[k] !== '') parts.push(`${k}=${encodeURIComponent(q[k])}`);
   return parts.length ? '?' + parts.join('&') : '';
@@ -238,7 +242,7 @@ function spawnFfmpeg(s, filePath, opts, ci) {
   if (!ff) throw new Error('ffmpeg not installed');
   const nvenc = !!ffStatus().nvenc;
   const vcopy = !!ci.vcodec && APPLE_VIDEO.has(ci.vcodec);
-  const acopy = !!ci.acodec && APPLE_AUDIO.has(ci.acodec);
+  const acopy = !!ci.acodec && APPLE_AUDIO.has(ci.acodec) && !opts.forceAac;
 
   const args = ['-hide_banner', '-loglevel', 'error'];
   // GPU decode only helps when we must actually re-encode video; a copy needs no
@@ -268,7 +272,7 @@ function spawnFfmpeg(s, filePath, opts, ci) {
   if (acopy) {
     args.push('-c:a', 'copy');
   } else {
-    args.push('-c:a', 'aac', '-b:a', '256k');
+    args.push('-c:a', 'aac', '-b:a', opts.forceStereo ? '256k' : '384k');
     if (opts.forceStereo) args.push('-ac', '2');
   }
 
@@ -394,7 +398,8 @@ export function registerHls(app, db, helpers = {}) {
     if (!r) return;
     const ci = await codecInfo(r.row.path);
     const vcopy = !!ci.vcodec && APPLE_VIDEO.has(ci.vcodec);
-    const acopy = !!ci.acodec && APPLE_AUDIO.has(ci.acodec);
+    const forceAac = (req.query || {}).aac === '1';
+    const acopy = !!ci.acodec && APPLE_AUDIO.has(ci.acodec) && !forceAac;
     const vtag = videoCodecTag(ci, !vcopy);                 // hvc1/avc1 for what we OUTPUT
     const atag = audioCodecTag(acopy ? ci.acodec : 'aac');  // copied codec, else aac
     const codecs = `${vtag},${atag}`;

@@ -649,9 +649,14 @@ final class Store: ObservableObject {
         Task { _ = try? await request("api/hls/\(kind)/\(fileId)/index.m3u8?\(audioQuery())") }
     }
 
+    // Failure-ladder rungs: 1 = normal | 2 = no subtitle renditions |
+    // 3 = also re-encode audio to AAC (bisection for CoreMedia -12927,
+    // which reports tie to copied-audio A/V alignment quirks).
     func hlsURL(kind: String, fileId: Int, mvar: Int = 1) -> URL? {
         guard let t = token else { return nil }
-        let x = mvar > 1 ? "&mvar=\(mvar)" : ""
+        var x = ""
+        if mvar >= 2 { x += "&mvar=2" }
+        if mvar >= 3 { x += "&aac=1" }
         return URL(string: "\(cleanBase)/api/hls/\(kind)/\(fileId)/master.m3u8?token=\(t)&\(audioQuery())\(x)")
     }
     // VLCKit plays anything, so there's no direct-vs-remux decision to make —
