@@ -163,12 +163,9 @@ struct PlayerView: View {
     private var bottomChrome: some View {
         VStack(spacing: 0) {
             Spacer()
-            // Center transport — big round glass buttons.
-            HStack(spacing: 60) {
-                glassButton("gobackward.10", 108, .skipBack) { m.jump(-10); m.flashControls() }
-                glassButton(m.isPlaying ? "pause.fill" : "play.fill", 140, .play) { m.togglePlay(); m.flashControls() }
-                glassButton("goforward.10", 108, .skipFwd) { m.jump(10); m.flashControls() }
-            }
+            // Center transport — a single round glass play/pause (the ±10s side
+            // buttons were redundant: D-pad left/right already jumps ±10s).
+            glassButton(m.isPlaying ? "pause.fill" : "play.fill", 140, .play) { m.togglePlay(); m.flashControls() }
             Spacer()
             // Bottom: scrubber + utility row over a scrim.
             VStack(spacing: 14) {
@@ -569,15 +566,27 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     // switch once the item is readyToPlay (video keeps rolling; brief blink;
     // badge lights).
     private var avPendingHDR: Store.MediaInfo?
+    // Timeline base: the stream starts at this absolute position (resume/seek
+    // respawn) — real position = avBase + player.currentTime (the same virtual-
+    // timeline model the web player uses for its transcode streams).
+    private var avBase: Double = 0
     private func beginAVPlayback() {
         Task { @MainActor in
-            if let store, let fid = fileId,
-               let mi = await store.mediaInfo(kind: kind, fileId: fid), mi.isHDR {
-                await store.crumbSync("hdr: begin \(mi.hdr ?? "?") \(mi.width ?? 0)x\(mi.height ?? 0)@\(mi.fps ?? 0) — switch deferred until readyToPlay")
-                store.warmHLS(kind: kind, fileId: fid)   // head start for the remux
-                avPendingHDR = mi
+            // Resume: resolve the exact keyframe and start the stream THERE —
+            // never seek into a remux that hasn't produced the target yet
+            // (that was "resume plays from the beginning").
+            if startAt > 1, let store, let fid = fileId {
+                avBase = await store.seekPoint(kind: kind, fileId: fid, start: startAt)
+                store.crumb("av: resume base=\(String(format: "%.1f", avBase)) (asked \(String(format: "%.1f", startAt)))")
             }
-            await store?.crumbSync("av: creating player")
+            if let store, let fid = fileId {
+                store.warmHLS(kind: kind, fileId: fid, start: avBase)   // head start for the remux
+                if let mi = await store.mediaInfo(kind: kind, fileId: fid), mi.isHDR {
+                    await store.crumbSync("hdr: begin \(mi.hdr ?? "?") \(mi.width ?? 0)x\(mi.height ?? 0)@\(mi.fps ?? 0) — switch deferred until readyToPlay")
+                    avPendingHDR = mi
+                }
+            }
+            await store?.crumbSync("av: creating player (base=\(Int(avBase)))")
             setupAVQueue()
             store?.crumb("av: playing")
         }
@@ -642,7 +651,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
 
     private func setupAVQueue() {
         // The HDR path always streams the HLS remux, not the raw VLC URL.
-        let mainURLForAV: URL = (store?.hlsURL(kind: kind, fileId: fileId ?? -1)) ?? mainURL!
+        let mainURLForAV: URL = (store?.hlsURL(kind: kind, fileId: fileId ?? -1, start: avBase)) ?? mainURL!
         self.mainURL = mainURLForAV
         if let t = store?.token {
             store?.crumb("av: item url=\(mainURLForAV.absoluteString.replacingOccurrences(of: t, with: "TOKEN")) preroll=\(prerollURL != nil)")
@@ -692,7 +701,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
             // its first second of life — retry the same URL a few times, spaced.
             guard avTry < 4, let q = av else { return }
             avTry += 1
-            guard let url = store?.hlsURL(kind: kind, fileId: fileId ?? -1) else { return }
+            guard let url = store?.hlsURL(kind: kind, fileId: fileId ?? -1, start: avBase) else { return }
             let tn = avTry
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 2_000_000_000)   // let the remux produce segments
@@ -708,7 +717,6 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         }
         guard item.status == .readyToPlay else { return }
         store?.crumb("av: item readyToPlay (try=\(avTry))")
-        if item === av?.currentItem { avResumeIfNeeded() }
         refreshAVTracks(item)
         // NOW switch the display into HDR — playback is established, so the
         // mode change happens under a rolling pipeline (the PVC choreography).
@@ -736,10 +744,37 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         }
     }
 
-    private func avResumeIfNeeded() {
-        guard useAV, onMain, !seekedToStart, startAt > 1 else { return }
-        seekedToStart = true
-        av?.seek(to: CMTime(seconds: startAt, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .positiveInfinity)
+    // Seek to an ABSOLUTE position. Inside the stream's produced window → a
+    // plain AVPlayer seek; outside it (deep scrub, seek before the resume
+    // base) → respawn the stream at the target keyframe (the Plex model).
+    func avSeek(_ t: Double) {
+        guard useAV, let q = av else { return }
+        let target = max(0, duration > 0 ? min(t, duration - 0.5) : t)
+        let rel = target - avBase
+        var inWindow = false
+        if rel >= 0, let item = q.currentItem {
+            for r in item.seekableTimeRanges {
+                let tr = r.timeRangeValue
+                if rel >= tr.start.seconds - 0.5 && rel <= tr.start.seconds + tr.duration.seconds + 0.5 { inWindow = true; break }
+            }
+        }
+        if inWindow {
+            q.seek(to: CMTime(seconds: max(0, rel), preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .positiveInfinity)
+            return
+        }
+        guard let store, let fid = fileId else { return }
+        buffering = true
+        Task { @MainActor in
+            let base = await store.seekPoint(kind: kind, fileId: fid, start: target)
+            guard !self.finished, let url = store.hlsURL(kind: self.kind, fileId: fid, start: base), let q2 = self.av else { return }
+            self.avBase = base
+            store.crumb("av: seek respawn base=\(Int(base))")
+            let item = AVPlayerItem(url: url)
+            q2.removeAllItems(); q2.insert(item, after: nil)
+            self.avMainItem = item
+            self.observeMainItem(item)
+            q2.play()
+        }
     }
 
     private func avItemEnded(_ item: AVPlayerItem?) {
@@ -748,20 +783,21 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
             // Main content finished → Up Next or dismiss.
             if !upNext.isEmpty { playNext() } else { finish(save: true); finishedPlayback = true }
         } else {
-            // Pre-roll finished; the queue has advanced to the main item.
-            onMain = true; seekedToStart = false
-            avResumeIfNeeded()
+            // Pre-roll finished; the queue has advanced to the main item
+            // (which already starts at avBase — no seek needed).
+            onMain = true
         }
     }
 
     // AVPlayer per-tick UI update — mirrors handleTime for the AV engine.
+    // Positions are avBase-offset: the stream's t=0 is the resume keyframe.
     private func avTick() {
         guard useAV, onMain, let q = av, q.currentItem != nil else { return }
         let t = q.currentTime().seconds
-        if t.isFinite { position = max(0, t) }
-        if duration <= 0, let d = q.currentItem?.duration.seconds, d.isFinite, d > 0 { duration = d }
+        if t.isFinite { position = max(0, avBase + t) }
+        if duration <= 0, let d = q.currentItem?.duration.seconds, d.isFinite, d > 0 { duration = avBase + d }
         if let r = q.currentItem?.loadedTimeRanges.last?.timeRangeValue {
-            let end = r.start.seconds + r.duration.seconds
+            let end = avBase + r.start.seconds + r.duration.seconds
             if duration > 0, end.isFinite { buffered = min(1, end / duration) }
         }
         if let r = introRange { showSkipIntro = position >= r.start && position <= r.end }
@@ -842,12 +878,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         if player.isPlaying { player.pause() } else { player.play() }
     }
     func jump(_ s: Int) {
-        if useAV {
-            guard let q = av else { return }
-            let t = max(0, q.currentTime().seconds + Double(s))
-            q.seek(to: CMTime(seconds: t, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .positiveInfinity)
-            return
-        }
+        if useAV { avSeek(position + Double(s)); return }
         if s < 0 { player.jumpBackward(Int32(-s)) } else { player.jumpForward(Int32(s)) }
     }
     private var enginePlaying: Bool { useAV ? (av?.timeControlStatus == .playing) : player.isPlaying }
@@ -864,7 +895,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     }
     func skipIntro() {
         guard let end = introRange?.end else { return }
-        if useAV { av?.seek(to: CMTime(seconds: end, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .positiveInfinity) }
+        if useAV { avSeek(end) }
         else { player.time = VLCTime(int: Int32(end * 1000)) }
         showSkipIntro = false
     }
@@ -951,6 +982,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         mediaSubtitle = next.subtitle; declaredDuration = next.duration
         duration = next.duration ?? 0; position = 0; currentSubtitle = -1
         if useAV {
+            avBase = 0
             // Swap the queue over to the next episode's HLS remux.
             if let url = store.hlsURL(kind: "episode", fileId: next.fileId), let q = av {
                 q.removeAllItems()
@@ -1019,7 +1051,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         if let store, let ref { Task { await store.saveProgress(ref, position: position, duration: total, watched: watched ? true : nil) } }
     }
     private var currentPositionSeconds: Double {
-        if useAV { let t = av?.currentTime().seconds ?? 0; return t.isFinite ? t : 0 }
+        if useAV { let t = av?.currentTime().seconds ?? 0; return t.isFinite ? avBase + t : avBase }
         return Double(player.time.intValue) / 1000.0
     }
     private func heartbeat(position: Double) {

@@ -60,17 +60,22 @@ function logEvent(event, data = {}) {
 
 function audioOptsFromQuery(q) {
   // aac=1: re-encode audio to AAC even when the source codec is copyable.
-  // Bisection rung for CoreMedia -12927, which public reports tie to A/V
-  // track duration/alignment mismatches — a copied E-AC-3 track keeps the
-  // source's timing quirks; an AAC re-encode resets them.
-  return { forceStereo: q.audio !== 'surround', forceAac: q.aac === '1' };
+  // start=<sec>: begin the remux AT that keyframe (resume/deep-seek — the
+  // Plex model). The client resolves the exact keyframe via /api/seekpoint
+  // first and keeps `position = start + currentTime` as its timeline base.
+  return {
+    forceStereo: q.audio !== 'surround',
+    forceAac: q.aac === '1',
+    start: Math.max(0, parseFloat(q.start) || 0)
+  };
 }
 function fileRow(db, kind, fileId) {
   const table = kind === 'episode' ? 'episode_files' : 'movie_files';
   return db.prepare(`SELECT path FROM ${table} WHERE id = ?`).get(fileId);
 }
 function key(kind, fileId, opts) {
-  return `${kind}-${fileId}-${opts.forceStereo ? 's' : 'x'}${opts.forceAac ? 'a' : ''}`.replace(/[^a-z0-9-]/gi, '');
+  const st = opts.start > 0 ? `-st${Math.round(opts.start)}` : '';
+  return `${kind}-${fileId}-${opts.forceStereo ? 's' : 'x'}${opts.forceAac ? 'a' : ''}${st}`.replace(/[^a-z0-9-]/gi, '');
 }
 
 // Probe once (cached ~10 min): the video/audio codec names + duration decide
@@ -197,7 +202,7 @@ function audioCodecTag(acodec) {
 // Propagate the query the segment/init/subtitle URIs need (AVPlayer resolves
 // them relative to the playlist and drops the query — including ?token=).
 function passQuery(q) {
-  const keep = ['token', 'audio', 'aac'];
+  const keep = ['token', 'audio', 'aac', 'start'];
   const parts = [];
   for (const k of keep) if (q[k] != null && q[k] !== '') parts.push(`${k}=${encodeURIComponent(q[k])}`);
   return parts.length ? '?' + parts.join('&') : '';
@@ -257,6 +262,10 @@ function spawnFfmpeg(s, filePath, opts, ci) {
   // GPU decode only helps when we must actually re-encode video; a copy needs no
   // decode at all (and the hwaccel path is exactly what mangled 10-bit HEVC).
   if (!vcopy && nvenc) args.push('-hwaccel', 'auto');
+  // Resume/deep-seek: input-seek to the requested keyframe (copy emits from
+  // the keyframe at/before it; the client passed an exact keyframe time from
+  // /api/seekpoint, so the stream starts precisely there).
+  if (opts.start > 0) args.push('-ss', String(opts.start));
   // Map the best (Apple-native, copyable) audio track chosen in codecInfo — not
   // blindly track 0 — so a TrueHD/DTS-HD track 0 doesn't force a crash-prone
   // decode when the file also carries an AC-3/E-AC-3 track we can copy.

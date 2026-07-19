@@ -642,20 +642,33 @@ final class Store: ObservableObject {
     func playbackURL(kind: String, file: MovieFile) -> URL? {
         return kind == "episode" ? episodeStreamURL(fileId: file.id) : streamURL(fileId: file.id)
     }
-    // Kick the server's HLS remux for this file WITHOUT waiting — called while
-    // the HDR display switch is settling (~3s), so ffmpeg has segments ready by
-    // the time AVPlayer asks (cold-start races were failing first plays).
-    func warmHLS(kind: String, fileId: Int) {
-        Task { _ = try? await request("api/hls/\(kind)/\(fileId)/index.m3u8?\(audioQuery())") }
+    // Kick the server's HLS remux for this file WITHOUT waiting — called as the
+    // player spins up, so ffmpeg has segments ready by the time AVPlayer asks
+    // (cold-start races were failing first plays).
+    func warmHLS(kind: String, fileId: Int, start: Double = 0) {
+        let st = start > 0 ? "&start=\(String(format: "%.2f", start))" : ""
+        Task { _ = try? await request("api/hls/\(kind)/\(fileId)/index.m3u8?\(audioQuery())\(st)") }
     }
 
     // The MEDIA playlist, consumed DIRECTLY (no master). The tvOS-simulator
     // format matrix proved AVPlayer plays our fMP4 media fine this way, while
     // EVERY master-playlist variant was rejected by the multivariant
-    // eligibility machinery (-1002/-11868/-12927).
-    func hlsURL(kind: String, fileId: Int, mvar: Int = 1) -> URL? {
+    // eligibility machinery (-1002/-11868/-12927). `start` begins the remux at
+    // that keyframe (resume/deep-seek) — the client keeps position = start +
+    // currentTime as its timeline base.
+    func hlsURL(kind: String, fileId: Int, start: Double = 0) -> URL? {
         guard let t = token else { return nil }
-        return URL(string: "\(cleanBase)/api/hls/\(kind)/\(fileId)/index.m3u8?token=\(t)&\(audioQuery())")
+        let st = start > 0 ? "&start=\(String(format: "%.2f", start))" : ""
+        return URL(string: "\(cleanBase)/api/hls/\(kind)/\(fileId)/index.m3u8?token=\(t)&\(audioQuery())\(st)")
+    }
+
+    // Where will a copied stream asked to start at `start` REALLY begin? The
+    // keyframe at/before it (skipping this was the web player's lip-sync bug).
+    func seekPoint(kind: String, fileId: Int, start: Double) async -> Double {
+        guard start > 0 else { return 0 }
+        struct R: Decodable { let start: Double }
+        let r = await get("api/seekpoint/\(kind)/\(fileId)?start=\(String(format: "%.2f", start))&\(audioQuery())", as: R.self)
+        return r?.start ?? start
     }
     // VLCKit plays anything, so there's no direct-vs-remux decision to make —
     // just hand back the raw byte-range stream. Kept async so call sites are
