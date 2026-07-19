@@ -59,9 +59,16 @@ jobs:
 
       - name: Serve fixtures
         run: |
-          (cd ci-fixtures && python3 -m http.server 8791 &)
-          sleep 2
-          curl -s -o /dev/null -w "fixture server: %{http_code}\n" http://127.0.0.1:8791/fmp4/media.m3u8
+          (cd ci-fixtures && nohup python3 -m http.server 8791 --bind 127.0.0.1 > /tmp/http.log 2>&1 &)
+          CODE=000
+          for i in $(seq 1 30); do
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 2 http://127.0.0.1:8791/fmp4/media.m3u8 || true)
+            [ "$CODE" = "200" ] && break
+            sleep 2
+          done
+          echo "fixture server: $CODE"
+          cat /tmp/http.log || true
+          [ "$CODE" = "200" ]
 
       - name: Generate Xcode project
         run: xcodegen generate
