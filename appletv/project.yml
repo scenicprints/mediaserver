@@ -33,6 +33,12 @@ targets:
     dependencies:
       - package: VLCKitSPM
         product: VLCKitSPM
+      # EXPLICIT AVKit link — `window.avDisplayManager` (the HDR display-mode
+      # switch) is an AVKit category on UIWindow; with auto-linking it can be
+      # left out of the binary and the first access crashes with "unrecognized
+      # selector" (rdar 35450849). This was the 4K-HDR insta-crash: the
+      # breadcrumb log died on exactly that line.
+      - sdk: AVKit.framework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.scenicprints.marqueetv
