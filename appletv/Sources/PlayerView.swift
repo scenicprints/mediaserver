@@ -473,7 +473,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     private var lastSaved: Double = 0
     private var lastBeat: Double = -100
     private var finished = false
-    private var hideTimer: Timer?
+    private var hideTask: Task<Void, Never>?
     private var introRange: Store.IntroRange?
 
     var subtitleRows: [TrackOption] { subtitleOptions }
@@ -884,13 +884,16 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     private var enginePlaying: Bool { useAV ? (av?.timeControlStatus == .playing) : player.isPlaying }
     func flashControls() {
         controlsVisible = true
-        hideTimer?.invalidate()
-        hideTimer = Timer.scheduledTimer(withTimeInterval: 3.5, repeats: false) { [weak self] _ in
-            Task { @MainActor in
-                guard let self else { return }
-                // Always auto-hide (unless a menu is up) so the HUD never sticks.
-                if self.menu == PlayerModel.Menu.none { self.controlsVisible = false }
-            }
+        hideTask?.cancel()
+        // NOT a Timer: run-loop timers sit in .default mode, and tvOS keeps the
+        // main run loop in tracking mode while a thumb rests on the Siri remote
+        // touchpad — the timer never fires and the HUD never auto-hides. A
+        // structured-concurrency sleep doesn't care about run-loop modes.
+        hideTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 3_500_000_000)
+            guard let self, !Task.isCancelled else { return }
+            // Always auto-hide (unless a menu is up) so the HUD never sticks.
+            if self.menu == PlayerModel.Menu.none { self.controlsVisible = false }
         }
     }
     func skipIntro() {
@@ -1074,7 +1077,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         }
     }
     func teardown() {
-        hideTimer?.invalidate()
+        hideTask?.cancel()
         finish(save: true)
         if useAV {
             avStatusObs?.invalidate(); avRateObs?.invalidate()

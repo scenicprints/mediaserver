@@ -189,16 +189,17 @@ struct LiveTVView: View {
                     Text("Add movies or shows to start broadcasting.").foregroundStyle(.secondary)
                 }
             } else {
-                // The marquee preview is PINNED — it carries what you're looking
-                // at while only the guide rows scroll underneath it. Kept COMPACT
-                // (small wordmark, short hero) so the guide shows several
-                // channels at once instead of ~1.5.
-                VStack(alignment: .leading, spacing: 10) {
+                // The preview is PINNED — it carries what you're looking at
+                // while only the guide rows scroll underneath. It RESPECTS the
+                // top safe area (the tvOS tab bar): ignoring it piled the hero
+                // under the tab bar AND gave the guide's ScrollView a phantom
+                // content inset (a dead band above the rows). Compact strip
+                // instead of a full-bleed hero → several channels visible.
+                VStack(alignment: .leading, spacing: 12) {
                     if channels.indices.contains(selected) { preview(channels[selected]) }
                     guide
                         .frame(maxHeight: .infinity)
                 }
-                .ignoresSafeArea()
             }
         }
         .task { await load() }
@@ -209,36 +210,16 @@ struct LiveTVView: View {
         }
     }
 
-    // Full-bleed hero for the focused channel's current program.
+    // Compact now-playing strip: 16:9 thumbnail beside the program info, sized
+    // so the guide below gets most of the screen. No wordmark on this page —
+    // the tab bar is already up top and every pixel belongs to the guide.
     @ViewBuilder private func preview(_ ch: LiveChannel) -> some View {
         let on = LiveTV.nowOn(ch, now.timeIntervalSince1970)
-        ZStack(alignment: .topLeading) {
-            previewArt(ch, on: on)
-            MarqueeWordmark(size: 20)
-                .padding(.leading, Theme.gutter).padding(.top, 24)
-        }
-    }
-
-    @ViewBuilder private func previewArt(_ ch: LiveChannel, on: (item: LiveItem, offset: Double, endsIn: Double, idx: Int)) -> some View {
-        ZStack(alignment: .bottomLeading) {
+        HStack(alignment: .center, spacing: 26) {
             ArtImage(url: on.item.backdrop ?? on.item.still ?? on.item.poster, aspect: 16.0 / 9.0)
-                .frame(height: 300).frame(maxWidth: .infinity).clipped()
-                .overlay {
-                    LinearGradient(stops: [
-                        .init(color: Theme.bg, location: 0.0),
-                        .init(color: Theme.bg.opacity(0.55), location: 0.28),
-                        .init(color: .clear, location: 0.62),
-                        .init(color: .clear, location: 0.82),
-                        .init(color: Theme.bg.opacity(0.5), location: 1.0)
-                    ], startPoint: .bottom, endPoint: .top)
-                }
-                .overlay {
-                    LinearGradient(stops: [
-                        .init(color: Theme.bg.opacity(0.9), location: 0.0),
-                        .init(color: .clear, location: 0.55)
-                    ], startPoint: .leading, endPoint: .trailing)
-                }
-            VStack(alignment: .leading, spacing: 8) {
+                .frame(width: 340, height: 191).clipped()
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+            VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 12) {
                     Text("\(ch.number)").font(.subheadline).fontWeight(.heavy)
                         .padding(.horizontal, 10).padding(.vertical, 4)
@@ -247,14 +228,14 @@ struct LiveTVView: View {
                     HStack(spacing: 6) { Circle().fill(.red).frame(width: 10, height: 10); Text("LIVE").font(.caption2).fontWeight(.bold) }
                 }
                 HStack(spacing: 14) {
-                    Text(on.item.title).font(.system(size: 30, weight: .bold)).shadow(radius: 10).lineLimit(1)
+                    Text(on.item.title).font(.system(size: 34, weight: .bold)).lineLimit(1)
                     if let y = on.item.year { Chip(String(y)) }
                     if let r = on.item.rating, r > 0 { Chip(String(format: "★ %.1f", r)) }
                     if let s = on.item.sub { Chip(s) }
                 }
                 HStack(spacing: 14) {
                     ProgressView(value: min(on.offset / on.item.duration, 1))
-                        .tint(Theme.accent).frame(maxWidth: 340)
+                        .tint(Theme.accent).frame(maxWidth: 320)
                     Text("\(Int(on.offset / 60)) min in · Up next \(clock(now.timeIntervalSince1970 + on.endsIn))")
                         .font(.caption).foregroundStyle(.secondary)
                     Button { tuned = TunedLive(item: on.item, offset: on.offset) } label: {
@@ -263,8 +244,10 @@ struct LiveTVView: View {
                     .buttonStyle(.borderedProminent).tint(Theme.accent)
                 }
             }
-            .padding(.horizontal, Theme.gutter).padding(.bottom, 18)
+            Spacer(minLength: 0)
         }
+        .padding(.horizontal, Theme.gutter)
+        .padding(.top, 6)
     }
 
     // The EPG grid: a shared timeline, programs positioned by their real air
