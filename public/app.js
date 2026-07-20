@@ -2973,6 +2973,7 @@ let diagFilter = 'all';
 const DIAG_FILTERS = [
   ['all', 'All', null],
   ['errors', 'Errors', 'error,native'],
+  ['plays', 'Plays', 'play'],
   ['player', 'Player', 'player'],
   ['buffer', 'Buffering', 'buffer'],
   ['net', 'Network', 'net'],
@@ -2980,8 +2981,60 @@ const DIAG_FILTERS = [
   ['nav', 'Nav', 'nav,boot'],
   ['deeplink', 'Deep links', 'deeplink']
 ];
-function startDiagPolling() { loadDiag(); clearInterval(diagTimer); diagTimer = setInterval(loadDiag, 8000); }
+let diagDays = 7;         // stats window (1 / 7 / 14 days)
+let diagDevList = [];     // last device list, for labeling the vitals table
+function startDiagPolling() { loadDiag(); loadDiagStats(); clearInterval(diagTimer); diagTimer = setInterval(loadDiag, 8000); }
 function stopDiagPolling() { clearInterval(diagTimer); diagTimer = null; }
+
+// ---- Product stats: the aggregate decide-what-to-build numbers ----
+// One fetch per open / window change (not on the 8s event poll — aggregates
+// don't need to be live to the second).
+async function loadDiagStats() {
+  const box = document.getElementById('diag-stats');
+  const daysBox = document.getElementById('diag-days');
+  if (!box) return;
+  daysBox.innerHTML = [1, 7, 14].map((d) =>
+    `<button class="diag-f${d === diagDays ? ' on' : ''}" data-days="${d}">${d === 1 ? '24h' : d + ' days'}</button>`).join('') +
+    '<span class="diag-days-lbl muted">stats window</span>';
+  daysBox.querySelectorAll('[data-days]').forEach((b) => b.addEventListener('click', () => { diagDays = +b.dataset.days; loadDiagStats(); }));
+  let s;
+  try { const r = await fetch('/api/admin/telemetry/stats?days=' + diagDays); if (!r.ok) return; s = await r.json(); } catch (_e) { return; }
+  const pct = (n) => s.plays.total ? Math.round((n / s.plays.total) * 100) + '%' : '—';
+  const list = (pairs, empty) => pairs && pairs.length
+    ? pairs.map(([k, n]) => `<div class="diag-kv"><span class="diag-k">${escapeHtml(String(k))}</span><span class="diag-v">${n}</span></div>`).join('')
+    : `<div class="diag-kv muted">${empty}</div>`;
+  const devLabel = (id) => {
+    const d = diagDevList.find((x) => x.device === id);
+    return d ? `${d.username ? d.username + ' · ' : ''}${deviceLabel((d.info || {}).ua, (d.info || {}).tv)}` : id;
+  };
+  const vitals = (s.deviceVitals || []).filter((v) => v.avgFps != null);
+  box.innerHTML = `
+    <div class="diag-card">
+      <div class="diag-card-h">Plays</div>
+      <div class="diag-big">${s.plays.total}</div>
+      <div class="diag-kv"><span class="diag-k">▶ direct</span><span class="diag-v">${s.plays.direct} (${pct(s.plays.direct)})</span></div>
+      <div class="diag-kv"><span class="diag-k">⚙ transcode</span><span class="diag-v">${s.plays.transcode} (${pct(s.plays.transcode)})</span></div>
+      <div class="diag-kv"><span class="diag-k">🌐 remote</span><span class="diag-v">${s.plays.remote}</span></div>
+    </div>
+    <div class="diag-card">
+      <div class="diag-card-h">Why transcodes happen</div>
+      ${list(s.transcodeReasons, 'no transcodes 🎉')}
+    </div>
+    <div class="diag-card">
+      <div class="diag-card-h">What's actually played</div>
+      ${list([...(s.vcodecs || []), ...(s.heights || []), ...(s.containers || [])], 'no plays yet')}
+    </div>
+    <div class="diag-card">
+      <div class="diag-card-h">Smoothness</div>
+      <div class="diag-kv"><span class="diag-k">rebuffers</span><span class="diag-v">${s.rebuffers.count}${s.rebuffers.count ? ' (' + s.rebuffers.totalSec + 's lost)' : ''}</span></div>
+      ${vitals.map((v) => `<div class="diag-kv"><span class="diag-k">${escapeHtml(devLabel(v.device))}</span><span class="diag-v">${v.avgFps} fps · ${v.stalls} stalls</span></div>`).join('')}
+    </div>
+    <div class="diag-card diag-card-wide">
+      <div class="diag-card-h">Top errors</div>
+      ${list(s.errors, 'no errors 🎉')}
+    </div>
+    ${(s.deeplinks || []).length ? `<div class="diag-card"><div class="diag-card-h">Deep-link results</div>${list(s.deeplinks, '')}</div>` : ''}`;
+}
 const diagAgo = (ts) => {
   const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
   return s < 60 ? s + 's ago' : s < 3600 ? Math.round(s / 60) + 'm ago' : s < 86400 ? Math.round(s / 3600) + 'h ago' : Math.round(s / 86400) + 'd ago';
@@ -2999,6 +3052,7 @@ function diagLine(e) {
       if (d.ev === 'error') return `✖ ${d.title || ''} · media error ${d.code != null ? d.code : ''} ${d.msg || ''} @ ${fmtDur(d.at)}`;
       if (d.ev === 'close') return `⏹ ${d.title || ''} @ ${fmtDur(d.at)}${d.dur ? ' / ' + fmtDur(d.dur) : ''}`;
       return JSON.stringify(d);
+    case 'play': return `${d.mode}${d.vcodec ? ' · ' + d.vcodec + (d.height ? ' ' + d.height + 'p' : '') : ''}${d.acodec ? ' + ' + d.acodec : ''}${d.container ? ' · ' + d.container : ''}${d.reason ? ' · ' + d.reason : ''}${d.remote ? ' · 🌐 remote' : ''}`;
     case 'buffer': return `${d.kind === 'head' ? 'start cushion' : '⏳ REBUFFER'} ${((d.ms || 0) / 1000).toFixed(1)}s${d.at != null ? ' @ ' + fmtDur(d.at) : ''}${d.net ? ' · net ' + d.net + '×' : ''}`;
     case 'net': return `${d.failed ? '✖ failed' : d.slow ? '🐢 ' + d.ms + 'ms' : 'HTTP ' + d.status} · ${d.url || ''}${d.msg ? ' · ' + d.msg : ''}`;
     case 'vitals': return `${d.fps != null ? d.fps + ' fps' : ''}${d.longTasks ? ` · ${d.longTasks} stalls (worst ${d.longestMs}ms)` : ''}${d.heapMB ? ` · heap ${d.heapMB}MB` : ''}`;
@@ -3015,6 +3069,7 @@ async function loadDiag() {
   let devices = [];
   try { const r = await fetch('/api/admin/telemetry/devices'); if (!r.ok) return; devices = await r.json(); } catch (_e) { return; }
   if (countEl) countEl.textContent = devices.length ? `${devices.length} device${devices.length === 1 ? '' : 's'}` : 'nothing reported yet';
+  diagDevList = devices;
   if (diagDevice && !devices.some((d) => d.device === diagDevice)) diagDevice = '';
   devBox.innerHTML = [{ device: '', username: null, info: {}, lastSeen: 0, label: 'All devices' }, ...devices].map((d) => {
     const label = d.label || `${d.username ? d.username + ' · ' : ''}${deviceLabel((d.info || {}).ua, (d.info || {}).tv)}`;

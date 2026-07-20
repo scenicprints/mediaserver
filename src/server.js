@@ -1016,6 +1016,28 @@ app.get('/api/play/:kind/:fileId', async (req, reply) => {
   // Remember the server's authoritative engine decision so the admin monitor can
   // report accurate direct/transcode details for this viewer (see /api/session/*).
   playDecisions.set(`${req.user.id}:${kind}:${fileId}`, { mode: info.mode, engine: info.engine || null, at: Date.now() });
+  // Flight recorder: log the decision server-side too (device 'server'), so the
+  // codec/transcode "product stats" count EVERY client — including native apps
+  // (Apple TV) that never run telemetry.js. Must never block playback.
+  try {
+    const e = info.engine || {};
+    db.prepare('INSERT INTO telemetry (ts, user_id, device, type, data) VALUES (?, ?, ?, ?, ?)').run(
+      Date.now(), req.user.id, 'server', 'play',
+      JSON.stringify({
+        kind,
+        mode: info.mode,
+        reason: info.reason || undefined,
+        vcodec: e.video ? e.video.codec : undefined,
+        height: e.video ? e.video.height : undefined,
+        acodec: e.audio ? e.audio.codec : undefined,
+        channels: e.audio ? e.audio.channels : undefined,
+        videoAction: e.videoAction || undefined,
+        audioAction: e.audioAction || undefined,
+        container: (row.path.match(/\.([a-z0-9]+)$/i) || [])[1] || undefined,
+        remote: isRemote(req) || undefined
+      })
+    );
+  } catch { /* stats are best-effort */ }
   return {
     mode: info.mode,
     duration: info.duration,
@@ -1309,7 +1331,7 @@ app.get('/api/admin/telemetry/devices', async (req, reply) => {
   const rows = db.prepare(`
     SELECT device, MAX(ts) AS lastSeen, COUNT(*) AS events,
            SUM(CASE WHEN type IN ('error', 'native') AND ts > ? THEN 1 ELSE 0 END) AS errors24h
-    FROM telemetry GROUP BY device ORDER BY lastSeen DESC LIMIT 40
+    FROM telemetry WHERE device != 'server' GROUP BY device ORDER BY lastSeen DESC LIMIT 40
   `).all(Date.now() - 86400e3);
   const bootQ = db.prepare("SELECT data, user_id FROM telemetry WHERE device = ? AND type = 'boot' ORDER BY id DESC LIMIT 1");
   const userQ = db.prepare('SELECT username FROM users WHERE id = ?');
@@ -1320,6 +1342,62 @@ app.get('/api/admin/telemetry/devices', async (req, reply) => {
     const u = boot ? userQ.get(boot.user_id) : null;
     return { ...r, info, username: u ? u.username : null };
   });
+});
+
+// Admin: aggregate "product stats" over the last N days — what actually plays
+// (direct vs transcode and WHY, codecs, containers, resolutions), what breaks
+// (top errors), how smooth it is per device (fps/stalls from vitals), rebuffer
+// totals, and deep-link outcomes. The decide-what-to-build-next numbers.
+app.get('/api/admin/telemetry/stats', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const days = Math.min(14, Math.max(1, Number(req.query.days) || 7));
+  const rows = db.prepare('SELECT ts, device, type, data FROM telemetry WHERE ts > ?').all(Date.now() - days * 86400e3);
+  const bump = (m, k, n = 1) => { if (k != null && k !== '') m[k] = (m[k] || 0) + n; };
+  const plays = { total: 0, direct: 0, transcode: 0, remote: 0 };
+  const reasons = {}, vcodecs = {}, acodecs = {}, containers = {}, heights = {}, errors = {}, deeplinks = {};
+  const vitalsByDev = {};
+  let rebufCount = 0, rebufMs = 0;
+  for (const r of rows) {
+    let d = {};
+    try { d = JSON.parse(r.data) || {}; } catch { continue; }
+    if (r.type === 'play') {
+      plays.total++;
+      plays[d.mode === 'transcode' ? 'transcode' : 'direct']++;
+      if (d.remote) plays.remote++;
+      if (d.mode === 'transcode') {
+        const why = d.videoAction && d.videoAction !== 'copy'
+          ? `${d.vcodec || 'video'} → ${d.videoAction}`
+          : (d.reason || (d.audioAction && d.audioAction !== 'copy' ? `${d.acodec || 'audio'} → ${d.audioAction}` : 'container remux'));
+        bump(reasons, why);
+      }
+      bump(vcodecs, d.vcodec); bump(acodecs, d.acodec); bump(containers, d.container);
+      bump(heights, d.height ? d.height + 'p' : null);
+    } else if (r.type === 'buffer' && d.kind === 'rebuffer') {
+      rebufCount++; rebufMs += d.ms || 0;
+    } else if (r.type === 'error' || r.type === 'native') {
+      bump(errors, (r.type === 'native' ? (d.type || 'native') + ': ' : '') + String(d.msg || d.stack || '?').split('\n')[0].slice(0, 90));
+    } else if (r.type === 'vitals') {
+      const v = vitalsByDev[r.device] || (vitalsByDev[r.device] = { fpsSum: 0, n: 0, stalls: 0, worst: 0 });
+      if (d.fps) { v.fpsSum += d.fps; v.n++; }
+      v.stalls += d.longTasks || 0;
+      if ((d.longestMs || 0) > v.worst) v.worst = d.longestMs;
+    } else if (r.type === 'deeplink') {
+      if (d.result) bump(deeplinks, d.result);
+    }
+  }
+  const top = (m, n = 8) => Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, n);
+  return {
+    days,
+    plays,
+    transcodeReasons: top(reasons),
+    vcodecs: top(vcodecs, 6), acodecs: top(acodecs, 6), containers: top(containers, 6), heights: top(heights, 6),
+    rebuffers: { count: rebufCount, totalSec: Math.round(rebufMs / 1000) },
+    errors: top(errors, 10),
+    deeplinks: top(deeplinks),
+    deviceVitals: Object.entries(vitalsByDev).map(([device, v]) => ({
+      device, avgFps: v.n ? Math.round(v.fpsSum / v.n) : null, stalls: v.stalls, worstMs: v.worst
+    }))
+  };
 });
 
 // Admin: recent events, filterable by device and type, newest first.
