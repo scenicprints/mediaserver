@@ -38,7 +38,12 @@ outcomes (`public/telemetry.js` → `POST /api/telemetry`, ring-buffered `teleme
 admin **Settings ▸ Diagnostics** browses per-device with filters, auto-refresh. Android app
 additionally captures native crashes + WebView renderer deaths (recorded in prefs, injected
 into telemetry on next launch, renderer death auto-recovers via `recreate()`) and reports
-which app a deep-link actually resolved to.
+which app a deep-link actually resolved to. **Product stats layer**: `/api/play` logs every
+decision server-side (counts native apps too) → `GET /api/admin/telemetry/stats` rollups
+(direct/transcode split + why, codec/resolution/container breakdown, rebuffer totals,
+per-device fps/stalls, top errors, deep-link results) rendered as stat cards atop
+Diagnostics with a 24h/7d/14d window. Crash safety net: fatal errors → `data/crash.log`
++ exit 42 so run.bat auto-relaunches (added after the 2026-07-19 crash left it down).
 **✅ Google TV polish pass (2026-07-19)** — from real TCL testing: Requests moved into
 **Settings ▸ Requests** (ribbon tab hidden on TV — overscan clipped it out of reach) and the
 ribbon got a vertical overscan inset + no-wrap tabs + scrollable strip under remote focus;
