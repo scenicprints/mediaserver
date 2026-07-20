@@ -24,6 +24,24 @@ import { registerHls } from './hls.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 
+// ---- Crash safety net ----
+// run.bat only relaunches on exit code 42, so a fatal error used to leave the
+// server DOWN at a "Server stopped." prompt until a human noticed (2026-07-19:
+// exactly that). Now any fatal error is appended to data/crash.log (the console
+// scrolls away; the file is how we find out WHY) and the process exits 42, so
+// the existing run.bat loop brings the server straight back up.
+function crashExit(kind, err) {
+  try {
+    fs.appendFileSync(
+      path.join(ROOT, 'data', 'crash.log'),
+      `[${new Date().toISOString()}] ${kind}: ${(err && err.stack) || err}\n\n`
+    );
+  } catch { /* logging must never block the restart */ }
+  process.exit(42);
+}
+process.on('uncaughtException', (e) => crashExit('uncaughtException', e));
+process.on('unhandledRejection', (e) => crashExit('unhandledRejection', e));
+
 // Strip a leading UTF-8 BOM if present — some editors/PowerShell add one, and
 // JSON.parse rejects it.
 const CONFIG_PATH = path.join(ROOT, 'config.json');
