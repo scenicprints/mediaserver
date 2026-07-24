@@ -32,6 +32,16 @@ Invite code on the Dell: `lantern-6274`.
 **✅ Android TV app v1** shipped — WebView shell in `androidtv/`; GitHub Actions builds a debug
 APK to the **`marquee-tv-latest`** release for sideloading onto the friend's TCL Google TV.
 **✅ Forced update splash** (admin) with changelog + skip.
+**✅ Android TV native player — libVLC direct-play (2026-07-20, awaiting on-TV verification)** —
+the Apple TV treatment for Google TV: `androidtv/PlayerActivity.kt` (libVLC 3.6.5, MediaCodec
+hw decode) direct-plays the raw `/api/stream` byte range, so the server NEVER transcodes for
+it. Web `openPlayer` hands off via the `MarqueeTV.playNative` bridge; web player remains the
+automatic fallback (old APK / Settings ▸ Audio "Classic" toggle / native failure → reopens
+same title in web player at same position). Key-mapped remote HUD (OK play-pause or Skip
+Intro, ◀▶ ±10s, ▼ subtitles menu with ✨ AI-generate first, Back), pre-roll, resume, Up Next
+chains through the native result, progress/heartbeat/session-end/telemetry all reported
+natively. `/api/play?native=1` = truthful direct mode + `native:true` in play stats — the
+before/after transcode metric. CI: branch pushes compile-check only; main publishes.
 **✅ Telemetry flight recorder (2026-07-19)** — every client (TV apps especially) phones home
 errors, playback/buffer health, lag vitals (fps, long-task stalls, heap), nav, and deep-link
 outcomes (`public/telemetry.js` → `POST /api/telemetry`, ring-buffered `telemetry` table);
