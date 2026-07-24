@@ -28,6 +28,7 @@ import org.json.JSONObject
 import org.videolan.libvlc.LibVLC
 import org.videolan.libvlc.Media
 import org.videolan.libvlc.MediaPlayer
+import org.videolan.libvlc.interfaces.IMedia
 import org.videolan.libvlc.util.VLCVideoLayout
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
@@ -127,7 +128,7 @@ class PlayerActivity : Activity() {
             fetchPlayInfo()
             ui.postDelayed(netTick, 10000)
             (getSystemService(AUDIO_SERVICE) as? AudioManager)
-                ?.requestAudioFocus(null, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN)
+                ?.requestAudioFocus({ }, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN)
         } catch (e: Exception) {
             tele("error", JSONObject().put("ev", "native-setup").put("msg", e.toString()))
             finishWithResult(failed = true)
@@ -190,7 +191,9 @@ class PlayerActivity : Activity() {
                 // Resume: exactly once, only now that we're Playing (tvOS lesson).
                 if (!resumeApplied) {
                     resumeApplied = true
-                    if (startAt > 1 && player?.isSeekable == true) player?.time = (startAt * 1000).toLong()
+                    // (setTime/setSpuTrack return values in Java — call them as
+                    // methods; Kotlin property syntax doesn't compile for them.)
+                    if (startAt > 1 && player?.isSeekable == true) player?.setTime((startAt * 1000).toLong())
                     ui.postDelayed({ forceSubsOffOnce() }, 800) // after tracks settle
                 }
                 updateHud()
@@ -241,7 +244,7 @@ class PlayerActivity : Activity() {
     private fun forceSubsOffOnce() {
         if (subsForcedOff || userPickedSub) return
         subsForcedOff = true
-        try { if ((player?.spuTrack ?: -1) != -1) player?.spuTrack = -1 } catch (_: Exception) {}
+        try { if ((player?.spuTrack ?: -1) != -1) player?.setSpuTrack(-1) } catch (_: Exception) {}
     }
 
     private fun seekBy(deltaSec: Int) {
@@ -250,7 +253,7 @@ class PlayerActivity : Activity() {
         if (!p.isSeekable) return
         val d = durationSec.takeIf { it > 0 } ?: (p.length / 1000.0)
         val target = ((positionSec + deltaSec).coerceIn(0.0, if (d > 1) d - 1 else positionSec + deltaSec)) * 1000
-        try { p.time = target.toLong() } catch (_: Exception) {}
+        try { p.setTime(target.toLong()) } catch (_: Exception) {}
         flashHud()
     }
 
@@ -302,7 +305,7 @@ class PlayerActivity : Activity() {
         if (introEnd <= 0) return
         introSkipped = true
         skipIntroBtn.visibility = View.GONE
-        try { player?.time = (introEnd * 1000).toLong() } catch (_: Exception) {}
+        try { player?.setTime((introEnd * 1000).toLong()) } catch (_: Exception) {}
     }
 
     // ================= server reporting =================
@@ -408,12 +411,12 @@ class PlayerActivity : Activity() {
         currentSubIdx = idx
         userPickedSub = true
         try {
-            if (idx == -1) player?.spuTrack = -1
+            if (idx == -1) player?.setSpuTrack(-1)
             else {
                 // Server tracks (sidecars + extracted embedded) are served as WebVTT;
                 // load as a selected slave — libVLC renders it over the video.
                 val url = mediaUrl(spec.optString("subBase") + "?idx=" + idx)
-                player?.addSlave(Media.Slave.Type.Subtitle, Uri.parse(url), true)
+                player?.addSlave(IMedia.Slave.Type.Subtitle, Uri.parse(url), true)
             }
         } catch (_: Exception) {}
         closeSubsMenu()
