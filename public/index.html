@@ -125,6 +125,17 @@
       <div class="tab-panel" data-panel="audio">
         <p class="muted" style="margin-top:0">These settings are saved for <b>this device</b> (they depend on this screen's speakers) and take effect the next time you start something.</p>
 
+        <!-- Only shown inside the Android TV app when its native player exists:
+             the escape hatch back to the web player if native misbehaves. -->
+        <div class="sub-account hidden" id="tvengine-block" style="border-top:none;margin-top:0;padding-top:0">
+          <h3>TV player engine</h3>
+          <p class="muted">The native player plays every format directly on the TV — no server conversion, best quality. Switch to Classic (the old web player) only if something misbehaves.</p>
+          <div class="add-row seg">
+            <button class="btn" data-tvplayer="native">⚡ Native (recommended)</button>
+            <button class="btn" data-tvplayer="classic">🌐 Classic</button>
+          </div>
+        </div>
+
         <div class="sub-account">
           <h3>Audio output</h3>
           <p class="muted">If dialogue sometimes goes silent while music and effects keep playing, choose <b>Stereo</b> — TVs have two speakers, so the server folds surround (5.1) down to stereo correctly and keeps dialogue out front. <b>Surround</b> sends the original track untouched, for a real surround system.</p>

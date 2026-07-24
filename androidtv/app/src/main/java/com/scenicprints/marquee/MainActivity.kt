@@ -31,6 +31,7 @@ import java.net.URL
 class MainActivity : Activity() {
 
     private lateinit var web: WebView
+    private val REQ_PLAYER = 4242
 
     // The server's public HTTPS address. `?tv=1` switches the web UI to TV mode.
     private val startUrl = "https://marqu33.duckdns.org/?tv=1"
@@ -124,16 +125,54 @@ class MainActivity : Activity() {
 
     /** Exposed to the web app as `window.MarqueeTV`. The web UI calls openApp()
      *  for a streaming deep-link; we fire it from the native side so the OS can
-     *  route it to the installed app. appVersion() feeds the telemetry boot event. */
+     *  route it to the installed app. appVersion() feeds the telemetry boot event.
+     *  playNative() hands playback to the libVLC PlayerActivity — the web checks
+     *  for this method's existence to decide whether native playback is available. */
     inner class TvBridge {
         @JavascriptInterface
         fun openApp(url: String) { runOnUiThread { openExternal(url) } }
+        @JavascriptInterface
+        fun playNative(specJson: String) {
+            runOnUiThread {
+                try {
+                    val u = Uri.parse(startUrl)
+                    startActivityForResult(
+                        Intent(this@MainActivity, PlayerActivity::class.java)
+                            .putExtra("spec", specJson)
+                            .putExtra("base", "${u.scheme}://${u.host}${if (u.port > 0) ":${u.port}" else ""}"),
+                        REQ_PLAYER
+                    )
+                } catch (e: Exception) {
+                    // Never strand the viewer: report failure so the web player takes over.
+                    notifyNativeDone(false, true, 0.0)
+                }
+            }
+        }
         @JavascriptInterface
         fun appVersion(): String = try {
             val info = packageManager.getPackageInfo(packageName, 0)
             val code = if (Build.VERSION.SDK_INT >= 28) info.longVersionCode else info.versionCode.toLong()
             "${info.versionName} ($code)"
         } catch (_: Exception) { "?" }
+    }
+
+    /** The native player finished (user backed out / episode ended / it failed):
+     *  hand the outcome to the web app, which chains Up Next, falls back to the
+     *  web player on failure, or just refreshes its resume state. */
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQ_PLAYER) return
+        notifyNativeDone(
+            data?.getBooleanExtra("ended", false) ?: false,
+            data?.getBooleanExtra("failed", false) ?: (resultCode != RESULT_OK),
+            data?.getDoubleExtra("position", 0.0) ?: 0.0
+        )
+    }
+    private fun notifyNativeDone(ended: Boolean, failed: Boolean, position: Double) {
+        try {
+            val json = JSONObject().put("ended", ended).put("failed", failed).put("position", position).toString()
+            web.evaluateJavascript("window.__marqueeNativeDone && window.__marqueeNativeDone($json);", null)
+        } catch (_: Exception) {}
     }
 
     // ---- Flight recorder (native side) ----

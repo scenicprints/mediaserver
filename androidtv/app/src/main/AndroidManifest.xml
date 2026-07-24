@@ -56,6 +56,15 @@
             </intent-filter>
         </activity>
 
+        <!-- Native libVLC player: launched by MainActivity when the web UI hands
+             off playback. configChanges matches MainActivity so a mid-play HDMI
+             mode change can't recreate the activity and kill the video surface. -->
+        <activity
+            android:name=".PlayerActivity"
+            android:exported="false"
+            android:screenOrientation="landscape"
+            android:configChanges="orientation|screenSize|keyboardHidden|keyboard|uiMode|density|screenLayout" />
+
         <!-- Shares the downloaded update APK with the package installer. -->
         <provider
             android:name="androidx.core.content.FileProvider"

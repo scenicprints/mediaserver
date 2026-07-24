@@ -1011,6 +1011,15 @@ app.get('/api/play/:kind/:fileId', async (req, reply) => {
   const row = fileRow(kind, fileId);
   if (!row) return reply.code(404).send({ error: 'not found' });
   const info = await playInfo(row.path, { ...audioOpts(req), remote: isRemote(req) });
+  // ?native=1 — the caller is a libVLC-backed native player (Android TV /
+  // Apple TV) that decodes every container/codec on-device. The direct-vs-
+  // transcode decision above is for BROWSER <video> limits, so for native we
+  // override to direct: raw byte-range stream, no server transcode, ever.
+  // (playInfo still ran — its probe fills duration/chapters/engine for stats.)
+  if (req.query.native) {
+    info.mode = 'direct';
+    info.reason = null;
+  }
   const directUrl = (kind === 'episode' ? '/api/stream/episode/' : '/api/stream/') + fileId;
   let fileSize = null; try { fileSize = fs.statSync(row.path).size; } catch {} // lets the client estimate throughput (size×8/duration = avg bitrate)
   // Remember the server's authoritative engine decision so the admin monitor can
@@ -1034,7 +1043,8 @@ app.get('/api/play/:kind/:fileId', async (req, reply) => {
         videoAction: e.videoAction || undefined,
         audioAction: e.audioAction || undefined,
         container: (row.path.match(/\.([a-z0-9]+)$/i) || [])[1] || undefined,
-        remote: isRemote(req) || undefined
+        remote: isRemote(req) || undefined,
+        native: req.query.native ? true : undefined // libVLC client → direct-played on-device
       })
     );
   } catch { /* stats are best-effort */ }

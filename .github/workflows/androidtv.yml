@@ -31,6 +31,7 @@ jobs:
         run: sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools"
 
       - name: Ensure signing keystore (generate + commit once)
+        if: github.ref == 'refs/heads/main'
         working-directory: androidtv
         run: |
           if [ ! -f keystore/marquee.jks ]; then
@@ -54,12 +55,16 @@ jobs:
         working-directory: androidtv
         run: gradle assembleRelease -PappVersionCode=${{ github.run_number }} --no-daemon --stacktrace
 
+      # Branch pushes are COMPILE CHECKS only — publishing (which self-updates
+      # every installed TV) happens exclusively from main.
       - name: Write version.json
+        if: github.ref == 'refs/heads/main'
         working-directory: androidtv
         run: |
           echo "{\"versionCode\": ${{ github.run_number }}, \"url\": \"https://github.com/scenicprints/mediaserver/releases/download/marquee-tv-latest/app-release.apk\"}" > version.json
 
       - name: Publish rolling release
+        if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: marquee-tv-latest

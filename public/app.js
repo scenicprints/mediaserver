@@ -1638,7 +1638,66 @@ async function refreshPreroll() {
   catch (_e) { prerollInfo = null; }
 }
 
+// ---- Native player handoff (Android TV shell with libVLC) ----
+// The WebView <video> can't decode 4K HEVC & friends, which forces server
+// transcodes the Dell can't sustain. When the shell exposes the native bridge,
+// playback is handed to the libVLC PlayerActivity, which direct-plays the raw
+// byte-range stream on-device — no transcode at all. The web player below
+// remains the automatic fallback: old APK (no bridge), "Classic player" chosen
+// in Settings, or the native side reporting a failure all land back here.
+function tryNativeHandoff(ctx) {
+  if (ctx.forceWeb) return false;
+  if (!(window.MarqueeTV && typeof window.MarqueeTV.playNative === 'function')) return false;
+  try { if (localStorage.getItem('classicPlayer') === '1') return false; } catch (_e) {}
+  const f = ctx.files.find((x) => x.id === ctx.startFileId) || ctx.files[0];
+  if (!f) return false;
+  window.__marqueeNativeCtx = ctx;
+  tele('player', { ev: 'handoff', title: ctx.title, kind: ctx.searchKind, live: !!ctx.live });
+  let deviceId = '';
+  try { deviceId = localStorage.getItem('teleDevice') || ''; } catch (_e) {}
+  window.MarqueeTV.playNative(JSON.stringify({
+    title: ctx.title || '',
+    subtitle: ctx.subtitle || '',
+    kind: ctx.searchKind,
+    fileId: f.id,
+    startAt: ctx.startAt || 0,
+    live: !!ctx.live,
+    streamPath: ctx.streamBase + f.id,
+    playPath: `/api/play/${ctx.searchKind}/${f.id}?native=1`,
+    subListPath: `/api/subtitles/list/${ctx.searchKind}/${f.id}`,
+    subBase: ctx.subtitleBase + f.id,
+    progressPath: ctx.progressUrl || null,
+    // libVLC plays the pre-roll file raw, whatever its format.
+    prerollPath: (ctx.searchKind === 'movie' && !(ctx.startAt > 0) && prerollInfo) ? '/api/preroll/stream' : null,
+    hasUpNext: !!ctx.onEnded,
+    deviceId
+  }));
+  return true;
+}
+
+// The native player reports back through the shell when it closes.
+window.__marqueeNativeDone = (res) => {
+  const ctx = window.__marqueeNativeCtx;
+  window.__marqueeNativeCtx = null;
+  if (!ctx) return;
+  res = res || {};
+  tele('player', { ev: 'native-done', title: ctx.title, ended: !!res.ended, failed: !!res.failed, at: Math.round(res.position || 0) });
+  if (res.failed) {
+    // libVLC couldn't play this file — fall straight back to the web player
+    // (which can ask the server to transcode), resuming where native got to.
+    ctx.forceWeb = true;
+    if (res.position > 5) ctx.startAt = res.position;
+    openPlayer(ctx);
+    return;
+  }
+  if (res.ended && ctx.onEnded) { ctx.onEnded(); return; } // Up Next chain (re-enters native)
+  // Watch-state was written server-side by the native player; refresh the
+  // in-memory copy so Continue Watching / resume bars are current.
+  fetch('/api/continue').then((r) => r.json()).then((c) => { continueItems = c; if (currentView === 'home') renderView(); }).catch(() => {});
+};
+
 function openPlayer(ctx) {
+  if (tryNativeHandoff(ctx)) return;
   if (activePlayer) { activePlayer.remove(); activePlayer = null; }
   let current = ctx.files.find((f) => f.id === ctx.startFileId) || ctx.files[0];
   if (!current) return;
@@ -2185,6 +2244,17 @@ function openPlayer(ctx) {
   // watching what, whether it's transcoding, and buffer/health for troubleshooting.
   let stallCount = 0; // network stalls (involuntary 'waiting'), surfaced in the monitor
   video.addEventListener('waiting', () => { if (!video.seeking) stallCount++; });
+  // The head-start/rebuffer machinery above is direct-play-only, which left
+  // transcode sessions a telemetry blind spot ("0 rebuffers" ≠ smooth). Log
+  // transcode stalls too — observation only, never touches playback.
+  let tStallAt = 0;
+  video.addEventListener('waiting', () => { if (play.mode === 'transcode' && !video.seeking && !tStallAt) tStallAt = performance.now(); });
+  video.addEventListener('playing', () => {
+    if (!tStallAt) return;
+    const ms = Math.round(performance.now() - tStallAt);
+    tStallAt = 0;
+    if (ms > 400) tele('buffer', { kind: 'rebuffer', mode: 'transcode', ms, at: Math.round(cur()) });
+  });
   function sessionHeartbeat() {
     if (!current) return;
     let bufAhead = 0;
@@ -2849,6 +2919,27 @@ function paintAudio() {
 }
 for (const [key, attr] of AUDIO_GROUPS)
   document.querySelectorAll('[data-' + attr + ']').forEach((b) => b.addEventListener('click', () => { localStorage.setItem(key, b.dataset[attr]); paintAudio(); }));
+
+// TV player engine (native libVLC vs classic web player). Only shown inside the
+// Android TV app whose shell exposes the native bridge; per-device (localStorage).
+(function () {
+  const block = document.getElementById('tvengine-block');
+  if (!block) return;
+  if (!(window.MarqueeTV && typeof window.MarqueeTV.playNative === 'function')) return; // browser / old APK
+  block.classList.remove('hidden');
+  const paint = () => {
+    let classic = false;
+    try { classic = localStorage.getItem('classicPlayer') === '1'; } catch (_e) {}
+    block.querySelectorAll('[data-tvplayer]').forEach((b) =>
+      b.classList.toggle('primary', (b.dataset.tvplayer === 'classic') === classic));
+  };
+  block.querySelectorAll('[data-tvplayer]').forEach((b) => b.addEventListener('click', () => {
+    try { localStorage.setItem('classicPlayer', b.dataset.tvplayer === 'classic' ? '1' : '0'); } catch (_e) {}
+    tele('nav', { view: 'settings:tvplayer=' + b.dataset.tvplayer });
+    paint();
+  }));
+  paint();
+})();
 
 // Settings tabs (General / Audio): show the matching panel, highlight the tab.
 // Uses the app's `.tabs > .tab` convention so the remote focus engine can land

@@ -15,6 +15,10 @@ android {
         // self-updater compares this against the published version.json.
         versionCode (project.hasProperty('appVersionCode') ? project.appVersionCode.toInteger() : 1)
         versionName (project.hasProperty('appVersionName') ? project.appVersionName.toString() : '1.0')
+
+        // libVLC ships native decoders per-ABI. TVs and Android projectors are
+        // ARM; dropping x86 halves the APK the self-updater has to download.
+        ndk { abiFilters 'armeabi-v7a', 'arm64-v8a' }
     }
 
     // Fixed keystore (committed by CI on first run) so every build is signed with
@@ -51,4 +55,8 @@ android {
 
 dependencies {
     implementation 'androidx.core:core-ktx:1.13.1'
+    // libVLC: the native player engine (same architecture as the Apple TV app's
+    // VLCKit) — decodes every container/codec on-device so the server never
+    // transcodes. 3.7.5 = newest STABLE 3.x on Maven Central (4.x is still EAP).
+    implementation 'org.videolan.android:libvlc-all:3.7.5'
 }
