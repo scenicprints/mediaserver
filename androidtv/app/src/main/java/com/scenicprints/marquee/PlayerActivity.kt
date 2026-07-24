@@ -125,6 +125,7 @@ class PlayerActivity : Activity() {
             buildUi()
             startVlc()
             fetchPlayInfo()
+            ui.postDelayed(netTick, 10000)
             (getSystemService(AUDIO_SERVICE) as? AudioManager)
                 ?.requestAudioFocus(null, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN)
         } catch (e: Exception) {
@@ -194,7 +195,7 @@ class PlayerActivity : Activity() {
                 }
                 updateHud()
             }
-            MediaPlayer.Event.Paused -> { updateHud(); postProgress() }
+            MediaPlayer.Event.Paused -> { updateHud(); postProgress(); heartbeat() }
             MediaPlayer.Event.TimeChanged -> {
                 if (inPreroll) return
                 positionSec = e.timeChanged / 1000.0
@@ -277,17 +278,24 @@ class PlayerActivity : Activity() {
         }
     }
 
-    // ================= per-half-second UI tick =================
+    // ================= ticks =================
 
-    private var lastNetTick = 0L
+    // UI tick rides on TimeChanged (fires only while playing — fine for UI).
     private fun onTick() {
         updateHud()
         // Skip Intro window (fingerprint-detected range from the server).
         val inIntro = !live && !introSkipped && introEnd > 0 && positionSec >= introStart && positionSec < introEnd
         skipIntroBtn.visibility = if (inIntro) View.VISIBLE else View.GONE
-        // Progress + heartbeat every ~10s.
-        val now = System.currentTimeMillis()
-        if (now - lastNetTick > 10000) { lastNetTick = now; postProgress(); heartbeat(); flushTele() }
+    }
+
+    // Reporting tick is a real timer: TimeChanged stops while PAUSED, and a
+    // paused viewer must stay visible in the admin monitor (that live-session
+    // view is how remote problems get caught).
+    private val netTick = object : Runnable {
+        override fun run() {
+            if (mainStarted && !inPreroll) { postProgress(); heartbeat(); flushTele() }
+            ui.postDelayed(this, 10000)
+        }
     }
 
     private fun skipIntroNow() {
