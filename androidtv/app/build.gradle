@@ -57,6 +57,8 @@ dependencies {
     implementation 'androidx.core:core-ktx:1.13.1'
     // libVLC: the native player engine (same architecture as the Apple TV app's
     // VLCKit) — decodes every container/codec on-device so the server never
-    // transcodes. 3.7.5 = newest STABLE 3.x on Maven Central (4.x is still EAP).
-    implementation 'org.videolan.android:libvlc-all:3.7.5'
+    // transcodes. 3.6.5: same stable 3.6 generation as the PROVEN Apple TV
+    // VLCKit build, and the newest 3.x that compiles against SDK 34 (3.7.x
+    // demands compileSdk 36, which this AGP 8.5 toolchain can't target).
+    implementation 'org.videolan.android:libvlc-all:3.6.5'
 }
