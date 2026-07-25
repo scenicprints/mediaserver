@@ -15,7 +15,24 @@ import { execFile, spawn } from 'node:child_process';
 // fall back to the CPU build if it can't load. Model URL is stable on HF.
 const CPU_BIN_URL = 'https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.1/whisper-bin-x64.zip';
 const GPU_BIN_URL = 'https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.1/whisper-cublas-12.4.0-bin-x64.zip';
-const DEFAULT_MODEL_URL = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin';
+// Models, by accuracy. The original install shipped ggml-base (tiny, fast,
+// noticeably wrong words). With a GPU we now run **large-v3-turbo (q5_0)** —
+// near large-v3 accuracy at ~8× its speed, 547 MB, and it fits alongside NVENC
+// on a 4 GB card. CPU-only machines get `small` (the best CPU-realtime model).
+const MODEL_URLS = {
+  'large-v3-turbo-q5_0': 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin',
+  small: 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin'
+};
+// Accuracy rank for picking the best model present (and knowing when a cached
+// VTT came from a weaker one). Matches ggml file naming.
+const MODEL_RANK = [
+  [/large-v3-turbo/i, 60], [/large/i, 50], [/medium/i, 40], [/small/i, 30], [/base/i, 20], [/tiny/i, 10]
+];
+export function modelRank(name) {
+  for (const [re, r] of MODEL_RANK) if (re.test(name || '')) return r;
+  return 0;
+}
+const modelName = () => (modelPath ? path.basename(modelPath).replace(/^ggml-/i, '').replace(/\.bin$/i, '') : null);
 const WIN_TAR = 'C:\\Windows\\System32\\tar.exe';
 
 let binPath = null;
@@ -93,7 +110,8 @@ function findFile(dir, names) {
 export async function detectWhisper(root, config = {}) {
   const dir = path.join(root, 'tools', 'whisper');
   binPath = config.whisperPath || findFile(dir, ['whisper-cli.exe', 'main.exe', 'whisper.exe']);
-  // Any ggml-*.bin model counts.
+  // Of all ggml-*.bin models present, use the most accurate one (an upgrade can
+  // leave the old base model on disk — alphabetical order used to pick it!).
   modelPath = null;
   try {
     const stack = [dir];
@@ -102,9 +120,8 @@ export async function detectWhisper(root, config = {}) {
       for (const ent of fs.readdirSync(d, { withFileTypes: true })) {
         const p = path.join(d, ent.name);
         if (ent.isDirectory()) stack.push(p);
-        else if (/^ggml.*\.bin$/i.test(ent.name)) { modelPath = p; break; }
+        else if (/^ggml.*\.bin$/i.test(ent.name) && (!modelPath || modelRank(ent.name) > modelRank(path.basename(modelPath)))) modelPath = p;
       }
-      if (modelPath) break;
     }
   } catch {}
   gpuDetected = gpuAvailable(config);
@@ -118,6 +135,7 @@ export async function detectWhisper(root, config = {}) {
 export function status() {
   return {
     available: !!(binPath && modelPath), hasBinary: !!binPath, hasModel: !!modelPath,
+    model: modelName(),
     gpu: usingGpu, gpuAvailable: gpuDetected,
     installing: install.phase ? { phase: install.phase, pct: install.pct } : null, error: install.error
   };
@@ -192,8 +210,15 @@ export async function installWhisper(root, config, { force = false } = {}) {
       }
     }
 
-    if (!modelPath) {
-      await download(config.whisperModelUrl || DEFAULT_MODEL_URL, path.join(modelsDir, 'ggml-base.bin'), 'downloading model');
+    // Download the best model this machine can run — and UPGRADE if the one on
+    // disk is weaker (this is how existing installs move off ggml-base).
+    const wantModel = wantGpu ? 'large-v3-turbo-q5_0' : 'small';
+    const custom = config.whisperModelUrl;
+    const needModel = custom ? !modelPath : (!modelPath || modelRank(path.basename(modelPath)) < modelRank(wantModel));
+    if (needModel) {
+      const url = custom || MODEL_URLS[wantModel];
+      const name = custom ? path.basename(new URL(url).pathname) : `ggml-${wantModel}.bin`;
+      await download(url, path.join(modelsDir, name), 'downloading model');
     }
     install.phase = 'detecting';
     await detectWhisper(root, config);
@@ -218,7 +243,31 @@ export async function generate(root, ffmpegPath, videoPath, { language = 'auto',
   const prog = (f, phase) => { if (onProgress) onProgress(f, phase); };
   const tag = translate ? 'en-ai' : (language === 'auto' ? 'orig-ai' : language + '-ai');
   const vttPath = videoPath.replace(/\.[^.]+$/, '') + `.${tag}.vtt`;
-  if (fs.existsSync(vttPath)) { prog(1, 'transcribing'); return vttPath; }
+  // Cached result: reuse it — UNLESS it was produced by a weaker model than the
+  // one now installed (each file records its model in a NOTE header). Owner's
+  // complaint that started this: base-model tracks "get a lot of words wrong" —
+  // re-requesting one silently regenerates it with the better model.
+  if (fs.existsSync(vttPath)) {
+    let cachedRank = 0; // legacy files carry no marker = weakest assumption
+    try {
+      const head = fs.readFileSync(vttPath, 'utf8').slice(0, 300);
+      const m = head.match(/NOTE marquee-model=(\S+)/);
+      if (m) cachedRank = modelRank(m[1]);
+    } catch {}
+    if (cachedRank >= modelRank(path.basename(modelPath))) { prog(1, 'transcribing'); return vttPath; }
+    try { fs.rmSync(vttPath, { force: true }); } catch {}
+  }
+
+  // Sweep temp audio leaked by crashed/interrupted jobs (they're full-movie
+  // WAVs — hundreds of MB each — and used to pile up forever).
+  try {
+    const wdir = path.join(root, 'tools', 'whisper');
+    for (const f of fs.readdirSync(wdir)) {
+      if (/^job-\d+\.(wav|vtt)$/i.test(f) && Date.now() - fs.statSync(path.join(wdir, f)).mtimeMs > 6 * 3600e3) {
+        fs.rmSync(path.join(wdir, f), { force: true });
+      }
+    }
+  } catch {}
 
   // Extract 16 kHz mono audio, streaming ffmpeg's -progress so the UI shows the
   // extraction advancing (out_time vs. the media's duration).
@@ -236,11 +285,13 @@ export async function generate(root, ffmpegPath, videoPath, { language = 'auto',
   prog(1, 'extracting');
 
   const outBase = wav.replace(/\.wav$/, '');
-  // Speed: use several threads and greedy decoding (beam/best-of = 1) — far
-  // faster than the default beam search, with only a small accuracy cost.
+  // Decoding: on GPU, real beam search (-bs 5) — the accuracy the model is
+  // benchmarked at, and cuBLAS makes it cheap. CPU-only keeps greedy so a
+  // machine without a GPU still finishes in reasonable time.
   // -pp prints "progress = NN%" as it decodes.
   const args = ['-m', modelPath, '-f', wav, '-ovtt', '-of', outBase, '-l', language,
-    '-t', String(whisperThreads()), '-bo', '1', '-bs', '1', '-pp'];
+    '-t', String(whisperThreads()), '-pp',
+    ...(usingGpu ? ['-bs', '5', '-bo', '5'] : ['-bo', '1', '-bs', '1'])];
   if (translate) args.push('--translate');
   await new Promise((resolve, reject) => {
     // Run from the binary's own folder so Windows finds its sibling DLLs
@@ -270,9 +321,14 @@ export async function generate(root, ffmpegPath, videoPath, { language = 'auto',
     });
   });
 
-  // Filter to dialogue only (drop [Music]/(sfx)/♪ cues) as we cache the result.
-  try { fs.writeFileSync(vttPath, dialogueOnly(fs.readFileSync(outBase + '.vtt', 'utf8')), 'utf8'); }
-  catch (e) { throw new Error('whisper produced no output'); }
+  // Filter to dialogue only (drop [Music]/(sfx)/♪ cues) as we cache the result,
+  // stamping which model produced it (drives the regenerate-if-weaker logic; a
+  // VTT NOTE block is ignored by every player).
+  try {
+    const body = dialogueOnly(fs.readFileSync(outBase + '.vtt', 'utf8'))
+      .replace(/^WEBVTT[^\n]*\n/, (h) => h + `\nNOTE marquee-model=${modelName()}\n`);
+    fs.writeFileSync(vttPath, body, 'utf8');
+  } catch (e) { throw new Error('whisper produced no output'); }
   fs.rmSync(wav, { force: true });
   fs.rmSync(outBase + '.vtt', { force: true });
   prog(1, 'transcribing');

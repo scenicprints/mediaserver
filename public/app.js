@@ -3242,11 +3242,16 @@ async function loadWhisper() {
     return;
   }
   if (s.available) {
-    wsStatus.textContent = `✓ Ready — running on ${s.gpu ? 'the GPU ⚡ (fast)' : 'the CPU'}.`
-      + (!s.gpu && s.gpuAvailable ? ' An NVIDIA GPU was detected — switch to it for much faster subtitles.' : '');
+    wsStatus.textContent = `✓ Ready — ${s.model || 'model'} on ${s.gpu ? 'the GPU ⚡ (fast)' : 'the CPU'}.`
+      + (!s.gpu && s.gpuAvailable ? ' An NVIDIA GPU was detected — switch to it for much faster subtitles.' : '')
+      + (s.model && /base|tiny/i.test(s.model) ? ' A more accurate model is available — click Install to upgrade.' : '');
     if (!s.gpu && s.gpuAvailable) {
       wsInstall.classList.remove('hidden'); wsInstall.disabled = false;
       wsInstall.textContent = '⚡ Switch to GPU (much faster, ~680 MB)'; wsInstall.dataset.force = '1';
+    } else if (s.model && /base|tiny/i.test(s.model)) {
+      // Weak legacy model on disk: installWhisper() downloads the better one.
+      wsInstall.classList.remove('hidden'); wsInstall.disabled = false;
+      wsInstall.textContent = '⬆ Upgrade accuracy (better model, ~550 MB)'; wsInstall.dataset.force = '';
     } else wsInstall.classList.add('hidden');
     return;
   }
