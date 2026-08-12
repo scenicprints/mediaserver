@@ -110,7 +110,7 @@ class MainActivity : Activity() {
                 val meta = JSONObject(URL(VERSION_URL).readText())
                 if (meta.getLong("versionCode") > current) {
                     val apk = File(cacheDir, "update.apk")
-                    URL(meta.getString("url")).openStream().use { input ->
+                    URL(updateUrlFor(meta)).openStream().use { input ->
                         FileOutputStream(apk).use { input.copyTo(it) }
                     }
                     val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", apk)
@@ -121,6 +121,20 @@ class MainActivity : Activity() {
                 }
             } catch (_: Exception) { /* offline / no update / declined — ignore */ }
         }.start()
+    }
+
+    /** Pick the APK matching this device's ABI so a 32-bit device (the VAVA
+     *  projector) never downloads the universal build's arm64 half. version.json
+     *  carries a `urls` map keyed by ABI plus the plain `url` universal fallback,
+     *  which is what older installs read — so both formats keep working. */
+    private fun updateUrlFor(meta: JSONObject): String {
+        val urls = meta.optJSONObject("urls")
+        if (urls != null) {
+            for (abi in Build.SUPPORTED_ABIS) {
+                if (urls.has(abi)) return urls.getString(abi)
+            }
+        }
+        return meta.getString("url")
     }
 
     /** Exposed to the web app as `window.MarqueeTV`. The web UI calls openApp()

@@ -55,13 +55,34 @@ jobs:
         working-directory: androidtv
         run: gradle assembleRelease -PappVersionCode=${{ github.run_number }} --no-daemon --stacktrace
 
+      # Branch builds publish nothing, so hand the APKs back as artifacts —
+      # that's how a per-ABI build gets sideloaded and tried before it's merged.
+      - name: Upload APKs as build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: marquee-tv-apks
+          if-no-files-found: error
+          path: androidtv/app/build/outputs/apk/release/*.apk
+
       # Branch pushes are COMPILE CHECKS only — publishing (which self-updates
       # every installed TV) happens exclusively from main.
       - name: Write version.json
         if: github.ref == 'refs/heads/main'
         working-directory: androidtv
+        env:
+          BASE: https://github.com/scenicprints/mediaserver/releases/download/marquee-tv-latest
         run: |
-          echo "{\"versionCode\": ${{ github.run_number }}, \"url\": \"https://github.com/scenicprints/mediaserver/releases/download/marquee-tv-latest/app-release.apk\"}" > version.json
+          cat > version.json <<EOF
+          {
+            "versionCode": ${{ github.run_number }},
+            "url": "$BASE/app-universal-release.apk",
+            "urls": {
+              "armeabi-v7a": "$BASE/app-armeabi-v7a-release.apk",
+              "arm64-v8a": "$BASE/app-arm64-v8a-release.apk"
+            }
+          }
+          EOF
+          cat version.json
 
       - name: Publish rolling release
         if: github.ref == 'refs/heads/main'
@@ -70,5 +91,7 @@ jobs:
           tag_name: marquee-tv-latest
           name: Marquee TV (latest)
           files: |
-            androidtv/app/build/outputs/apk/release/app-release.apk
+            androidtv/app/build/outputs/apk/release/app-armeabi-v7a-release.apk
+            androidtv/app/build/outputs/apk/release/app-arm64-v8a-release.apk
+            androidtv/app/build/outputs/apk/release/app-universal-release.apk
             androidtv/version.json
