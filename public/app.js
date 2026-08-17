@@ -2085,7 +2085,10 @@ function openPlayer(ctx) {
     el.title = 'Click to diagnose A/V sync';
   }
   // Click the admin badge to run the deep A/V-sync diagnosis on this exact file.
-  vp.querySelector('.vp-engine')?.addEventListener('click', runDiagnose);
+  // Written out rather than using `?.` — optional chaining is Chrome 80 / Gecko 74,
+  // and this file has to parse on the projector's much older engine.
+  const vpEngine = vp.querySelector('.vp-engine');
+  if (vpEngine) vpEngine.addEventListener('click', runDiagnose);
   async function runDiagnose() {
     if (!document.body.classList.contains('is-admin')) return;
     const el = vp.querySelector('.vp-engine'); const orig = el.innerHTML;
