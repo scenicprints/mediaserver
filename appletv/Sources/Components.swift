@@ -105,16 +105,27 @@ struct MButton: View {
             .frame(height: height)
             .padding(.horizontal, wide ? 0 : 32)
             .background(bg)
-            .overlay(Rectangle().strokeBorder(border, lineWidth: focused ? 3 : 2))
+            .overlay(Rectangle().strokeBorder(border, lineWidth: focused ? 4 : 2))
+            // An inner keyline as well, so the frame reads as a pressed edge and
+            // not just a thicker outline. Both stay INSIDE the button's bounds.
+            .overlay(
+                Rectangle()
+                    .strokeBorder(focused ? pal.onSignal.opacity(kind == .primary ? 0.85 : 0) : .clear,
+                                  lineWidth: 2)
+                    .padding(5)
+            )
         }
         .buttonStyle(.bare)
         .focused($focused)
         .focusEffectDisabled()
     }
 
+    // The primary is ALREADY orange, so focus can't be "turn orange". It presses
+    // in instead: the fill deepens and an ink frame closes around it. Without
+    // this you genuinely could not tell you were standing on Resume.
     private var bg: Color {
         switch kind {
-        case .primary: return pal.signal
+        case .primary: return focused ? pal.signalDeep : pal.signal
         case .secondary: return focused ? pal.inverse : .clear
         }
     }
@@ -125,7 +136,10 @@ struct MButton: View {
         }
     }
     private var border: Color {
-        kind == .primary ? pal.signal : (focused ? pal.inverse : pal.rule)
+        switch kind {
+        case .primary: return focused ? pal.ink : pal.signal
+        case .secondary: return focused ? pal.inverse : pal.rule
+        }
     }
 }
 

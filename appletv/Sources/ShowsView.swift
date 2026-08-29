@@ -145,6 +145,7 @@ struct ShowDetailView: View {
                         }
                     }
                     .padding(.top, 24)
+                    .focusSection()
                 }
 
                 if let o = d.overview, !o.isEmpty {

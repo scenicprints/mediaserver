@@ -71,6 +71,7 @@ struct SearchView: View {
                 }
             }
             .padding(.top, 22)
+            .focusSection()
         }
     }
 

@@ -250,6 +250,7 @@ struct LiveTVView: View {
             MButton(title: "Join", kind: .primary, play: true) {
                 tuned = TunedLive(item: on.item, offset: on.offset)
             }
+            .focusSection()
         }
         .overlay(alignment: .bottom) { Rectangle().fill(pal.rule).frame(height: 1).padding(.top, 18) }
     }

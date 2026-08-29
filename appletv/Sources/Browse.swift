@@ -52,6 +52,7 @@ struct MarqueeHero: View {
                     MButton(title: "Details") { route.append(it.route) }
                 }
                 .padding(.top, 26)
+                .focusSection()
                 Dial(count: items.count, index: idx).padding(.top, 34)
                 Spacer(minLength: 0)
             }

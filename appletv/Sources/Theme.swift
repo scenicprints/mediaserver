@@ -33,6 +33,7 @@ struct Palette {
     let rule: Color         // structural hairline
     let rule2: Color        // divider hairline inside a group
     let signal: Color       // Braun orange. State only, never decoration.
+    let signalDeep: Color   // the same switch, pressed in (a focused primary)
     let onSignal: Color     // what sits on top of the signal
     let inverse: Color      // a filled control (focused secondary button)
     let onInverse: Color
@@ -44,7 +45,7 @@ enum Theme {
         panel2: Color(hex: 0xEFEEE9), sunk: Color(hex: 0xDEDCD5),
         ink: Color(hex: 0x1A1B1D), ink2: Color(hex: 0x75756E), ink3: Color(hex: 0xA3A29B),
         rule: Color(hex: 0xCBC9C2), rule2: Color(hex: 0xDCDAD3),
-        signal: Color(hex: 0xDE5F10), onSignal: .white,
+        signal: Color(hex: 0xDE5F10), signalDeep: Color(hex: 0xB84A08), onSignal: .white,
         inverse: Color(hex: 0x1A1B1D), onInverse: Color(hex: 0xF8F7F4))
 
     static let black = Palette(
@@ -52,7 +53,7 @@ enum Theme {
         panel2: Color(hex: 0x232327), sunk: Color(hex: 0x0E0E10),
         ink: Color(hex: 0xEFEEE9), ink2: Color(hex: 0x8C8C86), ink3: Color(hex: 0x65655F),
         rule: Color(hex: 0x33333A), rule2: Color(hex: 0x28282E),
-        signal: Color(hex: 0xF26A16), onSignal: Color(hex: 0x141416),
+        signal: Color(hex: 0xF26A16), signalDeep: Color(hex: 0xC85410), onSignal: Color(hex: 0x141416),
         inverse: Color(hex: 0xEFEEE9), onInverse: Color(hex: 0x141416))
 
     static func palette(_ f: Finish) -> Palette { f == .white ? white : black }

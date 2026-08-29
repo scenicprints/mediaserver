@@ -168,6 +168,7 @@ struct MovieDetailView: View {
             .overlay(alignment: .top) { Rectangle().fill(pal.rule).frame(height: 1) }
             .padding(.top, 26)
         }
+        .focusSection()
         .confirmationDialog("Version", isPresented: $showVersions, titleVisibility: .visible) {
             ForEach(d.files) { f in
                 Button(versionLabel(f)) { selectedFile = f }

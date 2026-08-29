@@ -142,6 +142,7 @@ struct TopRail: View {
     var railFocus: FocusState<Tab?>.Binding
     @Environment(\.pal) private var pal
     @State private var now = Date()
+    @Namespace private var railScope
     private let clock = Timer.publish(every: 20, on: .main, in: .common).autoconnect()
 
     var body: some View {
@@ -163,6 +164,15 @@ struct TopRail: View {
         .frame(height: Theme.railHeight)
         .background(pal.panel)
         .overlay(alignment: .bottom) { Rectangle().fill(pal.rule).frame(height: 1) }
+        // Coming UP into the rail lands on the tab you are actually on, not on
+        // whichever label happened to sit above the thing you left. Without a
+        // scope + default, tvOS picks by geometry and you arrive somewhere
+        // arbitrary, which is what made the rail feel random.
+        .focusScope(railScope)
+        // .automatic, deliberately: it should decide where focus LANDS when the
+        // rail is entered, not yank focus up out of content every time the tab
+        // changes.
+        .defaultFocus(railFocus, tab)
         .onReceive(clock) { now = $0 }
     }
 
