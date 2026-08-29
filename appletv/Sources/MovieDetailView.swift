@@ -61,8 +61,7 @@ struct MovieDetailView: View {
     private func content(_ d: MovieDetail) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                ArtPlate(url: d.backdrop ?? d.poster, title: d.title)
-                    .frame(height: 348)
+                ArtPlate(url: d.backdrop ?? d.poster, height: 348, title: d.title)
                     .padding(.horizontal, Theme.gutter)
                     .padding(.top, 24)
 

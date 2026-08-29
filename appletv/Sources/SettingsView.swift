@@ -395,7 +395,7 @@ private struct SectionCell: View {
             }
             .overlay(alignment: .bottom) { Rectangle().fill(pal.rule2).frame(height: 1) }
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.bare)
         .focused($focused)
         .focusEffectDisabled()
     }

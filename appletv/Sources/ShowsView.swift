@@ -121,7 +121,7 @@ struct ShowDetailView: View {
     @ViewBuilder private func showColumn(_ d: ShowDetail) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                ArtPlate(url: d.backdrop ?? d.poster, title: d.title).frame(height: 290)
+                ArtPlate(url: d.backdrop ?? d.poster, height: 290, title: d.title)
 
                 Text(d.title)
                     .font(F.med(54)).foregroundStyle(pal.ink)
@@ -271,7 +271,7 @@ struct SeasonCell: View {
                         .frame(height: 4)
                 }
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.bare)
         .focused($focused)
         .focusEffectDisabled()
     }
@@ -320,7 +320,7 @@ struct EpisodeRow: View {
             .overlay(alignment: .leading) { Rectangle().fill(pal.signal).frame(width: focused ? 6 : 0) }
             .overlay(alignment: .bottom) { Rectangle().fill(pal.rule2).frame(height: 1) }
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.bare)
         .focused($focused)
         .focusEffectDisabled()
     }
@@ -406,8 +406,7 @@ struct EpisodeDetailView: View {
     private var content: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                ArtPlate(url: art, title: episode.displayTitle)
-                    .frame(height: 348)
+                ArtPlate(url: art, height: 348, title: episode.displayTitle)
                     .padding(.horizontal, Theme.gutter).padding(.top, 24)
 
                 HStack(alignment: .top, spacing: 72) {

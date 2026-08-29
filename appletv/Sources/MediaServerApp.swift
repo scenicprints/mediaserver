@@ -73,6 +73,11 @@ struct ContentView: View {
                 LoginView()
             }
         }
+        // Kill the system focus halo for the WHOLE app. This propagates through
+        // the environment, which is the only way that reliably takes — set on the
+        // individual buttons it still left a white rounded platter behind every
+        // card, tab and row on tvOS 26. Marquee draws its own focus.
+        .focusEffectDisabled()
         .task { if await preview() == false { await store.checkSession() } }
     }
 
@@ -188,7 +193,7 @@ private struct RailTab: View {
                         .frame(height: 3)
                 }
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.bare)
         .focused(focus, equals: tab)
         .focusEffectDisabled()
     }
@@ -213,7 +218,7 @@ private struct RailGear: View {
                     .frame(height: 3)
             }
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.bare)
         .focused(focus, equals: .settings)
         .focusEffectDisabled()
     }

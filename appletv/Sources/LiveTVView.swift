@@ -220,8 +220,8 @@ struct LiveTVView: View {
     @ViewBuilder private func preview(_ ch: LiveChannel) -> some View {
         let on = LiveTV.nowOn(ch, now.timeIntervalSince1970)
         HStack(alignment: .center, spacing: 28) {
-            ArtPlate(url: on.item.backdrop ?? on.item.still ?? on.item.poster, title: on.item.title)
-                .frame(width: 340, height: 191)
+            ArtPlate(url: on.item.backdrop ?? on.item.still ?? on.item.poster,
+                     width: 340, height: 191, title: on.item.title)
 
             VStack(alignment: .leading, spacing: 0) {
                 Lab("On now   ·   \(ch.name)   ·   Channel \(ch.number)", small: true)
@@ -347,7 +347,7 @@ struct LiveTVView: View {
             .overlay(alignment: .leading) { Rectangle().fill(pal.signal).frame(width: focused ? 6 : 0) }
             .background(focused ? pal.panel : Color.clear)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.bare)
         .focused($focusedChannel, equals: ch.id)
         .focusEffectDisabled()
     }

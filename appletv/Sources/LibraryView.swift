@@ -207,7 +207,7 @@ struct FilterChip: View {
                 .background(selected || focused ? pal.inverse : Color.clear)
                 .overlay(Rectangle().strokeBorder(focused ? pal.inverse : pal.rule, lineWidth: focused ? 3 : 1))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.bare)
         .focused($focused)
         .focusEffectDisabled()
     }
@@ -252,7 +252,7 @@ struct IndexLetter: View {
                 .frame(width: 40, height: 32)
                 .background(focused ? pal.panel2 : .clear)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.bare)
         .focused($focused)
         .focusEffectDisabled()
     }

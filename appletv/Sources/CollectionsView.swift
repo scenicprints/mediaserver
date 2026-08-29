@@ -56,8 +56,7 @@ struct CollectionDetailView: View {
             if let d = detail {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
-                        ArtPlate(url: d.backdrop ?? d.poster, title: d.name)
-                            .frame(height: 300)
+                        ArtPlate(url: d.backdrop ?? d.poster, height: 300, title: d.name)
                             .padding(.horizontal, Theme.gutter).padding(.top, 24)
 
                         Text(d.name ?? "Collection")

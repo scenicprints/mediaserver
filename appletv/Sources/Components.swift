@@ -12,6 +12,17 @@ import UIKit
 // room, and it never covers the artwork.
 // ============================================================================
 
+// tvOS draws a soft white rounded halo behind ANY focusable control. Marquee
+// draws its own focus, so the system effect is switched off app-wide (see
+// ContentView) and the button style itself contributes NOTHING — no platter, no
+// background, no shape. `.plain` still brought chrome of its own on tvOS 26.
+struct BareButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View { configuration.label }
+}
+extension ButtonStyle where Self == BareButtonStyle {
+    static var bare: BareButtonStyle { BareButtonStyle() }
+}
+
 // A corner badge on a poster.
 enum CardBadge: Hashable {
     case new
@@ -96,7 +107,7 @@ struct MButton: View {
             .background(bg)
             .overlay(Rectangle().strokeBorder(border, lineWidth: focused ? 3 : 2))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.bare)
         .focused($focused)
         .focusEffectDisabled()
     }
@@ -160,7 +171,7 @@ struct ControlRow: View {
                 Rectangle().fill(pal.rule2).frame(height: 1)
             }
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.bare)
         .focused($focused)
         .focusEffectDisabled()
         .disabled(action == nil)
@@ -284,30 +295,15 @@ struct PosterCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Button(action: action) {
-                ArtImage(url: posterURL, aspect: 2.0 / 3.0, placeholderTitle: title)
-                    .frame(width: width, height: height)
-                    .clipped()
-                    .overlay(alignment: .topTrailing) { if let b = topRight { pill(b) } }
-                    .overlay(alignment: .topLeading) { if let b = topLeft { pill(b) } }
-                    .overlay(alignment: .bottomLeading) {
-                        if showPlay {
-                            Triangle().fill(.white).frame(width: 16, height: 19)
-                                .shadow(color: .black.opacity(0.6), radius: 4)
-                                .padding(12)
-                        }
-                    }
-                    .overlay(alignment: .bottom) { ProgressBar(progress: progress) }
-                    .overlay(Rectangle().strokeBorder(focused ? pal.ink : pal.rule,
-                                                      lineWidth: focused ? 3 : 1))
-            }
-            .buttonStyle(.plain)
-            .focused($focused)
-            .focusEffectDisabled()
-            .contextMenu {
-                if let onMarkWatched {
-                    Button("Mark Watched", systemImage: "checkmark.circle", action: onMarkWatched)
+            // The context menu is attached ONLY when there is one. An empty
+            // .contextMenu still wraps the tile in a focus container of its own,
+            // which put a halo around every poster in the app.
+            if onMarkWatched != nil {
+                poster.contextMenu {
+                    Button("Mark Watched", systemImage: "checkmark.circle") { onMarkWatched?() }
                 }
+            } else {
+                poster
             }
 
             VStack(alignment: .leading, spacing: 4) {
@@ -326,6 +322,29 @@ struct PosterCard: View {
                 .frame(width: width, height: 6)
                 .padding(.top, 9)
         }
+    }
+
+    private var poster: some View {
+        Button(action: action) {
+            ArtImage(url: posterURL, aspect: 2.0 / 3.0, placeholderTitle: title)
+                .frame(width: width, height: height)
+                .clipped()
+                .overlay(alignment: .topTrailing) { if let b = topRight { pill(b) } }
+                .overlay(alignment: .topLeading) { if let b = topLeft { pill(b) } }
+                .overlay(alignment: .bottomLeading) {
+                    if showPlay {
+                        Triangle().fill(.white).frame(width: 16, height: 19)
+                            .shadow(color: .black.opacity(0.6), radius: 4)
+                            .padding(12)
+                    }
+                }
+                .overlay(alignment: .bottom) { ProgressBar(progress: progress) }
+                .overlay(Rectangle().strokeBorder(focused ? pal.ink : pal.rule,
+                                                  lineWidth: focused ? 3 : 1))
+        }
+        .buttonStyle(.bare)
+        .focused($focused)
+        .focusEffectDisabled()
     }
 
     @ViewBuilder private func pill(_ badge: CardBadge) -> some View {
@@ -368,8 +387,20 @@ struct MediaRow<Content: View>: View {
 
 // ---------------------------------------------------------------- artwork
 
+// Decoded artwork, kept in memory. Without this every poster was re-downloaded
+// from URLCache AND re-decoded on the main thread each time it scrolled back
+// into view, which is what made moving through rows feel heavy.
+final class ArtCache {
+    static let shared = ArtCache()
+    private let cache = NSCache<NSString, UIImage>()
+    private init() { cache.countLimit = 500 }
+    func image(_ url: String) -> UIImage? { cache.object(forKey: url as NSString) }
+    func store(_ img: UIImage, _ url: String) { cache.setObject(img, forKey: url as NSString) }
+}
+
 // Poster/backdrop loader. Unlike AsyncImage this RETRIES failed loads (TMDB
-// hiccups were leaving random tiles blank) and goes through URLCache.
+// hiccups were leaving random tiles blank), caches the DECODED image, and never
+// blanks a tile it can already draw.
 struct ArtImage: View {
     let url: String?
     let aspect: CGFloat
@@ -400,17 +431,30 @@ struct ArtImage: View {
     }
 
     private func load() async {
+        guard let s = url, !s.isEmpty else { image = nil; return }
+        // A cache hit paints immediately — no blank frame, no decode, no flash
+        // when a row scrolls back into view.
+        if let hit = ArtCache.shared.image(s) { image = hit; return }
         image = nil   // view reuse: drop stale art when the URL changes
-        guard let s = url, !s.isEmpty, let u = URL(string: s) else { return }
+        guard let u = URL(string: s) else { return }
         for attempt in 1...3 {
-            if let (data, resp) = try? await URLSession.shared.data(from: u),
-               (resp as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? true,
-               let img = UIImage(data: data) {
-                image = img
+            if let img = await Self.fetch(u) {
+                ArtCache.shared.store(img, s)
+                if url == s { image = img }   // the tile may have been recycled
                 return
             }
-            if attempt < 3 { try? await Task.sleep(nanoseconds: UInt64(attempt) * 500_000_000) }
+            if attempt < 3 { try? await Task.sleep(nanoseconds: UInt64(attempt) * 400_000_000) }
         }
+    }
+
+    // Download AND decode off the main actor. UIImage(data:) is lazy, so without
+    // preparingForDisplay() every tile pays for its decode during the scroll,
+    // on the main thread, exactly when it can least afford it.
+    nonisolated private static func fetch(_ u: URL) async -> UIImage? {
+        guard let (data, resp) = try? await URLSession.shared.data(from: u),
+              (resp as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? true,
+              let img = UIImage(data: data) else { return nil }
+        return img.preparingForDisplay() ?? img
     }
 }
 
@@ -418,13 +462,23 @@ struct ArtImage: View {
 // type on top of it. The image is the image; the label is a label.
 struct ArtPlate: View {
     let url: String?
+    var width: CGFloat? = nil          // nil = fill the available width
+    var height: CGFloat
     var aspect: CGFloat = 16.0 / 9.0
     var title: String? = nil
     @Environment(\.pal) private var pal
+
     var body: some View {
+        // The plate MUST own its own size. Artwork is scaled to FILL, so it
+        // overflows its box unless the clip comes AFTER the final frame — when
+        // the caller applied the height instead, the image kept painting at its
+        // natural size and covered whatever sat below it (the detail page's text
+        // ran over the backdrop, and Continue Watching over the hero).
         ArtImage(url: url, aspect: aspect, placeholderTitle: title)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .frame(width: width, height: height)
+            .frame(maxWidth: width == nil ? .infinity : nil)
             .clipped()
+            .contentShape(Rectangle())
             .overlay(Rectangle().strokeBorder(pal.rule, lineWidth: 1))
     }
 }

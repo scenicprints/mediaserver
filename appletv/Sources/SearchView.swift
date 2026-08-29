@@ -130,7 +130,7 @@ private struct Key: View {
                 .overlay(alignment: .bottom) { Rectangle().fill(pal.rule2).frame(height: 1) }
                 .overlay(alignment: .trailing) { Rectangle().fill(pal.rule2).frame(width: 1) }
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.bare)
         .focused($focused)
         .focusEffectDisabled()
     }

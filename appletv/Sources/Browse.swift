@@ -31,8 +31,7 @@ struct MarqueeHero: View {
     var body: some View {
         let it = idx < items.count ? items[idx] : items[0]
         HStack(alignment: .top, spacing: 44) {
-            ArtPlate(url: it.backdrop ?? it.poster, title: it.title)
-                .frame(width: 1074, height: 396)
+            ArtPlate(url: it.backdrop ?? it.poster, width: 1074, height: 396, title: it.title)
                 .id(it.id)
                 .transition(.opacity)
 
@@ -162,7 +161,9 @@ struct BrowseScreen: View {
         ZStack {
             pal.paper.ignoresSafeArea()
             ScrollView {
-                VStack(alignment: .leading, spacing: Theme.rowSpacing) {
+                // LAZY: Home builds ~20 rows. A plain VStack constructed every
+                // one of them, and every card in them, before the first frame.
+                LazyVStack(alignment: .leading, spacing: Theme.rowSpacing) {
                     if !heroItems.isEmpty {
                         MarqueeHero(items: heroItems, route: $route)
                             .padding(.top, 26)
