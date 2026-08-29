@@ -725,7 +725,15 @@ final class Store: ObservableObject {
         let bitDepth: Int?
         let vcodec: String?; let acodec: String?; let channels: Int?; let channelLayout: String?
         let size: Double?; let videoKbps: Int?
-        var resolutionText: String { guard let h = height else { return "—" }; return h >= 2000 ? "4K" : "\(h)p" }
+        // Judge by WIDTH. Letterboxed films have odd heights (a 2.40:1 1080p
+        // rip is 1920x804), and reporting "804p" is just wrong.
+        var resolutionText: String {
+            let w = width ?? 0, h = height ?? 0
+            if w >= 3000 || h >= 1700 { return "4K" }
+            if w >= 1800 || h >= 1000 { return "1080p" }
+            if w >= 1200 || h >= 700 { return "720p" }
+            return w > 0 ? "SD" : "-"
+        }
         var hdrText: String? {
             switch hdr { case "hdr10": return "HDR10"; case "hlg": return "HLG"
                          case "dolbyvision": return "Dolby Vision"; default: return nil }

@@ -347,20 +347,23 @@ struct PosterCard: View {
         .focusEffectDisabled()
     }
 
+    // Badges are LABELS, not state — so none of them is orange. A row of nine
+    // "NEW" pills in signal orange drowned out the one thing orange is for.
     @ViewBuilder private func pill(_ badge: CardBadge) -> some View {
         switch badge {
-        case .new:                     pillText("New", bg: pal.signal, fg: pal.onSignal)
-        case .newCount(let n):         pillText("\(n) new", bg: pal.signal, fg: pal.onSignal)
-        case .quality(let q):          pillText(q, bg: Color.black.opacity(0.72), fg: .white)
-        case .stream(let name, _):     pillText(name, bg: Color.black.opacity(0.80), fg: .white)
-        case .alsoOn(let name, _):     pillText(name, bg: Color.black.opacity(0.80), fg: .white)
+        case .new:                     pillText("New")
+        case .newCount(let n):         pillText("\(n) new")
+        case .quality(let q):          pillText(q, caps: false)   // "1080p", not "1080P"
+        case .stream(let name, _):     pillText(name)
+        case .alsoOn(let name, _):     pillText(name)
         }
     }
-    private func pillText(_ text: String, bg: Color, fg: Color) -> some View {
-        Text(text.uppercased())
-            .font(F.semi(12)).tracking(1.4).foregroundStyle(fg)
+    private func pillText(_ text: String, caps: Bool = true) -> some View {
+        Text(caps ? text.uppercased() : text)
+            .font(F.semi(12)).tracking(caps ? 1.4 : 0.6)
+            .foregroundStyle(.white)
             .padding(.horizontal, 9).padding(.vertical, 6)
-            .background(bg)
+            .background(Color.black.opacity(0.78))
             .padding(8)
     }
 }

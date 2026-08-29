@@ -15,7 +15,6 @@ struct LibraryView: View {
     @Environment(\.pal) private var pal
     @Binding var route: [Route]
     @State private var kind = "movie"
-    @State private var query = ""
     @State private var selectedGenre: String? = nil
     @State private var unwatchedOnly = false
     @State private var genresExpanded = false
@@ -62,7 +61,6 @@ struct LibraryView: View {
     }
 
     private var allItems: [LibItem] { kind == "movie" ? store.movies.map(movieItem) : store.shows.map(showItem) }
-    private var trimmed: String { query.trimmingCharacters(in: .whitespaces) }
 
     // Top genres only (most common first) — keeps the filter row condensed.
     private var availableGenres: [String] {
@@ -75,7 +73,6 @@ struct LibraryView: View {
         var src = allItems.sorted(by: lessThan)
         if let g = selectedGenre { src = src.filter { $0.genres.contains(g) } }
         if unwatchedOnly { src = src.filter { $0.unwatched } }
-        if !trimmed.isEmpty { src = src.filter { $0.title.range(of: trimmed, options: .caseInsensitive) != nil } }
         return src
     }
     // First item id for each present letter (for the A–Z jump).
@@ -90,7 +87,7 @@ struct LibraryView: View {
             pal.paper.ignoresSafeArea()
             ScrollViewReader { proxy in
                 HStack(alignment: .top, spacing: 34) {
-                    if trimmed.isEmpty && !letterAnchors.isEmpty { indexRail(proxy) }
+                    if !letterAnchors.isEmpty { indexRail(proxy) }
                     content
                 }
                 .padding(.horizontal, Theme.gutter)
@@ -108,7 +105,6 @@ struct LibraryView: View {
                 SeasonCell(title: "Movies", selected: kind == "movie") { kind = "movie" }
                 SeasonCell(title: "TV Shows", selected: kind == "tv") { kind = "tv" }
                 Spacer(minLength: 24)
-                InlineSearch(text: $query)
                 Text("\(visible.count)").font(F.mono(17)).foregroundStyle(pal.ink3)
             }
             .overlay(alignment: .bottom) { Rectangle().fill(pal.rule).frame(height: 1) }
@@ -117,8 +113,7 @@ struct LibraryView: View {
             filterRow.padding(.top, 16)
 
             if visible.isEmpty {
-                Text(trimmed.isEmpty ? "Nothing matches those filters."
-                                     : "Nothing matches “\(trimmed)”.")
+                Text("Nothing matches those filters.")
                     .font(F.reg(22)).foregroundStyle(pal.ink2).padding(.top, 34)
                 Spacer(minLength: 0)
             } else {
@@ -185,6 +180,7 @@ struct LibraryView: View {
             .padding(.top, 116)
         }
         .frame(width: 46)
+        .overlay(alignment: .trailing) { Rectangle().fill(pal.rule2).frame(width: 1) }
         .focusSection()
     }
 }
@@ -210,30 +206,6 @@ struct FilterChip: View {
         .buttonStyle(.bare)
         .focused($focused)
         .focusEffectDisabled()
-    }
-}
-
-// A compact search field for a header row: no label, just the rule under it.
-struct InlineSearch: View {
-    @Binding var text: String
-    @Environment(\.pal) private var pal
-    @FocusState private var focused: Bool
-
-    var body: some View {
-        HStack(spacing: 12) {
-            Lab("Search", small: true)
-            TextField("", text: $text)
-                .textFieldStyle(.plain)
-                .textInputAutocapitalization(.never)
-                .font(F.med(21))
-                .foregroundStyle(pal.ink)
-                .focused($focused)
-                .frame(width: 300)
-        }
-        .padding(.vertical, 10)
-        .overlay(alignment: .bottom) {
-            Rectangle().fill(focused ? pal.signal : pal.rule).frame(height: focused ? 3 : 1)
-        }
     }
 }
 

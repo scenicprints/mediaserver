@@ -43,6 +43,10 @@ struct MarqueeHero: View {
                     .padding(.top, 18)
                 Text(meta(it)).font(F.mono(16)).tracking(1.2).foregroundStyle(pal.ink3)
                     .padding(.top, 18)
+                if let o = it.overview, !o.isEmpty {
+                    Text(o).font(F.reg(19)).lineSpacing(7).foregroundStyle(pal.ink2)
+                        .lineLimit(4).padding(.top, 18)
+                }
                 HStack(spacing: 14) {
                     MButton(title: "Play", kind: .primary, play: true) { route.append(it.route) }
                     MButton(title: "Details") { route.append(it.route) }

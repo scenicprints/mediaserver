@@ -139,7 +139,7 @@ struct SettingsView: View {
                     store.finish = store.finish == .white ? .black : .white
                 }
             }
-            note("White is the daytime housing. Black is the same system for a dark room. The player is always black either way — a white panel across the bottom of a film is the one place the light finish fails.")
+            note("White is the daytime housing. Black is the same system for a dark room. The player is always black either way, because a white panel across the bottom of a film is the one place the light finish fails.")
         }
     }
 
@@ -213,7 +213,7 @@ struct SettingsView: View {
     private var account: some View {
         VStack(alignment: .leading, spacing: 0) {
             rows {
-                ControlRow(name: "Signed in as", value: store.user?.username ?? "—")
+                ControlRow(name: "Signed in as", value: store.user?.username ?? "Not signed in")
                 ControlRow(name: "Role", value: (store.user?.role ?? "").capitalized)
             }
             MButton(title: "Log out") { store.logout() }.padding(.top, 26)
@@ -303,7 +303,7 @@ struct SettingsView: View {
             } else {
                 rows {
                     ForEach(sessions) { s in
-                        ControlRow(name: [s.username, s.title, s.subtitle].compactMap { $0 }.joined(separator: " — "),
+                        ControlRow(name: [s.username, s.title, s.subtitle].compactMap { $0 }.joined(separator: "  ·  "),
                                    value: s.paused == true ? "Paused"
                                         : (s.mode == "transcode" ? "Transcode" : "Direct"),
                                    on: s.paused != true)
@@ -318,7 +318,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 0) {
             SpecGrid(cells: [
                 .init(key: "Server", value: shortHost, mono: false),
-                .init(key: "Version", value: version.isEmpty ? "—" : version),
+                .init(key: "Version", value: version.isEmpty ? "Unknown" : version),
                 .init(key: "Library", value: "\(store.movies.count) / \(store.shows.count)"),
                 .init(key: "Finish", value: store.finish.label, mono: false)
             ])

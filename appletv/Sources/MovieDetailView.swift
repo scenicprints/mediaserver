@@ -93,7 +93,7 @@ struct MovieDetailView: View {
     @ViewBuilder private func left(_ d: MovieDetail) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             Text(d.title)
-                .font(F.med(76)).foregroundStyle(pal.ink)
+                .font(F.med(64)).foregroundStyle(pal.ink)
                 .lineLimit(2).minimumScaleFactor(0.6)
 
             SpecGrid(cells: specCells(d)).padding(.top, 24)
@@ -110,7 +110,8 @@ struct MovieDetailView: View {
                 Text(tag).font(F.med(21)).foregroundStyle(pal.ink3).padding(.top, 22)
             }
             if let o = d.overview, !o.isEmpty {
-                Text(o).font(F.reg(22)).lineSpacing(9).foregroundStyle(pal.ink2)
+                Text(o).font(F.reg(21)).lineSpacing(8).foregroundStyle(pal.ink2)
+                    .lineLimit(4)
                     .frame(maxWidth: 900, alignment: .leading)
                     .padding(.top, 20)
             }

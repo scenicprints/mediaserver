@@ -130,6 +130,23 @@ struct ShowDetailView: View {
 
                 SpecGrid(cells: specCells(d)).padding(.top, 20)
 
+                // The way IN. Without this the show page had no play control at
+                // all — you had to pick an episode out of the list to start
+                // anything, which is not how you sit down to a series.
+                if let ep = nextUp {
+                    HStack(spacing: 14) {
+                        if let p = ep.resumePosition, p > 5 {
+                            MButton(title: "Resume \(ep.tag)", kind: .primary,
+                                    play: true, height: 70) { play(ep) }
+                            MButton(title: "From start", height: 70) { play(ep, at: 0) }
+                        } else {
+                            MButton(title: "Play \(ep.tag)", kind: .primary,
+                                    play: true, height: 70) { play(ep) }
+                        }
+                    }
+                    .padding(.top, 24)
+                }
+
                 if let o = d.overview, !o.isEmpty {
                     // Bounded: this column has no focusable content, so tvOS can
                     // never scroll it. Everything here has to fit on one screen.
