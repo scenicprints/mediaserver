@@ -1,5 +1,20 @@
 # Android TV ("Google OS") — native player handoff
 
+> **THE UI IS `public/`.** MainActivity is a thin full-screen WebView shell; the
+> only native piece is `PlayerActivity` (libVLC). So a look-and-feel change for
+> Android TV is a change to the WEB APP, and it ships the moment the Dell pulls —
+> **no APK rebuild.** It also lands on every other web client at the same time:
+> browsers, phones, the LG TV. That is not a side effect to discover later.
+>
+> **2026-08-29: the web app is now the Braun edition**, matching the Apple TV app
+> (`appletv/`, see its HANDOFF). Tokens at the top of `public/style.css` carry
+> both finishes; nothing below that block should write a raw colour. The finish
+> is chosen in Settings ▸ Audio ▸ Finish and saved per device (it depends on the
+> room and the screen, like the audio prefs). Two rules the CSS enforces:
+> artwork is never scrimmed and type never sits on it (the hero and the detail
+> splash both paint the art as a band and put the words below it), and the
+> signal orange means only "where you are, or what happens next".
+
 > **STATUS 2026-07-20: SHIPPED (v1, awaiting on-TV verification).**
 > `PlayerActivity.kt` (libVLC 3.6.5 — newest 3.x that compiles against SDK 34;
 > 3.7.x demands compileSdk 36) direct-plays `/api/stream` via the

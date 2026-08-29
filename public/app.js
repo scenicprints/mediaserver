@@ -396,7 +396,7 @@ async function openCollection(id) {
   try { data = await (await fetch('/api/collections/' + encodeURIComponent(id))).json(); } catch (_e) { return; }
   const items = data.items || [];
   detailInner.innerHTML = `
-    <div class="dp-splash" style="background-image:url('${data.backdrop || data.poster || (items[0] && items[0].backdrop) || ''}')">
+    <div class="dp-splash${(data.backdrop || data.poster || (items[0] && items[0].backdrop)) ? '' : ' no-art'}" style="background-image:url('${data.backdrop || data.poster || (items[0] && items[0].backdrop) || ''}')">
       <div class="dp-hero">
         <div class="dp-poster">${data.poster ? `<img src="${data.poster}" alt="">` : ''}</div>
         <div class="dp-info">
@@ -1217,7 +1217,7 @@ async function openDetail(id, autoplay = true) {
     : (current ? `<span class="dp-version"><span>${escapeHtml(versionLabel(current, 0))}</span></span>` : '');
 
   detailInner.innerHTML = `
-    <div class="dp-splash" id="dp-splash" style="background-image:url('${m.backdrop || m.poster || ''}')">
+    <div class="dp-splash${(m.backdrop || m.poster) ? '' : ' no-art'}" id="dp-splash" style="background-image:url('${m.backdrop || m.poster || ''}')">
       <div class="dp-hero">
         <div class="dp-poster">${m.poster ? `<img src="${m.poster}" alt="">` : ''}</div>
         <div class="dp-info">
@@ -1381,7 +1381,7 @@ async function openEpisodeDetail(show, flat, i) {
     : (current ? `<span class="dp-version"><span>${escapeHtml(versionLabel(current, 0))}</span></span>` : '');
 
   detailInner.innerHTML = `
-    <div class="dp-splash" style="background-image:url('${still}')">
+    <div class="dp-splash${still ? '' : ' no-art'}" style="background-image:url('${still}')">
       <div class="dp-hero">
         <div class="dp-poster">${ep.still || show.poster ? `<img src="${ep.still || show.poster}" alt="">` : ''}</div>
         <div class="dp-info">
@@ -1462,7 +1462,7 @@ async function openShow(id, autoEpId, autoplay = true) {
   (extra.seasons || []).forEach((s) => { seasonPoster[s.season] = s.poster; });
 
   detailInner.innerHTML = `
-    <div class="dp-splash" style="background-image:url('${show.backdrop || show.poster || ''}')">
+    <div class="dp-splash${(show.backdrop || show.poster) ? '' : ' no-art'}" style="background-image:url('${show.backdrop || show.poster || ''}')">
       <div class="dp-hero">
         <div class="dp-poster">${show.poster ? `<img src="${show.poster}" alt="">` : ''}</div>
         <div class="dp-info">
@@ -3534,3 +3534,23 @@ function escapeHtml(s) {
   checkForUpdate();
   setInterval(checkForUpdate, 30 * 60 * 1000);
 })();
+
+// ---------- Finish (white housing / black) ----------
+// Per DEVICE, deliberately: which one is right depends on the room and the
+// panel, not on the account — the same reason the audio prefs live here. "auto"
+// follows the device's own light/dark setting.
+function applyFinish(v) {
+  if (v === 'white' || v === 'black') document.documentElement.setAttribute('data-finish', v);
+  else document.documentElement.removeAttribute('data-finish');
+  document.querySelectorAll('[data-finish]').forEach((b) => {
+    if (b.tagName === 'BUTTON') b.classList.toggle('active', b.dataset.finish === (v || 'auto'));
+  });
+}
+applyFinish(localStorage.getItem('finish') || 'auto');
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-finish]');
+  if (!b) return;
+  const v = b.dataset.finish;
+  localStorage.setItem('finish', v);
+  applyFinish(v);
+});
