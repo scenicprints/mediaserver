@@ -786,7 +786,14 @@ async function renderLiveTv() {
     if (currentView !== 'livetv' || !document.getElementById('detail').classList.contains('hidden') || document.querySelector('.vp')) return;
     if (document.querySelector('.nav .tv-focus')) return; // ribbon has focus → let it drive
     if (e.key === 'ArrowDown') { e.preventDefault(); ltState.sel = (ltState.sel + 1) % channels.length; drawEpg(); drawPreview(); }
-    else if (e.key === 'ArrowUp') { e.preventDefault(); ltState.sel = (ltState.sel - 1 + channels.length) % channels.length; drawEpg(); drawPreview(); }
+    else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      // At the first channel, Up leaves the guide for the ribbon. It used to
+      // WRAP to the last channel, so there was no way out of Live TV at all
+      // short of a Back key the TV remote never delivers.
+      if (ltState.sel === 0) { if (window.tvToRibbon) window.tvToRibbon(); return; }
+      ltState.sel -= 1; drawEpg(); drawPreview();
+    }
     else if (e.key === 'Enter') { e.preventDefault(); tuneIn(); }
   };
   document.addEventListener('keydown', ltState.onKey, true);

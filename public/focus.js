@@ -71,6 +71,7 @@
     const inNav = !!current.closest('.nav');
     const grp = horizontal ? current.closest(HGROUP) : null;
     let best = null, bestScore = Infinity;
+    const vert = [];
     for (const el of candidates(root)) {
       if (el === current) continue;
       // The top ribbon is its own zone: arrows never cross into it from the
@@ -82,13 +83,37 @@
       const r = rectOf(el);
       const dx = r.left + r.width / 2 - cx;
       const dy = r.top + r.height / 2 - cy;
-      let along, cross;
-      if (dir === 'right') { if (dx <= 1) continue; along = dx; cross = Math.abs(dy); }
-      else if (dir === 'left') { if (dx >= -1) continue; along = -dx; cross = Math.abs(dy); }
-      else if (dir === 'down') { if (dy <= 1) continue; along = dy; cross = Math.abs(dx); }
-      else { if (dy >= -1) continue; along = -dy; cross = Math.abs(dx); }
-      const score = along + cross * 3;
-      if (score < bestScore) { bestScore = score; best = el; }
+      if (horizontal) {
+        let along, cross;
+        if (dir === 'right') { if (dx <= 1) continue; along = dx; cross = Math.abs(dy); }
+        else { if (dx >= -1) continue; along = -dx; cross = Math.abs(dy); }
+        const score = along + cross * 3;
+        if (score < bestScore) { bestScore = score; best = el; }
+      } else {
+        if (dir === 'down' ? dy <= 1 : dy >= -1) continue;
+        vert.push({ el, r });
+      }
+    }
+    // Vertical movement is ROW-AWARE, not a nearest-neighbour score. Scoring by
+    // distance let a card near the right edge slide diagonally past an entire
+    // row whenever nothing sat exactly above it — which is what made Up feel
+    // like it skipped a level or landed somewhere arbitrary. Instead: take the
+    // nearest row BAND in that direction, then the item in it that actually
+    // lines up with where you are.
+    if (!horizontal) {
+      if (!vert.length) return null;
+      vert.sort((a, b) => (dir === 'down' ? a.r.top - b.r.top : b.r.top - a.r.top));
+      const anchor = vert[0].r.top;
+      const band = vert.filter((x) => Math.abs(x.r.top - anchor) <= 40);
+      let pickBest = null, pickD = Infinity;
+      for (const { el, r } of band) {
+        // Anything horizontally overlapping the current item is "lined up";
+        // otherwise fall back to the nearest centre.
+        const overlap = Math.min(cur.right, r.right) - Math.max(cur.left, r.left);
+        const d = overlap > 0 ? 0 : Math.abs(r.left + r.width / 2 - cx);
+        if (d < pickD) { pickD = d; pickBest = el; }
+      }
+      return pickBest;
     }
     return best;
   }
@@ -164,7 +189,20 @@
     }
     const inNav = !!current.closest('.nav');
     const next = pick(dir, root) || ((!inNav && (dir === 'right' || dir === 'left')) ? wrap(dir, root) : null);
-    if (next) setCurrent(next);
+    if (next) { setCurrent(next); return; }
+    // Nothing above inside the content: Up goes UP A LEVEL, to the ribbon. It
+    // used to do nothing at all, because arrows were forbidden from crossing
+    // into the nav and Back was the only way up — and a TV remote's Back does
+    // not always reach the page.
+    if (dir === 'up' && !inNav && !modalOpen()) toRibbon();
+  }
+
+  const modalOpen = () => [...document.querySelectorAll('.modal')].some((m) => !m.classList.contains('hidden'));
+
+  function toRibbon() {
+    const nav = document.querySelector('.nav-link.active') || document.querySelector('.nav-link');
+    if (!nav) return false;
+    enterNav(); setCurrent(nav); return true;
   }
 
   function activate() {
@@ -267,4 +305,6 @@
   // it on the search box). Only lights up if the user is driving by remote.
   window.tvSeat = (el) => { if (el && navMode) setCurrent(el); else if (el) current = el; };
   window.tvNavActive = () => navMode;
+  // Live TV drives its own arrows; this is how it hands focus back up.
+  window.tvToRibbon = () => toRibbon();
 })();
