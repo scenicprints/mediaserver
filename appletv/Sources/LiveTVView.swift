@@ -162,9 +162,18 @@ enum LiveTV {
     }
 }
 
-// ---- The view ----
+// ============================================================================
+// The view. The guide is a timetable, which is the thing Braun drew best:
+// hairlines only, no coloured blocks. The vertical signal line is NOW, and it is
+// the only orange in the grid, so where you are is never ambiguous.
+//
+// The now-playing strip stays COMPACT on purpose (the earlier full-bleed hero
+// pushed the guide off the bottom and you could only see two channels).
+// ============================================================================
+
 struct LiveTVView: View {
     @EnvironmentObject var store: Store
+    @Environment(\.pal) private var pal
     @State private var channels: [LiveChannel] = []
     @State private var episodes: [LiveEpisode] = []
     @State private var loading = true
@@ -174,126 +183,116 @@ struct LiveTVView: View {
     @FocusState private var focusedChannel: Int?
     private let timer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
 
-    private let ppm: CGFloat = 12          // points per guide-minute
+    private let ppm: CGFloat = 16          // points per guide-minute
     private let windowMin: Double = 90
-    private let labelW: CGFloat = 310      // room for full channel names
+    private let labelW: CGFloat = 250
 
     var body: some View {
         ZStack {
-            Theme.bg.ignoresSafeArea()
+            pal.paper.ignoresSafeArea()
             if loading {
-                ProgressView("Tuning in…").scaleEffect(1.4)
+                ProgressView().scaleEffect(1.5)
             } else if channels.isEmpty {
-                VStack(spacing: 14) {
-                    Image(systemName: "dot.radiowaves.left.and.right").font(.system(size: 60)).foregroundStyle(Theme.accent)
-                    Text("Add movies or shows to start broadcasting.").foregroundStyle(.secondary)
-                }
+                Text("Add movies or shows to start broadcasting.")
+                    .font(F.reg(24)).foregroundStyle(pal.ink2)
             } else {
-                // The preview is PINNED — it carries what you're looking at
-                // while only the guide rows scroll underneath. It RESPECTS the
-                // top safe area (the tvOS tab bar): ignoring it piled the hero
-                // under the tab bar AND gave the guide's ScrollView a phantom
-                // content inset (a dead band above the rows). Compact strip
-                // instead of a full-bleed hero → several channels visible.
-                VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 0) {
                     if channels.indices.contains(selected) { preview(channels[selected]) }
-                    guide
-                        .frame(maxHeight: .infinity)
+                    guide.padding(.top, 22).frame(maxHeight: .infinity)
                 }
+                .padding(.horizontal, Theme.gutter)
+                .padding(.top, 22)
             }
         }
         .task { await load() }
         .onReceive(timer) { now = $0 }
         .onChange(of: focusedChannel) { if let f = focusedChannel { selected = f } }
         .fullScreenCover(item: $tuned) { t in
-            LivePlayer(item: t.item, offset: t.offset).environmentObject(store).ignoresSafeArea()
+            LivePlayer(item: t.item, offset: t.offset)
+                .environmentObject(store)
+                .environment(\.pal, pal)
+                .ignoresSafeArea()
         }
     }
 
-    // Compact now-playing strip: 16:9 thumbnail beside the program info, sized
-    // so the guide below gets most of the screen. No wordmark on this page —
-    // the tab bar is already up top and every pixel belongs to the guide.
+    // Compact now-playing strip: a plate beside the facts, so the guide keeps
+    // most of the screen and several channels stay visible.
     @ViewBuilder private func preview(_ ch: LiveChannel) -> some View {
         let on = LiveTV.nowOn(ch, now.timeIntervalSince1970)
-        HStack(alignment: .center, spacing: 26) {
-            ArtImage(url: on.item.backdrop ?? on.item.still ?? on.item.poster, aspect: 16.0 / 9.0)
-                .frame(width: 340, height: 191).clipped()
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 12) {
-                    Text("\(ch.number)").font(.subheadline).fontWeight(.heavy)
-                        .padding(.horizontal, 10).padding(.vertical, 4)
-                        .background(Theme.accent, in: RoundedRectangle(cornerRadius: 7))
-                    Text(ch.name).font(.callout).fontWeight(.heavy).kerning(2)
-                    HStack(spacing: 6) { Circle().fill(.red).frame(width: 10, height: 10); Text("LIVE").font(.caption2).fontWeight(.bold) }
+        HStack(alignment: .center, spacing: 28) {
+            ArtPlate(url: on.item.backdrop ?? on.item.still ?? on.item.poster, title: on.item.title)
+                .frame(width: 340, height: 191)
+
+            VStack(alignment: .leading, spacing: 0) {
+                Lab("On now   ·   \(ch.name)   ·   Channel \(ch.number)", small: true)
+                Text(on.item.title)
+                    .font(F.med(38)).foregroundStyle(pal.ink)
+                    .lineLimit(1).minimumScaleFactor(0.7)
+                    .padding(.top, 10)
+                if let s = on.item.sub {
+                    Text(s).font(F.reg(18)).foregroundStyle(pal.ink2).lineLimit(1).padding(.top, 6)
                 }
-                HStack(spacing: 14) {
-                    Text(on.item.title).font(.system(size: 34, weight: .bold)).lineLimit(1)
-                    if let y = on.item.year { Chip(String(y)) }
-                    if let r = on.item.rating, r > 0 { Chip(String(format: "★ %.1f", r)) }
-                    if let s = on.item.sub { Chip(s) }
-                }
-                HStack(spacing: 14) {
-                    ProgressView(value: min(on.offset / on.item.duration, 1))
-                        .tint(Theme.accent).frame(maxWidth: 320)
-                    Text("\(Int(on.offset / 60)) min in · Up next \(clock(now.timeIntervalSince1970 + on.endsIn))")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Button { tuned = TunedLive(item: on.item, offset: on.offset) } label: {
-                        Label("Tune In", systemImage: "play.fill").font(.subheadline).padding(.horizontal, 12)
+                Text(joinLine(on)).font(F.mono(15)).tracking(1.1).foregroundStyle(pal.ink3)
+                    .padding(.top, 12)
+                // How far in. Orange, because it is where you are.
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Rectangle().fill(pal.rule)
+                        Rectangle().fill(pal.signal)
+                            .frame(width: geo.size.width * min(on.offset / max(on.item.duration, 1), 1))
                     }
-                    .buttonStyle(.borderedProminent).tint(Theme.accent)
                 }
+                .frame(width: 420, height: 5)
+                .padding(.top, 14)
             }
-            Spacer(minLength: 0)
+
+            Spacer(minLength: 20)
+            MButton(title: "Join", kind: .primary, play: true) {
+                tuned = TunedLive(item: on.item, offset: on.offset)
+            }
         }
-        .padding(.horizontal, Theme.gutter)
-        .padding(.top, 6)
+        .overlay(alignment: .bottom) { Rectangle().fill(pal.rule).frame(height: 1).padding(.top, 18) }
     }
 
-    // The EPG grid: a shared timeline, programs positioned by their real air
-    // time (so different lengths start at different points), with a live red
-    // playhead marking "now". The window starts on the half hour (web drawEpg
-    // floors to :00/:30) so the time axis reads 3:00 / 3:30 — not 2:53.
+    private func joinLine(_ on: (item: LiveItem, offset: Double, endsIn: Double, idx: Int)) -> String {
+        let started = now.timeIntervalSince1970 - on.offset
+        return "STARTED \(clock(started))   /   \(Int(on.offset / 60)) MIN IN   /   ENDS \(clock(now.timeIntervalSince1970 + on.endsIn))"
+    }
+
+    // The EPG: a shared timeline, programs positioned by their real air time.
+    // The window starts on the half hour so the axis reads 8:00 / 8:30.
     private var guide: some View {
         let nowSec = now.timeIntervalSince1970
-        let winStart = (nowSec / 1800).rounded(.down) * 1800   // floor to :00/:30
+        let winStart = (nowSec / 1800).rounded(.down) * 1800
         let winEnd = winStart + windowMin * 60
-        let nowX = Theme.gutter + labelW + CGFloat((nowSec - winStart) / 60) * ppm
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 14) {
-                Circle().fill(.red).frame(width: 14, height: 14)
-                Text("GUIDE").font(.title3).fontWeight(.heavy).kerning(2)
-            }
-            .padding(.horizontal, Theme.gutter)
-
-            // Time axis (every 30 min across the window).
+        let nowX = labelW + CGFloat((nowSec - winStart) / 60) * ppm
+        return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 0) {
                 Color.clear.frame(width: labelW)
                 ForEach(0..<Int(windowMin / 30), id: \.self) { i in
-                    Text(clock(winStart + Double(i) * 30 * 60))
-                        .font(.caption).foregroundStyle(.secondary)
+                    Lab(clock(winStart + Double(i) * 30 * 60), small: true)
                         .frame(width: 30 * ppm, alignment: .leading)
                 }
+                Spacer(minLength: 0)
             }
-            .padding(.leading, Theme.gutter)
+            .frame(height: 44)
+            .overlay(alignment: .bottom) { Rectangle().fill(pal.rule).frame(height: 1) }
 
-            // Channel rows scroll under the pinned marquee + time axis; the red
-            // "now" line rides inside the scroll content, spanning all rows.
-            // tvOS auto-scrolls to keep the focused channel visible.
             ScrollView(.vertical, showsIndicators: false) {
                 ZStack(alignment: .topLeading) {
-                    VStack(spacing: 8) {
+                    LazyVStack(spacing: 0) {
                         ForEach(channels) { ch in
                             channelRow(ch, winStart: winStart, winEnd: winEnd, nowSec: nowSec)
                         }
                     }
-                    Rectangle().fill(.red).frame(width: 3)
-                        .overlay(alignment: .top) { Circle().fill(.red).frame(width: 14, height: 14).offset(y: -6) }
+                    // NOW. The only orange in the grid.
+                    Rectangle().fill(pal.signal).frame(width: 2)
                         .padding(.leading, nowX)
                         .allowsHitTesting(false)
                 }
-                .padding(.bottom, Theme.gutter)
+                .padding(.bottom, 30)
             }
+            .focusSection()
         }
     }
 
@@ -305,55 +304,63 @@ struct LiveTVView: View {
             tuned = TunedLive(item: on.item, offset: on.offset)
         } label: {
             HStack(spacing: 0) {
-                HStack(spacing: 10) {
-                    Text("\(ch.number)")
-                        .font(.callout).fontWeight(.heavy)
-                        .foregroundStyle(focused ? .white : Theme.muted)
-                        .frame(width: 44, alignment: .trailing)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(ch.name)
-                            .font(.callout).fontWeight(.bold).lineLimit(1)
-                            .minimumScaleFactor(0.75)
-                            .foregroundStyle(focused ? Theme.accent2 : .white)
-                        Text(ch.sub).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                HStack(spacing: 12) {
+                    Text("\(ch.number)").font(F.mono(15)).foregroundStyle(pal.ink3)
+                        .frame(width: 30, alignment: .trailing)
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(ch.name.uppercased())
+                            .font(F.semi(16)).tracking(2.0)
+                            .foregroundStyle(focused ? pal.ink : pal.ink2)
+                            .lineLimit(1).minimumScaleFactor(0.7)
+                        Text(ch.sub).font(F.mono(12)).foregroundStyle(pal.ink3).lineLimit(1)
                     }
                 }
-                .padding(.trailing, 10)
-                .frame(width: labelW, alignment: .leading)
+                .padding(.horizontal, 14)
+                .frame(width: labelW, height: 84, alignment: .leading)
+                .background(pal.panel2)
 
                 ZStack(alignment: .topLeading) {
                     ForEach(progs) { p in
                         let x = CGFloat(max(0, (p.start - winStart) / 60)) * ppm
                         let w = CGFloat((min(p.end, winEnd) - max(p.start, winStart)) / 60) * ppm
                         let isNow = p.start <= nowSec && p.end > nowSec
-                        if w > 4 {
-                            Text(p.item.title)
-                                .font(.callout).fontWeight(isNow ? .semibold : .regular).lineLimit(1)
-                                .padding(.horizontal, 12)
-                                .frame(width: max(1, w - 4), height: 66, alignment: .leading)
-                                .background(isNow ? Theme.accent.opacity(0.30) : Color.white.opacity(0.06))
-                                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(isNow ? Theme.accent : Color.white.opacity(0.12), lineWidth: isNow ? 2 : 1))
-                                .clipShape(RoundedRectangle(cornerRadius: 6))
-                                .offset(x: x)
+                        if w > 6 {
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text(p.item.title)
+                                    .font(isNow ? F.med(16) : F.reg(16))
+                                    .foregroundStyle(pal.ink).lineLimit(1)
+                                Text(metaLine(p.item)).font(F.mono(12))
+                                    .foregroundStyle(pal.ink3).lineLimit(1)
+                            }
+                            .padding(.horizontal, 12)
+                            .frame(width: max(1, w - 1), height: 84, alignment: .leading)
+                            .background(isNow ? pal.panel2 : Color.clear)
+                            .overlay(alignment: .trailing) { Rectangle().fill(pal.rule2).frame(width: 1) }
+                            .offset(x: x)
                         }
                     }
                 }
-                .frame(width: windowMin * ppm, height: 66, alignment: .topLeading)
+                .frame(width: windowMin * ppm, height: 84, alignment: .topLeading)
                 .clipped()
             }
-            .padding(.vertical, 6)
-            .padding(.leading, Theme.gutter)
-            // Focus cue: a soft row tint + accent channel name — NOT the stock
-            // white platter, which read as a giant white bar across the guide.
-            .background(focused ? Color.white.opacity(0.07) : .clear,
-                        in: RoundedRectangle(cornerRadius: 10))
+            .overlay(alignment: .bottom) { Rectangle().fill(pal.rule2).frame(height: 1) }
+            .overlay(alignment: .leading) { Rectangle().fill(pal.signal).frame(width: focused ? 6 : 0) }
+            .background(focused ? pal.panel : Color.clear)
         }
-        .buttonStyle(GuideRowButtonStyle())
+        .buttonStyle(.plain)
         .focused($focusedChannel, equals: ch.id)
+        .focusEffectDisabled()
+    }
+
+    private func metaLine(_ it: LiveItem) -> String {
+        var parts: [String] = []
+        if let y = it.year { parts.append(String(y)) }
+        parts.append(timecode(it.duration))
+        return parts.joined(separator: "  ·  ")
     }
 
     private func clock(_ sec: Double) -> String {
-        let f = DateFormatter(); f.dateFormat = "h:mm a"
+        let f = DateFormatter(); f.dateFormat = "h:mm"
         return f.string(from: Date(timeIntervalSince1970: sec))
     }
 
@@ -363,15 +370,6 @@ struct LiveTVView: View {
         episodes = await store.loadLiveEpisodes()
         channels = LiveTV.build(movies: store.movies, episodes: episodes)
         loading = false
-    }
-}
-
-// A no-chrome button style for guide rows: keeps tvOS focusability but draws
-// none of the stock focus platter (the row renders its own focus cue).
-struct GuideRowButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .scaleEffect(configuration.isPressed ? 0.99 : 1)
     }
 }
 

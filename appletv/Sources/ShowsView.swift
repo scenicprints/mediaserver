@@ -1,18 +1,19 @@
 import SwiftUI
 
-// TV: rotating Marquee hero (shows) + the full categorized row set.
+// TV: the Marquee hero (shows) + the full categorized row set.
 struct ShowsView: View {
     @EnvironmentObject var store: Store
+    @Environment(\.pal) private var pal
     @Binding var route: [Route]
 
     var body: some View {
         Group {
             if store.shows.isEmpty {
                 ZStack {
-                    Theme.bg.ignoresSafeArea()
-                    VStack(spacing: 14) {
-                        Text("No shows yet").font(.title2)
-                        Button("Reload") { Task { await store.loadHome() } }
+                    pal.paper.ignoresSafeArea()
+                    VStack(spacing: 18) {
+                        Text("No shows yet").font(F.med(30)).foregroundStyle(pal.ink)
+                        MButton(title: "Reload") { Task { await store.loadHome() } }
                     }
                 }
             } else {
@@ -26,11 +27,15 @@ struct ShowsView: View {
     }
 }
 
-// ---- Show detail: the "description window" (like the movie page) — backdrop
-// splash with poster/title/chips/actions at its bottom edge, the overview and
-// cast BELOW the splash, then season cards and the selected season's episodes.
+// ============================================================================
+// Show detail. Two columns: the show on the left, the season and its episodes
+// on the right. Episodes are a LIST, not a carousel — number, still, title, one
+// line, runtime — because a season is an ordered thing and reads as one.
+// ============================================================================
+
 struct ShowDetailView: View {
     @EnvironmentObject var store: Store
+    @Environment(\.pal) private var pal
     let showId: Int
 
     @State private var detail: ShowDetail?
@@ -57,12 +62,11 @@ struct ShowDetailView: View {
 
     var body: some View {
         ZStack {
-            Theme.bg.ignoresSafeArea()
+            pal.paper.ignoresSafeArea()
             if let d = detail { content(d) }
             else if loading { ProgressView().scaleEffect(1.6) }
-            else { Text("Couldn't load this show.").foregroundStyle(.secondary) }
+            else { Text("Couldn't load this show.").font(F.reg(24)).foregroundStyle(pal.ink2) }
         }
-        .toolbar(.hidden, for: .tabBar)
         .task { await load() }
         .fullScreenCover(item: $session, onDismiss: {
             Task { await load(); await store.loadHome() }   // fresh resume state
@@ -75,6 +79,7 @@ struct ShowDetailView: View {
             EpisodeDetailView(showTitle: detail?.title ?? "", episode: ep,
                               fallbackArt: seasonPoster(ep.season ?? selectedSeason) ?? detail?.backdrop)
                 .environmentObject(store)
+                .environment(\.pal, pal)
         }
     }
 
@@ -105,150 +110,99 @@ struct ShowDetailView: View {
 
     @ViewBuilder
     private func content(_ d: ShowDetail) -> some View {
+        HStack(alignment: .top, spacing: 56) {
+            showColumn(d).frame(width: 780)
+            seasonColumn(d).frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, Theme.gutter)
+        .padding(.top, 24)
+    }
+
+    @ViewBuilder private func showColumn(_ d: ShowDetail) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                // ---- Splash ----
-                ZStack(alignment: .bottomLeading) {
-                    ArtImage(url: d.backdrop ?? d.poster, aspect: 16.0 / 9.0)
-                        .frame(height: 740).frame(maxWidth: .infinity).clipped()
-                        .overlay {
-                            LinearGradient(stops: [
-                                .init(color: Theme.bg.opacity(0.95), location: 0.0),
-                                .init(color: Theme.bg.opacity(0.6), location: 0.30),
-                                .init(color: .clear, location: 0.66)
-                            ], startPoint: .leading, endPoint: .trailing)
-                        }
-                        .overlay {
-                            LinearGradient(stops: [
-                                .init(color: Theme.bg, location: 0.0),
-                                .init(color: Theme.bg.opacity(0.45), location: 0.32),
-                                .init(color: .clear, location: 0.72)
-                            ], startPoint: .bottom, endPoint: .top)
-                        }
+                ArtPlate(url: d.backdrop ?? d.poster, title: d.title).frame(height: 290)
 
-                    HStack(alignment: .bottom, spacing: 44) {
-                        ArtImage(url: d.poster, aspect: 2.0 / 3.0, placeholderTitle: d.title)
-                            .frame(width: 260, height: 390)
-                            .clipShape(RoundedRectangle(cornerRadius: 12))
-                            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.white.opacity(0.1), lineWidth: 1))
-                            .shadow(color: .black.opacity(0.5), radius: 24, y: 10)
+                Text(d.title)
+                    .font(F.med(54)).foregroundStyle(pal.ink)
+                    .lineLimit(2).minimumScaleFactor(0.6)
+                    .padding(.top, 22)
 
-                        VStack(alignment: .leading, spacing: 16) {
-                            Text(d.title).font(.system(size: 56, weight: .bold))
-                                .shadow(radius: 12).lineLimit(2)
-                            HStack(spacing: 14) {
-                                if let y = d.year { Chip(String(y)) }
-                                if let r = d.rating, r > 0 { Chip(String(format: "★ %.1f", r)) }
-                                Chip("\(flatEpisodes.count) episodes")
-                            }
-                            if !d.genreList.isEmpty {
-                                HStack(spacing: 10) {
-                                    ForEach(d.genreList.prefix(4), id: \.self) { g in
-                                        Text(g)
-                                            .font(.caption).fontWeight(.medium).foregroundStyle(Color(hex: 0xcfd4e2))
-                                            .padding(.horizontal, 14).padding(.vertical, 6)
-                                            .overlay(Capsule().strokeBorder(.white.opacity(0.2), lineWidth: 1))
-                                    }
-                                }
-                            }
-                            actions(d)
-                        }
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.horizontal, Theme.gutter).padding(.bottom, 48)
+                SpecGrid(cells: specCells(d)).padding(.top, 20)
+
+                if let o = d.overview, !o.isEmpty {
+                    // Bounded: this column has no focusable content, so tvOS can
+                    // never scroll it. Everything here has to fit on one screen.
+                    Text(o).font(F.reg(20)).lineSpacing(8).foregroundStyle(pal.ink2)
+                        .lineLimit(4)
+                        .padding(.top, 20)
                 }
 
-                // ---- Description + cast below the splash ----
-                VStack(alignment: .leading, spacing: 14) {
-                    if let o = d.overview, !o.isEmpty {
-                        Text(o).font(.title3).foregroundStyle(Color(hex: 0xd7dbe6))
-                            .frame(maxWidth: 1250, alignment: .leading)
-                    }
-                    if let job = subJobText {
-                        Text(job).font(.callout).foregroundStyle(Theme.accent2)
-                    }
-                }
-                .padding(.horizontal, Theme.gutter).padding(.top, 8)
-
-                if let cast = extra?.cast, !cast.isEmpty {
-                    VStack(alignment: .leading, spacing: 20) {
-                        Text("Cast").font(.title2).fontWeight(.semibold).padding(.leading, Theme.gutter)
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 36) {
-                                ForEach(Array(cast.enumerated()), id: \.offset) { _, c in
-                                    CastTile(name: c.name, role: c.character, profile: c.profile)
-                                }
-                            }
-                            .padding(.horizontal, Theme.gutter).padding(.vertical, 8)
-                        }
-                        .focusSection()
-                    }
-                    .padding(.top, 26)
+                let people = (extra?.cast ?? []).prefix(8).map { ($0.name, $0.character ?? "") }
+                if !people.isEmpty {
+                    Lab("Cast").padding(.top, 24)
+                    CreditsBlock(people: Array(people)).padding(.top, 12)
                 }
 
-                // ---- Season cards ----
-                Text("Seasons").font(.title2).fontWeight(.semibold)
-                    .padding(.horizontal, Theme.gutter).padding(.top, 30)
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: Theme.cardSpacing) {
-                        ForEach(d.seasons, id: \.season) { s in
-                            SeasonCard(title: s.season == 0 ? "Specials" : "Season \(s.season)",
-                                       posterURL: seasonPoster(s.season),
-                                       episodes: s.episodes.count,
-                                       selected: s.season == selectedSeason) {
-                                withAnimation { selectedSeason = s.season }
-                            }
+                if let job = subJobText {
+                    Text(job).font(F.med(18)).foregroundStyle(pal.signal).padding(.top, 14)
+                }
+                Color.clear.frame(height: 40)
+            }
+        }
+    }
+
+    @ViewBuilder private func seasonColumn(_ d: ShowDetail) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Season selection: a row of cells with a signal underline. No picker.
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(d.seasons, id: \.season) { s in
+                        SeasonCell(title: s.season == 0 ? "Specials" : "Season \(s.season)",
+                                   selected: s.season == selectedSeason) {
+                            selectedSeason = s.season
                         }
                     }
-                    .padding(.horizontal, Theme.gutter).padding(.vertical, 12)
                 }
+            }
+            .focusSection()
+            .overlay(alignment: .bottom) { Rectangle().fill(pal.rule).frame(height: 1) }
 
-                // ---- Selected season's episodes ----
-                LazyVStack(spacing: 24) {
+            ScrollView {
+                LazyVStack(spacing: 0) {
                     ForEach(currentEpisodes) { ep in
-                        // Selecting an episode opens its description scene (like
-                        // the web); playback starts from there.
-                        EpisodeRow(episode: ep, fallbackArt: seasonPoster(ep.season ?? selectedSeason)) {
+                        EpisodeRow(episode: ep,
+                                   fallbackArt: seasonPoster(ep.season ?? selectedSeason)) {
                             episodePage = ep
                         }
                         .contextMenu { episodeMenu(ep) }
                     }
                 }
-                .padding(Theme.gutter)
+            }
+            .focusSection()
+
+            if let ep = nextUp {
+                Lab(continueLine(ep), small: true).padding(.top, 18)
             }
         }
-        .ignoresSafeArea(edges: .top)
     }
 
-    @ViewBuilder
-    private func actions(_ d: ShowDetail) -> some View {
-        ActionRow {
-            if let ep = nextUp {
-                if (ep.resumePosition ?? 0) > 5 {
-                    Button { play(ep) } label: {
-                        Label("Resume \(ep.tag) · \(timecode(ep.resumePosition ?? 0))", systemImage: "play.fill")
-                            .font(.headline).padding(.horizontal, 14)
-                    }.buttonStyle(.borderedProminent).tint(Theme.accent)
-                    Button { play(ep, at: 0) } label: {
-                        Label("From Beginning", systemImage: "gobackward").font(.headline).padding(.horizontal, 10)
-                    }.buttonStyle(.bordered)
-                } else {
-                    Button { play(ep) } label: {
-                        Label("Play \(ep.tag)", systemImage: "play.fill").font(.headline).padding(.horizontal, 14)
-                    }.buttonStyle(.borderedProminent).tint(Theme.accent)
-                }
-            }
-            if let f = nextUp?.bestFile, (nextUp?.files.count ?? 0) > 1, let ep = nextUp {
-                Menu {
-                    ForEach(ep.files) { file in
-                        Button(file.quality ?? file.filename ?? "Version") { play(ep, file: file) }
-                    }
-                } label: {
-                    Label(f.quality ?? "Version", systemImage: "rectangle.stack")
-                }.buttonStyle(.bordered)
-            }
+    private func continueLine(_ ep: Episode) -> String {
+        if let p = ep.resumePosition, p > 5, let dur = ep.duration, dur > p {
+            return "Continue   \(ep.tag)   ·   \(timecode(dur - p)) remaining"
         }
-        .padding(.top, 6)
+        return "Next up   \(ep.tag)   ·   \(ep.displayTitle)"
+    }
+
+    private func specCells(_ d: ShowDetail) -> [SpecGrid.Cell] {
+        var cells: [SpecGrid.Cell] = []
+        if let y = d.year { cells.append(.init(key: "Year", value: String(y))) }
+        cells.append(.init(key: "Seasons", value: "\(d.seasons.count)"))
+        cells.append(.init(key: "Episodes", value: "\(flatEpisodes.count)"))
+        let unwatched = flatEpisodes.filter { $0.watched != 1 }.count
+        if unwatched > 0 { cells.append(.init(key: "Unwatched", value: "\(unwatched)")) }
+        if let r = d.rating, r > 0 { cells.append(.init(key: "Rating", value: String(format: "%.1f", r))) }
+        return cells
     }
 
     // Long-press menu on an episode: versions, restart, AI subtitles.
@@ -297,10 +251,86 @@ struct ShowDetailView: View {
     }
 }
 
+// A season selector cell. Selected is the signal underline; focused is an ink one.
+struct SeasonCell: View {
+    let title: String
+    let selected: Bool
+    let action: () -> Void
+    @Environment(\.pal) private var pal
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(F.med(21))
+                .foregroundStyle(selected || focused ? pal.ink : pal.ink3)
+                .padding(.horizontal, 26).padding(.vertical, 14)
+                .overlay(alignment: .bottom) {
+                    Rectangle()
+                        .fill(selected ? pal.signal : (focused ? pal.ink : .clear))
+                        .frame(height: 4)
+                }
+        }
+        .buttonStyle(.plain)
+        .focused($focused)
+        .focusEffectDisabled()
+    }
+}
+
+// One episode in the season list.
+struct EpisodeRow: View {
+    let episode: Episode
+    var fallbackArt: String? = nil     // season poster when the episode has no still
+    let action: () -> Void
+    @Environment(\.pal) private var pal
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 22) {
+                Text("\(episode.episode ?? 0)")
+                    .font(F.monoMed(19)).foregroundStyle(focused ? pal.ink : pal.ink3)
+                    .frame(width: 34, alignment: .trailing)
+
+                ArtImage(url: episode.still ?? fallbackArt, aspect: 16.0 / 9.0)
+                    .frame(width: 132, height: 74).clipped()
+                    .overlay(alignment: .bottom) { ProgressBar(progress: episode.progressFraction) }
+                    .overlay(Rectangle().strokeBorder(pal.rule, lineWidth: 1))
+
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 10) {
+                        Text(episode.displayTitle)
+                            .font(F.med(21)).foregroundStyle(pal.ink).lineLimit(1)
+                        if episode.watched == 1 {
+                            Text("✓").font(F.med(19)).foregroundStyle(pal.ink3)
+                        }
+                    }
+                    if let o = episode.overview, !o.isEmpty {
+                        Text(o).font(F.reg(16)).foregroundStyle(pal.ink2).lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 12)
+
+                if let d = episode.duration, d > 0 {
+                    Text(timecode(d)).font(F.mono(17)).foregroundStyle(pal.ink3)
+                }
+            }
+            .padding(.horizontal, 16).padding(.vertical, 15)
+            .background(focused ? pal.panel2 : .clear)
+            .overlay(alignment: .leading) { Rectangle().fill(pal.signal).frame(width: focused ? 6 : 0) }
+            .overlay(alignment: .bottom) { Rectangle().fill(pal.rule2).frame(height: 1) }
+        }
+        .buttonStyle(.plain)
+        .focused($focused)
+        .focusEffectDisabled()
+    }
+}
+
 // Deep-link target for an episode (Continue Watching cards): loads the show,
 // finds the episode, and shows its description page.
 struct EpisodeRouteView: View {
     @EnvironmentObject var store: Store
+    @Environment(\.pal) private var pal
     let showId: Int
     let episodeId: Int
     @State private var show: ShowDetail?
@@ -308,17 +338,16 @@ struct EpisodeRouteView: View {
 
     var body: some View {
         ZStack {
-            Theme.bg.ignoresSafeArea()
+            pal.paper.ignoresSafeArea()
             if let show, let ep = show.seasons.flatMap({ $0.episodes }).first(where: { $0.id == episodeId }) {
                 EpisodeDetailView(showTitle: show.title, episode: ep,
                                   fallbackArt: show.poster ?? show.backdrop)
             } else if failed {
-                Text("Couldn't load this episode.").foregroundStyle(.secondary)
+                Text("Couldn't load this episode.").font(F.reg(24)).foregroundStyle(pal.ink2)
             } else {
                 ProgressView().scaleEffect(1.6)
             }
         }
-        .toolbar(.hidden, for: .tabBar)
         .task {
             show = await store.showDetail(showId)
             failed = show == nil
@@ -326,12 +355,13 @@ struct EpisodeRouteView: View {
     }
 }
 
-// ---- Episode description scene (mirrors the web openEpisodeDetail) ----
-// A full-screen page for ONE episode: still splash, S/E title, air date /
-// rating / runtime / quality chips, Resume / From Beginning, Mark Watched,
-// version picker, overview and Cast & Crew. Menu (Back) returns to the show.
+// ============================================================================
+// Episode description scene — one episode, laid out like the movie page.
+// ============================================================================
+
 struct EpisodeDetailView: View {
     @EnvironmentObject var store: Store
+    @Environment(\.pal) private var pal
     @Environment(\.dismiss) private var dismiss
     let showTitle: String
     let episode: Episode
@@ -343,12 +373,13 @@ struct EpisodeDetailView: View {
     @State private var resumeAt: Double = 0
     @State private var selectedFile: MovieFile?
     @State private var subJobText: String?
+    @State private var showVersions = false
 
     private var art: String? { extra?.still ?? episode.still ?? fallbackArt }
 
     var body: some View {
         ZStack {
-            Theme.bg.ignoresSafeArea()
+            pal.paper.ignoresSafeArea()
             content
         }
         .onExitCommand { dismiss() }
@@ -374,114 +405,95 @@ struct EpisodeDetailView: View {
 
     private var content: some View {
         ScrollView {
-            ZStack(alignment: .bottomLeading) {
-                ArtImage(url: art, aspect: 16.0 / 9.0)
-                    .frame(height: 700).frame(maxWidth: .infinity).clipped()
-                    .overlay {
-                        LinearGradient(stops: [
-                            .init(color: Theme.bg.opacity(0.95), location: 0.0),
-                            .init(color: Theme.bg.opacity(0.6), location: 0.30),
-                            .init(color: .clear, location: 0.66)
-                        ], startPoint: .leading, endPoint: .trailing)
-                    }
-                    .overlay {
-                        LinearGradient(stops: [
-                            .init(color: Theme.bg, location: 0.0),
-                            .init(color: Theme.bg.opacity(0.45), location: 0.32),
-                            .init(color: .clear, location: 0.72)
-                        ], startPoint: .bottom, endPoint: .top)
-                    }
+            VStack(alignment: .leading, spacing: 0) {
+                ArtPlate(url: art, title: episode.displayTitle)
+                    .frame(height: 348)
+                    .padding(.horizontal, Theme.gutter).padding(.top, 24)
 
-                VStack(alignment: .leading, spacing: 16) {
-                    Text(showTitle).font(.headline).foregroundStyle(Theme.accent2)
-                    Text("\(episode.tag) · \(episode.displayTitle)")
-                        .font(.system(size: 48, weight: .bold)).shadow(radius: 12).lineLimit(2)
+                HStack(alignment: .top, spacing: 72) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Lab("\(showTitle)   ·   \(episode.tag)", small: true)
+                        Text(episode.displayTitle)
+                            .font(F.med(64)).foregroundStyle(pal.ink)
+                            .lineLimit(2).minimumScaleFactor(0.6)
+                            .padding(.top, 14)
 
-                    HStack(spacing: 14) {
-                        if let d = extra?.airDate { Chip(d) }
-                        if let r = extra?.rating, r > 0 { Chip(String(format: "★ %.1f", r)) }
-                        if let rt = extra?.runtime, rt > 0 { Chip("\(rt)m") }
-                        if let q = (selectedFile ?? episode.bestFile)?.quality { Chip(q) }
-                        if watched { Chip("✓ Watched") }
+                        SpecGrid(cells: specCells()).padding(.top, 22)
+
+                        let overview = extra?.overview ?? episode.overview
+                        if let o = overview, !o.isEmpty {
+                            Text(o).font(F.reg(22)).lineSpacing(9).foregroundStyle(pal.ink2)
+                                .frame(maxWidth: 900, alignment: .leading)
+                                .padding(.top, 22)
+                        }
+
+                        let people = (extra?.people ?? []).prefix(8).map { ($0.name, $0.role ?? "") }
+                        if !people.isEmpty {
+                            Lab("Cast & crew").padding(.top, 26)
+                            CreditsBlock(people: Array(people)).padding(.top, 12)
+                        }
+                        if let job = subJobText {
+                            Text(job).font(F.med(18)).foregroundStyle(pal.signal).padding(.top, 14)
+                        }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
-                    ActionRow {
+                    VStack(alignment: .leading, spacing: 0) {
                         if resumeAt > 0 {
-                            Button { play(at: resumeAt) } label: {
-                                Label("Resume · \(timecode(resumeAt))", systemImage: "play.fill")
-                                    .font(.headline).padding(.horizontal, 14)
-                            }.buttonStyle(.borderedProminent).tint(Theme.accent)
-                            Button { play(at: 0) } label: {
-                                Label("From Beginning", systemImage: "gobackward").font(.headline).padding(.horizontal, 10)
-                            }.buttonStyle(.bordered)
+                            MButton(title: "Resume \(timecode(resumeAt))", kind: .primary,
+                                    play: true, wide: true, height: 76) { play(at: resumeAt) }
+                            MButton(title: "Play from start", wide: true) { play(at: 0) }
+                                .padding(.top, 12)
                         } else {
-                            Button { play(at: 0) } label: {
-                                Label("Play", systemImage: "play.fill").font(.headline).padding(.horizontal, 14)
-                            }.buttonStyle(.borderedProminent).tint(Theme.accent)
+                            MButton(title: "Play", kind: .primary, play: true,
+                                    wide: true, height: 76) { play(at: 0) }
                         }
 
-                        Button {
-                            watched.toggle()
-                            if watched { resumeAt = 0 }
-                            Task { await store.setEpisodeWatched(episode.id, watched) }
-                        } label: {
-                            Label(watched ? "Watched" : "Mark Watched",
-                                  systemImage: watched ? "checkmark.circle.fill" : "checkmark.circle")
-                        }.buttonStyle(.bordered)
-
-                        if episode.files.count > 1 {
-                            Menu {
-                                ForEach(episode.files) { f in
-                                    Button(f.quality ?? f.filename ?? "Version") { selectedFile = f }
+                        VStack(spacing: 0) {
+                            if episode.files.count > 1 {
+                                ControlRow(name: "Version",
+                                           value: (selectedFile ?? episode.bestFile)?.quality ?? "Version") {
+                                    showVersions = true
                                 }
-                            } label: {
-                                Label((selectedFile ?? episode.bestFile)?.quality ?? "Version",
-                                      systemImage: "rectangle.stack")
-                            }.buttonStyle(.bordered)
-                        }
-
-                        if let f = selectedFile ?? episode.bestFile {
-                            Button { generateAISubs(fileId: f.id) } label: {
-                                Label("AI Subtitles", systemImage: "captions.bubble")
-                            }.buttonStyle(.bordered)
-                        }
-                    }
-                    .padding(.top, 6)
-                }
-                .padding(.horizontal, Theme.gutter).padding(.bottom, 48)
-            }
-
-            VStack(alignment: .leading, spacing: 14) {
-                let overview = extra?.overview ?? episode.overview
-                if let o = overview, !o.isEmpty {
-                    Text(o).font(.title3).foregroundStyle(Color(hex: 0xd7dbe6))
-                        .frame(maxWidth: 1250, alignment: .leading)
-                }
-                if let job = subJobText {
-                    Text(job).font(.callout).foregroundStyle(Theme.accent2)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, Theme.gutter).padding(.top, 8)
-
-            if let people = extra?.people, !people.isEmpty {
-                VStack(alignment: .leading, spacing: 20) {
-                    Text("Cast & Crew").font(.title2).fontWeight(.semibold).padding(.leading, Theme.gutter)
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 36) {
-                            ForEach(Array(people.enumerated()), id: \.offset) { _, p in
-                                CastTile(name: p.name, role: p.role, profile: p.profile)
+                            }
+                            ControlRow(name: "Watched", value: watched ? "Yes" : "No", on: watched) {
+                                watched.toggle()
+                                if watched { resumeAt = 0 }
+                                Task { await store.setEpisodeWatched(episode.id, watched) }
+                            }
+                            if let f = selectedFile ?? episode.bestFile {
+                                ControlRow(name: "Generate subtitles", value: "Whisper") {
+                                    generateAISubs(fileId: f.id)
+                                }
                             }
                         }
-                        .padding(.horizontal, Theme.gutter).padding(.vertical, 8)
+                        .overlay(alignment: .top) { Rectangle().fill(pal.rule).frame(height: 1) }
+                        .padding(.top, 26)
                     }
-                    .focusSection()
+                    .frame(width: 520)
+                    .confirmationDialog("Version", isPresented: $showVersions, titleVisibility: .visible) {
+                        ForEach(episode.files) { f in
+                            Button(f.quality ?? f.filename ?? "Version") { selectedFile = f }
+                        }
+                    }
                 }
-                .padding(.top, 26)
+                .padding(.horizontal, Theme.gutter).padding(.top, 30)
+
+                Color.clear.frame(height: 60)
             }
-            Color.clear.frame(height: Theme.gutter)
         }
-        .ignoresSafeArea(edges: .top)
+    }
+
+    private func specCells() -> [SpecGrid.Cell] {
+        var cells: [SpecGrid.Cell] = []
+        if let d = extra?.airDate, !d.isEmpty { cells.append(.init(key: "Aired", value: d)) }
+        if let r = extra?.rating, r > 0 { cells.append(.init(key: "Rating", value: String(format: "%.1f", r))) }
+        if let rt = extra?.runtime, rt > 0 { cells.append(.init(key: "Runtime", value: "\(rt)m")) }
+        else if let d = episode.duration, d > 0 { cells.append(.init(key: "Runtime", value: timecode(d))) }
+        if let q = (selectedFile ?? episode.bestFile)?.quality {
+            cells.append(.init(key: "Video", value: q, mono: false))
+        }
+        return cells
     }
 
     private func generateAISubs(fileId: Int) {
@@ -499,68 +511,5 @@ struct EpisodeDetailView: View {
                 subJobText = job?.error ?? "AI subtitles failed."
             }
         }
-    }
-}
-
-// A season poster card in the show detail.
-struct SeasonCard: View {
-    let title: String
-    let posterURL: String?
-    let episodes: Int
-    let selected: Bool
-    let action: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Button(action: action) {
-                ArtImage(url: posterURL, aspect: 2.0 / 3.0, placeholderTitle: title)
-                    .frame(width: 200, height: 300)
-                    .clipShape(RoundedRectangle(cornerRadius: Theme.posterRadius))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: Theme.posterRadius)
-                            .strokeBorder(Theme.accent, lineWidth: selected ? 5 : 0)
-                    }
-            }
-            .buttonStyle(.card)
-            Text(title).font(.callout).fontWeight(.semibold).lineLimit(1)
-                .foregroundStyle(selected ? Theme.accent2 : .white)
-            Text("\(episodes) episodes").font(.caption).foregroundStyle(Theme.muted)
-        }
-    }
-}
-
-struct EpisodeRow: View {
-    let episode: Episode
-    var fallbackArt: String? = nil     // season poster when the episode has no still
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(alignment: .top, spacing: 28) {
-                ArtImage(url: episode.still ?? fallbackArt, aspect: 16.0 / 9.0)
-                    .frame(width: 360, height: 202)
-                    .clipShape(RoundedRectangle(cornerRadius: Theme.posterRadius))
-                    .overlay(alignment: .bottom) { ProgressBar(progress: episode.progressFraction) }
-                    .overlay(alignment: .center) {
-                        Image(systemName: "play.circle.fill").font(.system(size: 46))
-                            .foregroundStyle(.white.opacity(0.9)).shadow(radius: 6)
-                    }
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 12) {
-                        Text(episode.tag).font(.callout).foregroundStyle(Theme.accentSoft)
-                        if episode.watched == 1 {
-                            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                        }
-                    }
-                    Text(episode.displayTitle).font(.title3).fontWeight(.semibold).lineLimit(1)
-                    if let o = episode.overview {
-                        Text(o).font(.body).foregroundStyle(.secondary).lineLimit(3)
-                    }
-                }
-                Spacer()
-            }
-            .padding(20)
-        }
-        .buttonStyle(.card)
     }
 }

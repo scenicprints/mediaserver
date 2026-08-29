@@ -6,6 +6,47 @@ public repo). **Coordinate: only ONE session edits shared code at a time; this
 app work has stayed inside `appletv/` — never touch `public/*`, `androidtv/*`,
 and touch `src/server.js` only for the HLS hook already in place.**
 
+## BEFORE YOU WRITE ANYTHING — `git fetch` first
+A session once worked for hours on a checkout that was two months stale, then
+found its "discovery" (the init.mp4 cwd bug) was already fixed upstream and its
+UI rewrite was built against superseded versions of half these files. The push
+was rejected and the work had to be redone. **Check `git log HEAD..origin/main`
+before you touch a file, not after.**
+
+## The Braun edition (2026-08-28)
+The app's look was rebuilt on Rams' principles at the owner's request (he gave a
+Braun-panel reference image and approved a mockup first — `appletv/design/braun.html`,
+open it in a browser).
+
+- `Theme.swift` is the whole system: two FINISHES (`Finish.white` / `.black`) as a
+  `Palette` carried in `@Environment(\.pal)`. **No view outside Theme.swift writes
+  a hex.** `F` is the type scale: Archivo for anything a person reads, Roboto Mono
+  ONLY for machine readouts (timecodes, sizes, filenames). Fonts are bundled in
+  `Resources/Fonts` + `UIAppFonts`; reference them by PostScript name
+  (`Archivo-SemiBold`), NOT `.weight()` — each static weight is its own family.
+- **`.buttonStyle(.card)` is gone from the whole app.** Every control is `.plain`
+  + `.focusEffectDisabled()` and draws its own focus: ink frame, a 6px signal bar
+  under the caption, the label takes weight. No platter, no bounce.
+- **There is no TabView.** `MediaServerApp.swift` owns a custom `TopRail` and
+  switches content itself; nav paths live in `ContentView` so they survive tab
+  switches. Back at a tab root moves focus to the rail, deeper it pops the stack,
+  and on the rail nothing intercepts so it exits the app.
+- Artwork is NEVER scrimmed and type never sits on it (`ArtPlate`). Orange means
+  exactly one thing: where you are, or what happens next. Nothing else may use it.
+- **The player is deliberately untouched.** `PlayerView`/`PlayerRouter` keep their
+  own HUD and their own styling. It was excluded on purpose — restyling it is a
+  separate job, and it is the one part with a working dual-engine HDR path.
+- Also fixed: `src/hls.js` serves `EXT-X-START:TIME-OFFSET=0` while the remux is
+  still running and rewrites `PLAYLIST-TYPE: EVENT -> VOD` once it finishes.
+  Without ENDLIST AVPlayer reads the playlist as live, starts at the LIVE EDGE
+  (minutes in, because the remux outruns playback) and clamps rewinds — that was
+  "From Beginning starts at a weird time and it fights me scrubbing back".
+
+Known-unverified: `LivePlayer` still resolves its URL with `store.playbackURL`
+(the container guess) rather than `resolvePlaybackURL`. That looked like a bug
+under the old AVPlayer-only design, but VLCKit direct-plays everything now, so
+changing it is a guess — test on-device before touching it.
+
 ## TL;DR — where we are (2026-07-14)
 Native **SwiftUI tvOS** app ("Marquee") for the media server, shipping via
 **TestFlight** (owner has no Mac → cloud macOS CI). The app is **built,

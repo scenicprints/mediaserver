@@ -1,31 +1,40 @@
 import SwiftUI
 
-// Collections grid (Marvel, Star Wars, franchises…) → the collection's films.
+// Collections (Marvel, Star Wars, franchises…) → the collection's films.
 struct CollectionsView: View {
     @EnvironmentObject var store: Store
+    @Environment(\.pal) private var pal
     @Binding var route: [Route]
-    private let columns = [GridItem(.adaptive(minimum: Theme.posterWidth), spacing: Theme.cardSpacing)]
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 22), count: 8)
 
     var body: some View {
-        ScrollView {
-            MarqueeWordmark()
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.leading, Theme.gutter).padding(.top, 32)
-            if store.collections.isEmpty {
-                VStack(spacing: 14) {
-                    Text("No collections yet").font(.title2)
-                    Button("Reload") { Task { await store.loadHome() } }
-                }.padding(60)
-            }
-            LazyVGrid(columns: columns, spacing: Theme.rowSpacing) {
-                ForEach(store.collections) { col in
-                    PosterCard(title: col.name, posterURL: col.poster,
-                               subtitle: col.count.map { "\($0) films" }) {
-                        route.append(.collection(col.id))
+        ZStack {
+            pal.paper.ignoresSafeArea()
+            VStack(alignment: .leading, spacing: 0) {
+                RowHead(title: "Collections", count: "\(store.collections.count)")
+                    .padding(.horizontal, Theme.gutter).padding(.top, 30)
+
+                if store.collections.isEmpty {
+                    VStack(alignment: .leading, spacing: 20) {
+                        Text("No collections yet.").font(F.reg(24)).foregroundStyle(pal.ink2)
+                        MButton(title: "Reload") { Task { await store.loadHome() } }
                     }
+                    .padding(.horizontal, Theme.gutter).padding(.top, 40)
+                }
+
+                ScrollView {
+                    LazyVGrid(columns: columns, alignment: .leading, spacing: 26) {
+                        ForEach(store.collections) { col in
+                            PosterCard(title: col.name, posterURL: col.poster,
+                                       subtitle: col.count.map { "\($0) films" },
+                                       width: 186, height: 279) {
+                                route.append(.collection(col.id))
+                            }
+                        }
+                    }
+                    .padding(.horizontal, Theme.gutter).padding(.top, 22).padding(.bottom, 60)
                 }
             }
-            .padding(Theme.gutter)
         }
         .task { if store.collections.isEmpty { await store.loadHome() } }
     }
@@ -33,50 +42,50 @@ struct CollectionsView: View {
 
 struct CollectionDetailView: View {
     @EnvironmentObject var store: Store
+    @Environment(\.pal) private var pal
     @Binding var route: [Route]
     let collectionId: String
 
     @State private var detail: CollectionDetail?
     @State private var loading = true
-    private let columns = [GridItem(.adaptive(minimum: Theme.posterWidth), spacing: Theme.cardSpacing)]
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 22), count: 8)
 
     var body: some View {
         ZStack {
-            Theme.bg.ignoresSafeArea()
+            pal.paper.ignoresSafeArea()
             if let d = detail {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
-                        ZStack(alignment: .bottomLeading) {
-                            ArtImage(url: d.backdrop ?? d.poster, aspect: 16.0 / 9.0)
-                                .frame(height: 520).frame(maxWidth: .infinity).clipped()
-                                .overlay {
-                                    LinearGradient(colors: [.clear, Theme.bg.opacity(0.6), Theme.bg],
-                                                   startPoint: .top, endPoint: .bottom)
-                                }
-                            Text(d.name ?? "Collection")
-                                .font(.system(size: 58, weight: .bold)).shadow(radius: 10)
-                                .padding(.horizontal, Theme.gutter).padding(.bottom, 36)
-                        }
-                        LazyVGrid(columns: columns, spacing: Theme.rowSpacing) {
+                        ArtPlate(url: d.backdrop ?? d.poster, title: d.name)
+                            .frame(height: 300)
+                            .padding(.horizontal, Theme.gutter).padding(.top, 24)
+
+                        Text(d.name ?? "Collection")
+                            .font(F.med(64)).foregroundStyle(pal.ink)
+                            .padding(.horizontal, Theme.gutter).padding(.top, 22)
+
+                        RowHead(title: "Films", count: "\(d.items.count)")
+                            .padding(.horizontal, Theme.gutter).padding(.top, 24)
+
+                        LazyVGrid(columns: columns, alignment: .leading, spacing: 26) {
                             ForEach(d.items) { movie in
                                 PosterCard(title: movie.title, posterURL: movie.poster,
                                            subtitle: movie.year.map(String.init),
-                                           progress: movie.progressFraction) {
+                                           progress: movie.progressFraction,
+                                           width: 186, height: 279) {
                                     if let lid = movie.localId { route.append(.movie(lid)) }
                                 }
                             }
                         }
-                        .padding(Theme.gutter)
+                        .padding(.horizontal, Theme.gutter).padding(.top, 20).padding(.bottom, 60)
                     }
                 }
-                .ignoresSafeArea(edges: .top)
             } else if loading {
                 ProgressView().scaleEffect(1.6)
             } else {
-                Text("Couldn't load this collection.").foregroundStyle(.secondary)
+                Text("Couldn't load this collection.").font(F.reg(24)).foregroundStyle(pal.ink2)
             }
         }
-        .toolbar(.hidden, for: .tabBar)
         .task {
             loading = true
             detail = await store.collectionDetail(collectionId)

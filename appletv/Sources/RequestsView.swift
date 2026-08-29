@@ -4,6 +4,7 @@ import SwiftUI
 // friendly notice if the server has no *arr configured.
 struct RequestsView: View {
     @EnvironmentObject var store: Store
+    @Environment(\.pal) private var pal
     @State private var query = ""
     @State private var results: [RequestResult] = []
     @State private var notice: String?
@@ -11,47 +12,46 @@ struct RequestsView: View {
     @State private var searching = false
     @State private var pending: RequestResult?          // awaiting a quality choice
     @State private var profiles: [ArrProfile] = []
-    private let columns = [GridItem(.adaptive(minimum: Theme.posterWidth), spacing: Theme.cardSpacing)]
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 22), count: 7)
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            Theme.bg.ignoresSafeArea()
-            ScrollView {
-                VStack(alignment: .leading, spacing: Theme.rowSpacing) {
-                    VStack(alignment: .leading, spacing: 16) {
-                        Text("Request").font(.largeTitle).fontWeight(.bold)
-                        HStack(spacing: 20) {
-                            TextField("Search for a movie or show to add", text: $query)
-                                .textFieldStyle(.plain).font(.title3)
-                                .onSubmit { runSearch() }
-                            Button("Search") { runSearch() }
-                                .buttonStyle(.borderedProminent).tint(Theme.accent)
-                        }
-                    }
-                    .padding(.horizontal, Theme.gutter).padding(.top, 40)
+            pal.paper.ignoresSafeArea()
+            VStack(alignment: .leading, spacing: 0) {
+                Lab("Request something new", small: true)
 
-                    if searching {
-                        ProgressView().padding(.horizontal, Theme.gutter)
-                    } else if let notice {
-                        Text(notice).foregroundStyle(.secondary).padding(.horizontal, Theme.gutter)
-                    } else if !results.isEmpty {
-                        LazyVGrid(columns: columns, spacing: Theme.rowSpacing) {
+                HStack(spacing: 24) {
+                    MField(prompt: "Title", text: $query)
+                    MButton(title: "Search", kind: .primary) { runSearch() }
+                }
+                .padding(.top, 14)
+
+                if searching {
+                    ProgressView().padding(.top, 40)
+                } else if let notice {
+                    Text(notice).font(F.reg(22)).foregroundStyle(pal.ink2).padding(.top, 34)
+                } else if !results.isEmpty {
+                    RowHead(title: "Results", count: "\(results.count)").padding(.top, 34)
+                    ScrollView {
+                        LazyVGrid(columns: columns, alignment: .leading, spacing: 26) {
                             ForEach(results) { r in
                                 RequestCard(result: r) { add(r) }
                             }
                         }
-                        .padding(.horizontal, Theme.gutter)
+                        .padding(.top, 20).padding(.bottom, 40)
                     }
+                    .focusSection()
                 }
-                .padding(.bottom, Theme.gutter)
+                Spacer(minLength: 0)
             }
+            .padding(.horizontal, Theme.gutter)
+            .padding(.top, 30)
 
             if let toast {
-                Text(toast)
-                    .font(.headline).padding(.horizontal, 28).padding(.vertical, 16)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .padding(.bottom, 60)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                Text(toast).font(F.med(20)).foregroundStyle(pal.onSignal)
+                    .padding(.horizontal, 30).padding(.vertical, 18)
+                    .background(pal.signal)
+                    .padding(.bottom, 50)
             }
         }
         // Quality picker: when Radarr/Sonarr have more than one profile, ask
@@ -76,7 +76,7 @@ struct RequestsView: View {
         Task {
             let (res, err) = await store.requestsSearch(q)
             results = res
-            notice = err ?? (res.isEmpty ? "No results for “\(q)”." : nil)
+            notice = err ?? (res.isEmpty ? "Nothing matches “\(q)”." : nil)
             searching = false
         }
     }
@@ -110,30 +110,10 @@ struct RequestCard: View {
     let action: () -> Void
 
     var body: some View {
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 10) {
-                ArtImage(url: result.poster, aspect: 2.0 / 3.0)
-                    .frame(width: Theme.posterWidth, height: Theme.posterHeight)
-                    .clipShape(RoundedRectangle(cornerRadius: Theme.posterRadius))
-                    .overlay(alignment: .topTrailing) {
-                        Text(result.type == "tv" ? "TV" : "Movie")
-                            .font(.caption2).fontWeight(.bold)
-                            .padding(.horizontal, 10).padding(.vertical, 5)
-                            .background(Theme.accent, in: Capsule())
-                            .padding(10)
-                    }
-                    .overlay(alignment: .bottomLeading) {
-                        Label("Request", systemImage: "plus.circle.fill")
-                            .font(.caption).padding(8)
-                            .background(.black.opacity(0.5), in: Capsule()).padding(8)
-                    }
-                Text(result.title).font(.callout).fontWeight(.medium).lineLimit(1)
-                    .frame(width: Theme.posterWidth, alignment: .leading)
-                if let y = result.year {
-                    Text(String(y)).font(.caption).foregroundStyle(.secondary)
-                }
-            }
-        }
-        .buttonStyle(.card)
+        PosterCard(title: result.title, posterURL: result.poster,
+                   subtitle: result.year.map(String.init),
+                   badges: [.quality(result.type == "tv" ? "TV" : "Movie")],
+                   width: 186, height: 279,
+                   action: action)
     }
 }

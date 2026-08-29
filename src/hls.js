@@ -506,6 +506,20 @@ export function registerHls(app, db, helpers = {}) {
       .replace(/URI="init\.mp4"/g, `URI="init.mp4${r.q}"`)
       .replace(/^(seg\d+\.(?:m4s|ts))\s*$/gm, (m, f) => `${f}${r.q}`);
     if (!running(s) && !/#EXT-X-ENDLIST/.test(pl)) pl += '#EXT-X-ENDLIST\n';
+
+    if (/#EXT-X-ENDLIST/.test(pl)) {
+      // The remux finished: this is a complete, fully seekable VOD. Say so, so
+      // AVPlayer builds a normal transport bar instead of a live one.
+      pl = pl.replace(/^#EXT-X-PLAYLIST-TYPE:EVENT\s*$/m, '#EXT-X-PLAYLIST-TYPE:VOD');
+    } else {
+      // Still remuxing, so there is no ENDLIST yet, and AVPlayer reads a playlist
+      // with no ENDLIST as LIVE: it starts at the LIVE EDGE and clamps rewinds.
+      // The remux runs many times faster than playback, so by the time playback
+      // really begins the edge can be minutes in. That is the "From Beginning
+      // starts at a weird time and it fights me scrubbing back" bug.
+      // EXT-X-START pins the start to t=0; a resume seeks on from there.
+      pl = pl.replace(/^#EXTM3U\s*$/m, '#EXTM3U\n#EXT-X-START:TIME-OFFSET=0,PRECISE=YES');
+    }
     reply.header('Content-Type', 'application/vnd.apple.mpegurl');
     return reply.send(pl);
   });

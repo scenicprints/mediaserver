@@ -74,7 +74,7 @@ jobs:
               echo "shot $1 looks like the boot screen ($SZ bytes) — retrying"
             done
           }
-          for T in home movies tv livetv library settings; do
+          for T in home movies tv livetv library search collections settings; do
             # --terminate-running-process guarantees a clean relaunch that
             # re-reads PREVIEW_TAB (a plain launch just foregrounds the old
             # process, leaving it on the previous tab). Mock mode pulls sample

@@ -1,8 +1,9 @@
 import SwiftUI
 
-// Movies: rotating Marquee hero (movies) + the full categorized row set.
+// Movies: the Marquee hero (movies) + the full categorized row set.
 struct MoviesView: View {
     @EnvironmentObject var store: Store
+    @Environment(\.pal) private var pal
     @Binding var route: [Route]
 
     var body: some View {
@@ -21,12 +22,17 @@ struct MoviesView: View {
 
     private var emptyState: some View {
         ZStack {
-            Theme.bg.ignoresSafeArea()
-            VStack(spacing: 14) {
-                if let e = store.error { Text("Couldn't load your library").font(.title2); Text(e).foregroundStyle(.secondary) }
-                else { ProgressView().scaleEffect(1.5) }
-                Button("Retry") { Task { await store.loadHome() } }
-            }.padding(60)
+            pal.paper.ignoresSafeArea()
+            VStack(alignment: .leading, spacing: 18) {
+                if let e = store.error {
+                    Text("Couldn't reach the library").font(F.med(30)).foregroundStyle(pal.ink)
+                    Text(e).font(F.reg(20)).foregroundStyle(pal.ink2)
+                } else {
+                    ProgressView().scaleEffect(1.5)
+                }
+                MButton(title: "Retry") { Task { await store.loadHome() } }
+            }
+            .padding(60)
         }
     }
 }

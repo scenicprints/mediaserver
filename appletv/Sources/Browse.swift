@@ -1,9 +1,12 @@
 import SwiftUI
 
 // ============================================================================
-// The Marquee — an auto-rotating featured spotlight (the app's namesake).
-// Mirrors the web hero: a deterministic weekly pick of 6, rotating every 9s,
-// with dots, a Play and a More Info action.
+// The Marquee — the featured spotlight the app is named after. A deterministic
+// weekly pick of 6, rotating every 9s.
+//
+// The artwork is a PLATE: framed, never scrimmed, and nothing is set on top of
+// it. The title, the facts and the actions sit beside it on the panel. Six ticks
+// on a dial say where you are in the rotation.
 // ============================================================================
 
 struct HeroItem: Identifiable, Hashable {
@@ -21,77 +24,66 @@ struct HeroItem: Identifiable, Hashable {
 struct MarqueeHero: View {
     let items: [HeroItem]
     @Binding var route: [Route]
+    @Environment(\.pal) private var pal
     @State private var idx = 0
     private let timer = Timer.publish(every: 9, on: .main, in: .common).autoconnect()
 
     var body: some View {
         let it = idx < items.count ? items[idx] : items[0]
-        ZStack(alignment: .bottomLeading) {
-            ArtImage(url: it.backdrop ?? it.poster, aspect: 16.0 / 9.0)
-                .frame(height: 840).frame(maxWidth: .infinity).clipped()
-                // Vertical fade — melt into the page at the bottom AND soften the
-                // top so there's no hard edge under the tab bar.
-                .overlay {
-                    LinearGradient(stops: [
-                        .init(color: Theme.bg, location: 0.0),
-                        .init(color: Theme.bg.opacity(0.55), location: 0.26),
-                        .init(color: .clear, location: 0.58),
-                        .init(color: .clear, location: 0.82),
-                        .init(color: Theme.bg.opacity(0.5), location: 1.0)
-                    ], startPoint: .bottom, endPoint: .top)
-                }
-                // Horizontal scrim so the title reads over bright art (web 90deg).
-                .overlay {
-                    LinearGradient(stops: [
-                        .init(color: Theme.bg.opacity(0.95), location: 0.0),
-                        .init(color: Theme.bg.opacity(0.55), location: 0.32),
-                        .init(color: .clear, location: 0.62)
-                    ], startPoint: .leading, endPoint: .trailing)
-                }
-                .id(it.id)                       // cross-fade on change
+        HStack(alignment: .top, spacing: 44) {
+            ArtPlate(url: it.backdrop ?? it.poster, title: it.title)
+                .frame(width: 1074, height: 396)
+                .id(it.id)
                 .transition(.opacity)
 
-            VStack(alignment: .leading, spacing: 18) {
-                Text(it.title).font(.system(size: 68, weight: .bold)).shadow(radius: 12)
-                    .lineLimit(2)
-                HStack(spacing: 16) {
-                    if let y = it.year { Chip(String(y)) }
-                    if let r = it.rating, r > 0 { Chip(String(format: "★ %.1f", r)) }
-                    if let b = it.badge { Chip(b) }
+            VStack(alignment: .leading, spacing: 0) {
+                Lab("The Marquee — this week", small: true)
+                Text(it.title)
+                    .font(F.med(54)).foregroundStyle(pal.ink)
+                    .lineLimit(2).minimumScaleFactor(0.7)
+                    .padding(.top, 18)
+                Text(meta(it)).font(F.mono(16)).tracking(1.2).foregroundStyle(pal.ink3)
+                    .padding(.top, 18)
+                HStack(spacing: 14) {
+                    MButton(title: "Play", kind: .primary, play: true) { route.append(it.route) }
+                    MButton(title: "Details") { route.append(it.route) }
                 }
-                if let o = it.overview {
-                    Text(o).font(.title3).foregroundStyle(.white.opacity(0.85))
-                        .lineLimit(3).frame(maxWidth: 1100, alignment: .leading)
-                }
-                HStack(spacing: 24) {
-                    Button { route.append(it.route) } label: {
-                        Label("Play", systemImage: "play.fill").font(.headline).padding(.horizontal, 16)
-                    }
-                    .buttonStyle(.borderedProminent).tint(Theme.accent)
-                    Button { route.append(it.route) } label: {
-                        Label("More Info", systemImage: "info.circle").font(.headline).padding(.horizontal, 12)
-                    }
-                    .buttonStyle(.bordered)
-                }
-                .padding(.top, 6)
-
-                // Rotation dots.
-                HStack(spacing: 12) {
-                    ForEach(items.indices, id: \.self) { i in
-                        Capsule()
-                            .fill(i == idx ? Theme.accent : Color.white.opacity(0.35))
-                            .frame(width: i == idx ? 34 : 14, height: 8)
-                    }
-                }
-                .padding(.top, 10)
+                .padding(.top, 26)
+                Dial(count: items.count, index: idx).padding(.top, 34)
+                Spacer(minLength: 0)
             }
-            .padding(.horizontal, Theme.gutter)
-            .padding(.bottom, 56)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .padding(.horizontal, Theme.gutter)
         .onReceive(timer) { _ in
             guard items.count > 1 else { return }
-            withAnimation(.easeInOut(duration: 0.6)) { idx = (idx + 1) % items.count }
+            withAnimation(.easeInOut(duration: 0.5)) { idx = (idx + 1) % items.count }
         }
+    }
+
+    private func meta(_ it: HeroItem) -> String {
+        var parts: [String] = []
+        if let y = it.year { parts.append(String(y)) }
+        if let b = it.badge { parts.append(b.uppercased()) }
+        if let r = it.rating, r > 0 { parts.append(String(format: "%.1f", r)) }
+        return parts.joined(separator: "   /   ")
+    }
+}
+
+// Rotation position as a dial scale, not a row of dots.
+struct Dial: View {
+    let count: Int
+    let index: Int
+    @Environment(\.pal) private var pal
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 9) {
+            ForEach(0..<max(count, 1), id: \.self) { i in
+                Rectangle()
+                    .fill(i == index ? pal.signal : pal.ink3)
+                    .frame(width: i == index ? 3 : 2, height: i == index ? 22 : 11)
+            }
+        }
+        .frame(height: 22, alignment: .bottom)
     }
 }
 
@@ -110,7 +102,8 @@ struct BrowseCard: Identifiable, Hashable {
     let route: Route
 }
 
-// Streaming providers — names, brand colors, and per-title deep links (web STREAM_PROVIDERS).
+// Streaming providers — names and per-title deep links (web STREAM_PROVIDERS).
+// The colours are gone: a provider badge is a label, and only state gets colour.
 enum StreamProvider {
     static let table: [String: (name: String, color: UInt, base: String)] = [
         "netflix":   ("Netflix",     0xe50914, "https://www.netflix.com/search?q="),
@@ -134,6 +127,7 @@ enum StreamProvider {
         return URL(string: base + q)
     }
 }
+
 struct BrowseRow: Identifiable {
     let id: String
     let title: String
@@ -144,6 +138,7 @@ struct BrowseRow: Identifiable {
 struct BrowseScreen: View {
     @EnvironmentObject var store: Store
     @Environment(\.openURL) private var openURL
+    @Environment(\.pal) private var pal
     @Binding var route: [Route]
     let heroItems: [HeroItem]
     let rows: [BrowseRow]
@@ -165,60 +160,46 @@ struct BrowseScreen: View {
 
     var body: some View {
         ZStack {
-            Theme.bg.ignoresSafeArea()   // page bg == the hero's fade target, so no seam
-            scroll
-        }
-    }
+            pal.paper.ignoresSafeArea()
+            ScrollView {
+                VStack(alignment: .leading, spacing: Theme.rowSpacing) {
+                    if !heroItems.isEmpty {
+                        MarqueeHero(items: heroItems, route: $route)
+                            .padding(.top, 26)
+                            .focusSection()   // up from any card lands on the hero
+                    }
 
-    private var scroll: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: Theme.rowSpacing) {
-                // The wordmark rides at the top of the PAGE (over the hero art)
-                // and scrolls away with it — it must not shadow the whole app.
-                if !heroItems.isEmpty {
-                    MarqueeHero(items: heroItems, route: $route)
-                        .overlay(alignment: .topLeading) {
-                            MarqueeWordmark()
-                                .padding(.leading, Theme.gutter).padding(.top, 46)
+                    if !continueItems.isEmpty {
+                        MediaRow(title: "Continue watching", count: "\(continueItems.count)") {
+                            ForEach(continueItems) { item in
+                                PosterCard(title: item.displayTitle, posterURL: item.poster,
+                                           subtitle: item.subtitle,
+                                           progress: item.progressFraction,
+                                           showPlay: true,
+                                           onMarkWatched: { Task { await store.markContinueWatched(item) } },
+                                           action: {
+                                               // Movies open their page; episodes open the
+                                               // EPISODE page (Resume/Mark Watched live there).
+                                               if item.kind == "movie" { route.append(.movie(item.id)) }
+                                               else if let sid = item.showId { route.append(.episode(sid, item.id)) }
+                                           })
+                            }
                         }
-                        .focusSection()   // up from any card lands on the hero buttons
-                } else {
-                    MarqueeWordmark()
-                        .padding(.leading, Theme.gutter).padding(.top, 46)
-                }
+                        .padding(.top, 12)
+                    }
 
-                if !continueItems.isEmpty {
-                    MediaRow(title: "Continue Watching") {
-                        ForEach(continueItems) { item in
-                            ContinueCard(title: item.displayTitle, subtitle: item.subtitle,
-                                         posterURL: item.poster, progress: item.progressFraction,
-                                         action: {
-                                             // Movies open their page; episodes open the
-                                             // EPISODE page (Resume/Mark Watched live there).
-                                             if item.kind == "movie" { route.append(.movie(item.id)) }
-                                             else if let sid = item.showId { route.append(.episode(sid, item.id)) }
-                                         },
-                                         onMarkWatched: {
-                                             Task { await store.markContinueWatched(item) }
-                                         })
+                    ForEach(rows) { row in
+                        MediaRow(title: row.title, count: "\(row.cards.count)") {
+                            ForEach(row.cards) { c in
+                                PosterCard(title: c.title, posterURL: c.poster, subtitle: c.subtitle,
+                                           progress: c.progress, badges: c.badges) { tap(c) }
+                            }
                         }
                     }
                 }
-
-                ForEach(rows) { row in
-                    MediaRow(title: row.title) {
-                        ForEach(row.cards) { c in
-                            PosterCard(title: c.title, posterURL: c.poster, subtitle: c.subtitle,
-                                       progress: c.progress, badges: c.badges) { tap(c) }
-                        }
-                    }
-                }
+                .padding(.bottom, 60)
             }
-            .padding(.bottom, Theme.gutter)
         }
-        // Full-bleed: the hero art reaches every screen edge (no safe-area box);
-        // row content keeps its gutter padding so posters aren't clipped.
-        .ignoresSafeArea()
         // Keep watch state fresh: Continue Watching appears/updates and
         // marked-watched titles drop out when you come back to a browse page.
         .onAppear { Task { await store.refreshHome() } }

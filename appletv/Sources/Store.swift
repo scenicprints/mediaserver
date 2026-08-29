@@ -379,6 +379,10 @@ final class Store: ObservableObject {
     @Published var night: Bool { didSet { UserDefaults.standard.set(night, forKey: "night") } }
     @Published var norm: Bool { didSet { UserDefaults.standard.set(norm, forKey: "norm") } }
 
+    // The finish — white housing or black. Per-device for the same reason the
+    // audio prefs are: it depends on THIS room and THIS panel, not the account.
+    @Published var finish: Finish { didSet { UserDefaults.standard.set(finish.rawValue, forKey: "finish") } }
+
     var previewMode = false   // CI screenshot mode: keep the session alive
     var isLoggedIn: Bool { previewMode || token != nil }
     var isAdmin: Bool { user?.role == "admin" }
@@ -390,6 +394,7 @@ final class Store: ObservableObject {
         dboost = UserDefaults.standard.string(forKey: "dboost") ?? "normal"
         night = UserDefaults.standard.bool(forKey: "night")
         norm = UserDefaults.standard.bool(forKey: "norm")
+        finish = Finish(rawValue: UserDefaults.standard.string(forKey: "finish") ?? "") ?? .white
         // didSet doesn't fire during init — mirror the restored session into the
         // app group explicitly so the Top Shelf extension has it from first run.
         let shared = UserDefaults(suiteName: Store.appGroup)
