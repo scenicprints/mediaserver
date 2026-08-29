@@ -109,6 +109,13 @@ class PlayerActivity : Activity() {
     private val teleQueue = JSONArray()
     private var rebufferStartedAt = 0L
     private var rebufferCount = 0
+    // Every seek makes the decoder refill, which looks exactly like a network
+    // stall. It isn't one, and counting it made resumes report phantom rebuffers
+    // seconds after playback started. A seek opens this window; the refill it
+    // causes closes it without being counted, and if the seek somehow refills
+    // without a Buffering event the window expires on its own rather than
+    // swallowing the next real stall.
+    private var seekGateUntilMs = 0L
 
     private val ACCENT = Color.parseColor("#6c5cff")
     private val ACCENT2 = Color.parseColor("#37c2ff")
@@ -193,7 +200,10 @@ class PlayerActivity : Activity() {
                     resumeApplied = true
                     // (setTime/setSpuTrack return values in Java — call them as
                     // methods; Kotlin property syntax doesn't compile for them.)
-                    if (startAt > 1 && player?.isSeekable == true) player?.setTime((startAt * 1000).toLong())
+                    if (startAt > 1 && player?.isSeekable == true) {
+                        markSeek()
+                        player?.setTime((startAt * 1000).toLong())
+                    }
                     ui.postDelayed({ forceSubsOffOnce() }, 800) // after tracks settle
                 }
                 updateHud()
@@ -220,7 +230,9 @@ class PlayerActivity : Activity() {
                     // Only count real stalls (not the initial spin-up, not blips).
                     if (!inPreroll && resumeApplied && started > 0) {
                         val ms = System.currentTimeMillis() - started
-                        if (ms > 700) { rebufferCount++
+                        if (System.currentTimeMillis() < seekGateUntilMs) {
+                            seekGateUntilMs = 0L        // this refill is the seek's own
+                        } else if (ms > 700) { rebufferCount++
                             tele("buffer", JSONObject().put("kind", "rebuffer").put("native", true).put("ms", ms).put("at", positionSec.toInt())) }
                     }
                 }
@@ -247,12 +259,20 @@ class PlayerActivity : Activity() {
         try { if ((player?.spuTrack ?: -1) != -1) player?.setSpuTrack(-1) } catch (_: Exception) {}
     }
 
+    /** A seek's own refill is not a network stall — ignore the next one. The
+     *  window is generous but self-expiring: a refill follows a seek within a
+     *  second or two, and right after a seek the buffer is legitimately cold. */
+    private fun markSeek() {
+        seekGateUntilMs = System.currentTimeMillis() + 15000
+    }
+
     private fun seekBy(deltaSec: Int) {
         if (live || inPreroll) return
         val p = player ?: return
         if (!p.isSeekable) return
         val d = durationSec.takeIf { it > 0 } ?: (p.length / 1000.0)
         val target = ((positionSec + deltaSec).coerceIn(0.0, if (d > 1) d - 1 else positionSec + deltaSec)) * 1000
+        markSeek()
         try { p.setTime(target.toLong()) } catch (_: Exception) {}
         flashHud()
     }
@@ -305,6 +325,7 @@ class PlayerActivity : Activity() {
         if (introEnd <= 0) return
         introSkipped = true
         skipIntroBtn.visibility = View.GONE
+        markSeek()
         try { player?.setTime((introEnd * 1000).toLong()) } catch (_: Exception) {}
     }
 

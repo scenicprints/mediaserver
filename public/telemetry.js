@@ -97,21 +97,33 @@
       list.getEntries().forEach(function (en) { longCount++; if (en.duration > longMax) longMax = en.duration; });
     }).observe({ entryTypes: ['longtask'] });
   } catch (e) { /* not supported — vitals still carry fps/heap */ }
+  // A sample only means something if the page was actually running for the whole
+  // window. On Android TV the native player is a separate Activity, so the WebView
+  // is stopped for the length of the movie: rAF freezes mid-window and resumes
+  // nearly an hour later. Dividing the ~60 frames we managed by the ~3400 seconds
+  // the window really took reported "0 fps", and handed that sample every stall
+  // since the last one — a two-hour freeze rendered as catastrophic lag that never
+  // happened. The shell never pauses the WebView, so document.hidden can't be
+  // relied on to catch it; the elapsed window is what actually tells us.
   function fpsSample() {
+    if (document.hidden) return;
     try {
       var frames = 0, t0 = performance.now();
       function tick(t) {
         frames++;
-        if (t - t0 < 1000) requestAnimationFrame(tick);
-        else {
+        if (t - t0 < 1000) { requestAnimationFrame(tick); return; }
+        // Real jank still lands here: even 1 fps closes the window in ~2s. Only a
+        // genuine freeze overshoots, and that sample gets dropped rather than
+        // reported as lag we can't attribute to any known interval.
+        if (t - t0 <= 2500 && !document.hidden) {
           tele('vitals', {
             fps: Math.round(frames / ((t - t0) / 1000)),
             longTasks: longCount,
             longestMs: Math.round(longMax),
             heapMB: performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1048576) : undefined
           });
-          longCount = 0; longMax = 0;
         }
+        longCount = 0; longMax = 0;
       }
       requestAnimationFrame(tick);
     } catch (e) { /* ignore */ }
