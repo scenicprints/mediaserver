@@ -396,8 +396,11 @@ struct MediaRow<Content: View>: View {
                     .padding(.horizontal, Theme.gutter)
             }
         }
-        // One focus section per row: moving up or down from ANY card lands on the
-        // neighbouring row even when nothing sits directly above it.
+        // The section must SPAN THE SCREEN or the focus engine only considers it
+        // when you are already lined up with a card. A row holding three items
+        // was otherwise skipped entirely when you pressed Up from the right-hand
+        // side of the row below it — nothing was "directly above".
+        .frame(maxWidth: .infinity, alignment: .leading)
         .focusSection()
     }
 }

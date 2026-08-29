@@ -145,6 +145,7 @@ struct ShowDetailView: View {
                         }
                     }
                     .padding(.top, 24)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .focusSection()
                 }
 

@@ -52,6 +52,7 @@ struct MarqueeHero: View {
                     MButton(title: "Details") { route.append(it.route) }
                 }
                 .padding(.top, 26)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .focusSection()
                 Dial(count: items.count, index: idx).padding(.top, 34)
                 Spacer(minLength: 0)
@@ -166,9 +167,12 @@ struct BrowseScreen: View {
         ZStack {
             pal.paper.ignoresSafeArea()
             ScrollView {
-                // LAZY: Home builds ~20 rows. A plain VStack constructed every
-                // one of them, and every card in them, before the first frame.
-                LazyVStack(alignment: .leading, spacing: Theme.rowSpacing) {
+                // NOT lazy, deliberately. A LazyVStack never instantiates the
+                // rows below the fold, so their focus sections do not exist and
+                // the engine sails straight past them. The cards inside each row
+                // are still lazy (LazyHStack) — that is where the cost actually
+                // was, and the image cache carries the rest.
+                VStack(alignment: .leading, spacing: Theme.rowSpacing) {
                     if !heroItems.isEmpty {
                         MarqueeHero(items: heroItems, route: $route)
                             .padding(.top, 26)

@@ -71,6 +71,7 @@ struct MovieDetailView: View {
                 }
                 .padding(.horizontal, Theme.gutter)
                 .padding(.top, 30)
+                .focusSection()
 
                 if let recs = extra?.recommendations?.filter({ $0.poster != nil }), !recs.isEmpty {
                     MediaRow(title: "More like this", count: "\(recs.count)") {
