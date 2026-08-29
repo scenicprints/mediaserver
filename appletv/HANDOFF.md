@@ -42,6 +42,24 @@ open it in a browser).
   (minutes in, because the remux outruns playback) and clamps rewinds — that was
   "From Beginning starts at a weird time and it fights me scrubbing back".
 
+### Verify with the simulator shots, not by guessing
+`gh run download <preview-run-id> -n preview-shots` gives a 4K PNG of every tab
+from the REAL app. Reading those caught the orange-badge flood, "1080P", "804p",
+the unstylable Library search pill and a missing play button on the show page —
+none of which a compile check would have found. Do this before shipping.
+(Deliver findings to the owner, never the gallery itself — see above.)
+
+### Two tvOS traps this design hit
+1. **The focus halo.** tvOS paints a white rounded platter behind any focusable
+   control. `.buttonStyle(.plain)` is NOT bare on tvOS 26, and per-button
+   `.focusEffectDisabled()` did not take. What works: `BareButtonStyle` (returns
+   the label untouched) plus ONE `.focusEffectDisabled()` at the root, where it
+   propagates through the environment. An empty `.contextMenu` also re-wraps a
+   view in its own focus container — attach it only when there is a menu.
+2. **Fill-scaled artwork escapes its box.** `.clipped()` has to come AFTER the
+   final `.frame()`. `ArtPlate` therefore takes its own width/height; never size
+   it from the call site or the image paints over whatever is below it.
+
 Known-unverified: `LivePlayer` still resolves its URL with `store.playbackURL`
 (the container guess) rather than `resolvePlaybackURL`. That looked like a bug
 under the old AVPlayer-only design, but VLCKit direct-plays everything now, so
