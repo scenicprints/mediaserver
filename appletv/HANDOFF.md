@@ -74,9 +74,12 @@ repeatable. There is also a **preview pipeline** that screenshots the real app
 in the tvOS Simulator so we review look **before** shipping to TestFlight.
 
 ## How to SHIP (owner ships from PC, or you push)
-- Any push under `appletv/**` triggers `.github/workflows/appletv.yml` →
-  builds on macos-15 → TestFlight. Owner has auto-distribution on ("Marquee
-  Testers" internal group) so the Apple TV auto-updates.
+- `.github/workflows/appletv.yml` is **workflow_dispatch only** (plus a
+  2-monthly keep-alive). A push does NOT ship — it only runs the preview build.
+  To ship: `gh workflow run "Apple TV app"`, which builds on macos-15 →
+  TestFlight. Owner has auto-distribution on ("Marquee Testers" internal group)
+  so the Apple TV then auto-updates. (This entry used to claim pushes shipped;
+  they don't, verified 2026-09-07.)
 - Watch a run: `gh run watch <id> --exit-status`; failures are almost always a
   Swift compile error — `gh run view <id> --log-failed | grep error:`.
 - **Do NOT regress these CI fixes:** runner = **macos-15** + `xcode-select`
