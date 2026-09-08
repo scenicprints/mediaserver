@@ -2853,6 +2853,7 @@ async function openSettings() {
   // Resume the live monitors if settings reopens on their tab.
   if (document.querySelector('#settings .settings-tabs .tab[data-tab="sessions"].active')) startSessionsPolling();
   if (document.querySelector('#settings .settings-tabs .tab[data-tab="diag"].active')) startDiagPolling();
+  if (document.querySelector('#settings .settings-tabs .tab[data-tab="storage"].active')) startOptPolling();
   await renderLibraries();
 }
 
@@ -2957,9 +2958,10 @@ for (const [key, attr] of AUDIO_GROUPS)
 document.querySelectorAll('#settings .settings-tabs .tab').forEach((t) => t.addEventListener('click', () => {
   document.querySelectorAll('#settings .settings-tabs .tab').forEach((x) => x.classList.toggle('active', x === t));
   document.querySelectorAll('#settings .tab-panel').forEach((p) => p.classList.toggle('active', p.dataset.panel === t.dataset.tab));
-  // The "Now Playing" / Diagnostics monitors only poll while their tab is on screen.
+  // The "Now Playing" / Storage / Diagnostics monitors only poll while their tab is on screen.
   if (t.dataset.tab === 'sessions') startSessionsPolling(); else stopSessionsPolling();
   if (t.dataset.tab === 'diag') startDiagPolling(); else stopDiagPolling();
+  if (t.dataset.tab === 'storage') startOptPolling(); else stopOptPolling();
   // Requests builds fresh each time its tab opens (it re-checks Radarr/Sonarr
   // and restarts the queue poll, which stops itself when the tab hides).
   if (t.dataset.tab === 'requests') { stopRequestsPolling(); buildRequestsUI(document.querySelector('#settings .tab-panel[data-panel="requests"] .requests')); }
@@ -3561,3 +3563,176 @@ document.addEventListener('click', (e) => {
   localStorage.setItem('finish', v);
   applyFinish(v);
 });
+
+// ---- Storage optimizer (admin) ----
+// Shows what the library is wasting and lets the owner queue rewrites. The
+// framing here matters: the list is per FILE and never mentions "duplicates" —
+// multiple versions of a title are deliberate on this server, so the optimizer
+// only ever asks whether one file carries more bits than it needs.
+let optTimer = null;
+let optProfile = '';       // '' = every candidate
+let optPlan = null;
+function startOptPolling() { loadOptStatus(); loadOptPlan(); clearInterval(optTimer); optTimer = setInterval(loadOptStatus, 3000); }
+function stopOptPolling() { clearInterval(optTimer); optTimer = null; }
+
+function optGb(b) {
+  const n = Number(b) || 0;
+  if (n >= Math.pow(1024, 4)) return (n / Math.pow(1024, 4)).toFixed(2) + ' TB';
+  if (n >= Math.pow(1024, 3)) return (n / Math.pow(1024, 3)).toFixed(1) + ' GB';
+  return (n / Math.pow(1024, 2)).toFixed(0) + ' MB';
+}
+function baseName(p) { return String(p).split('\\').pop().split('/').pop(); }
+
+async function loadOptStatus() {
+  let s;
+  try { const r = await fetch('/api/optimize/status'); if (!r.ok) return; s = await r.json(); } catch (_e) { return; }
+
+  document.getElementById('opt-count').textContent =
+    s.probed + ' of ' + s.scannable + ' files scanned' +
+    (s.reclaimedBytes ? ' · ' + optGb(s.reclaimedBytes) + ' reclaimed' : '');
+
+  const bits = [];
+  if (s.scan.running) {
+    const pct = Math.round(s.scan.done / Math.max(1, s.scan.total) * 100);
+    bits.push('<div class="opt-bar"><span style="width:' + pct + '%"></span></div>' +
+      '<div class="muted">Scanning ' + s.scan.done + ' / ' + s.scan.total + '…</div>');
+  }
+  if (s.worker.running && s.worker.current) {
+    const c = s.worker.current;
+    bits.push('<div class="opt-bar"><span style="width:' + (c.pct || 0) + '%"></span></div>' +
+      '<div class="muted">' + escapeHtml(baseName(c.path)) + ' — ' + escapeHtml(c.profile) + ' · ' + (c.pct || 0) + '%</div>');
+  }
+  const q = s.jobs.queued || 0;
+  const f = (s.jobs.failed || 0) + (s.jobs.skipped || 0);
+  const d = s.jobs.done || 0;
+  bits.push('<div class="muted">' + q + ' queued · ' + d + ' done · ' + f + ' skipped or rejected' +
+    (s.nvenc ? '' : ' · no GPU encoder — video re-encodes will be slow') + '</div>');
+  document.getElementById('opt-progress').innerHTML = bits.join('');
+
+  document.getElementById('opt-log').innerHTML = (s.log || []).slice(-12).reverse()
+    .map(function (l) { return '<div class="opt-log-line">' + escapeHtml(l.msg) + '</div>'; }).join('');
+}
+
+// A drive that isn't plugged in must read as "unplugged", never as thousands of
+// missing files — the F: TV library disappearing is exactly this case.
+async function loadOptOffline() {
+  let o;
+  try { const r = await fetch('/api/optimize/offline'); if (!r.ok) return; o = await r.json(); } catch (_e) { return; }
+  const box = document.getElementById('opt-offline');
+  if (!o.offline || !o.offline.length) { box.classList.add('hidden'); return; }
+  box.classList.remove('hidden');
+  box.innerHTML = o.offline.map(function (x) {
+    return '<strong>' + escapeHtml(x.library) + ' is not connected.</strong> ' +
+      x.files.toLocaleString() + ' ' + (x.type === 'tv' ? 'episode' : 'movie') + ' files (' + optGb(x.bytes) +
+      ') live on that drive. They are being left completely alone — reconnect the drive to see them again.';
+  }).join('<br>');
+}
+
+async function loadOptPlan() {
+  loadOptOffline();
+  let p;
+  try {
+    const r = await fetch('/api/optimize/plan?limit=150' + (optProfile ? '&profile=' + optProfile : ''));
+    if (!r.ok) return;
+    p = await r.json();
+  } catch (_e) { return; }
+  optPlan = p;
+
+  const t = p.totals;
+  function card(label, val, sub) {
+    return '<div class="diag-card"><div class="diag-card-v">' + val + '</div><div class="diag-card-k">' + label + '</div>' +
+      (sub ? '<div class="diag-kv muted">' + sub + '</div>' : '') + '</div>';
+  }
+  document.getElementById('opt-summary').innerHTML =
+    card('scanned', optGb(t.bytes), t.files.toLocaleString() + ' files') +
+    card('recoverable', optGb(t.saveBytes), t.bytes ? Math.round(t.saveBytes / t.bytes * 100) + '% of scanned' : '') +
+    Object.keys(t.byTier).map(function (k) {
+      const v = t.byTier[k];
+      return card(k, optGb(v.bytes), v.saveBytes ? 'save ' + optGb(v.saveBytes) : 'nothing to gain');
+    }).join('');
+
+  const byProfile = t.byProfile || {};
+  function chip(id, label) {
+    const v = byProfile[id];
+    return '<button class="diag-f' + (optProfile === id ? ' on' : '') + '" data-profile="' + id + '">' +
+      label + (v ? ' (' + v.files + ')' : ' (0)') + '</button>';
+  }
+  document.getElementById('opt-filters').innerHTML =
+    '<button class="diag-f' + (optProfile === '' ? ' on' : '') + '" data-profile="">Everything (' + p.count + ')</button>' +
+    chip('audio', 'Audio only') + chip('video', 'Video only') + chip('both', 'Audio + video') +
+    '<button class="btn opt-queue-btn" id="opt-queue">Queue top 25' + (optProfile ? ' of these' : '') + '</button>';
+  document.querySelectorAll('#opt-filters [data-profile]').forEach(function (b) {
+    b.addEventListener('click', function () { optProfile = b.dataset.profile; loadOptPlan(); });
+  });
+  document.getElementById('opt-queue').addEventListener('click', queueTop);
+
+  document.getElementById('opt-list').innerHTML = p.items.length
+    ? p.items.map(function (i) {
+      return '<div class="opt-row">' +
+        '<div class="opt-row-main">' +
+          '<div class="opt-title">' + escapeHtml(i.title) +
+            (i.season != null ? ' <span class="muted">S' + i.season + 'E' + i.episode + '</span>' : '') + '</div>' +
+          '<div class="opt-file muted">' + escapeHtml(baseName(i.path)) + '</div>' +
+          '<div class="opt-why">' + escapeHtml(i.reason) + '</div>' +
+        '</div>' +
+        '<div class="opt-row-meta">' +
+          '<div class="opt-badges">' +
+            '<span class="opt-badge">' + i.tier + (i.hdr ? ' HDR' : '') + '</span>' +
+            '<span class="opt-badge">' + escapeHtml(i.vcodec || '?') + '</span>' +
+            '<span class="opt-badge">' + escapeHtml(i.acodec || '?') + ' ' + (i.achannels || '?') + 'ch</span>' +
+          '</div>' +
+          '<div class="opt-size">' + optGb(i.size) + ' <span class="opt-save">−' + optGb(i.saveBytes) + '</span></div>' +
+          '<button class="btn opt-one" data-kind="' + i.kind + '" data-id="' + i.fileId + '">Optimize</button>' +
+        '</div>' +
+      '</div>';
+    }).join('')
+    : '<div class="muted">Nothing worth changing in what has been scanned so far.</div>';
+
+  document.querySelectorAll('.opt-one').forEach(function (b) {
+    b.addEventListener('click', async function () {
+      b.disabled = true; b.textContent = 'Queued';
+      try {
+        await fetch('/api/optimize/queue', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ kind: b.dataset.kind, fileId: +b.dataset.id })
+        });
+      } catch (_e) {}
+      loadOptStatus();
+    });
+  });
+}
+
+async function queueTop() {
+  const btn = document.getElementById('opt-queue');
+  const n = Math.min(25, (optPlan && optPlan.count) || 0);
+  if (!n) return;
+  if (!confirm('Queue ' + n + ' file' + (n === 1 ? '' : 's') + ' for optimizing?\n\n' +
+    'Each one is re-encoded to a new file, checked, and only then does the original get deleted. ' +
+    'Nothing else in your library is touched.')) return;
+  btn.disabled = true; btn.textContent = 'Queuing…';
+  try {
+    await fetch('/api/optimize/queue', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile: optProfile || undefined, limit: 25 })
+    });
+  } catch (_e) {}
+  btn.disabled = false; btn.textContent = 'Queue top 25';
+  loadOptStatus();
+}
+
+(function wireOptButtons() {
+  function on(id, fn) { const el = document.getElementById(id); if (el) el.addEventListener('click', fn); }
+  on('opt-scan', async function (e) {
+    e.target.disabled = true;
+    try { await fetch('/api/optimize/scan', { method: 'POST' }); } catch (_e) {}
+    setTimeout(function () { e.target.disabled = false; loadOptStatus(); }, 1000);
+  });
+  on('opt-start', async function () {
+    try { await fetch('/api/optimize/start', { method: 'POST' }); } catch (_e) {}
+    loadOptStatus();
+  });
+  on('opt-stop', async function () {
+    try { await fetch('/api/optimize/stop', { method: 'POST' }); } catch (_e) {}
+    loadOptStatus();
+  });
+})();

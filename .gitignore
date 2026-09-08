@@ -3,6 +3,10 @@ node_modules/
 data/
 tools/
 config.json
+# …and any backup or variant of it. This repo is PUBLIC and config.json holds the
+# TMDB key, the OpenSubtitles password, the Radarr/Sonarr keys and the invite
+# code, so a stray config.json.bak must never be committable.
+config.json.*
 sample-media/
 sample-tv/
 *.zip

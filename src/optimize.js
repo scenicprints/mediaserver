@@ -1,0 +1,724 @@
+// Storage optimizer: find files that are bigger than they need to be, and
+// rewrite them smaller without changing what you can watch.
+//
+// Two ideas drive this module.
+//
+// 1. **The library already models "many files, one title."** Optimizing is
+//    therefore a per-FILE operation, never a per-title one. Multiple versions of
+//    the same movie are deliberate here, so nothing in this file ever reasons
+//    about "you have three copies of X" — it only ever asks "is THIS file
+//    carrying more bits than it needs to?"
+//
+// 2. **Never lose a file to a bad encode.** Every job writes to a sidecar temp
+//    file, then has to pass a verification gate (probe + real decode spot-checks
+//    at three points) before the source is deleted and the DB row is repointed.
+//    A failed gate leaves the original exactly where it was and reports why.
+//
+// The cheapest big win is audio, not video: a TrueHD or DTS-HD track runs
+// 20–40 Mbps where E-AC-3 640k sounds fine on a TV, and converting it copies the
+// video stream untouched — no quality loss, no HDR/Dolby Vision risk, minutes
+// per file instead of hours. It also happens to fix Apple TV playback, which
+// can't copy TrueHD and crashes ffmpeg trying to decode it.
+import fs from 'node:fs';
+import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { ffmpegBin, ffprobeBin, nvencAvailable } from './ffmpeg.js';
+
+const yield_ = () => new Promise((r) => setImmediate(r));
+
+// ---- Policy ------------------------------------------------------------
+
+// Bitrate a given resolution tier should land at, in kbps. Deliberately
+// conservative: these are "obviously wasteful above this" lines, not targets we
+// chase downward. A file already at or under its tier is left alone.
+const TIER_TARGET = { '4K': 16000, '1080p': 5000, '720p': 2500, 'SD': 1200 };
+
+// Only re-encode video when the source is meaningfully over its tier — a file
+// 10% over isn't worth an hour of GPU time and a generation of quality loss.
+const OVER_TIER = 1.5;
+
+// Audio codecs that store far more than a TV can use. Lossless (truehd/mlp/
+// flac/pcm) and the DTS family are the whole list; ac3/eac3/aac/opus already
+// sit at sane bitrates and are copied through untouched.
+const BLOAT_AUDIO = new Set(['truehd', 'mlp', 'dts', 'flac', 'pcm_s16le', 'pcm_s24le', 'pcm_bluray', 'pcm_dvd']);
+
+// What a converted audio track becomes. E-AC-3 is the sweet spot: every TV,
+// Apple TV, and Android TV decodes it, Apple can *copy* it (so the server never
+// has to transcode audio for the HLS path), and 640 kbps 5.1 is transparent
+// enough for a living room.
+const AUDIO_CODEC = 'eac3';
+const AUDIO_KBPS = 640;
+const AUDIO_MAX_CH = 6; // ffmpeg's E-AC-3 encoder tops out at 5.1
+
+// A job needs room to write its output beside the source before the source can
+// be deleted. Require comfortably more than the source size.
+const FREE_SPACE_FACTOR = 1.15;
+
+const TMP_SUFFIX = '.marquee-opt.tmp';
+
+// Resolution tier, judged on WIDTH.
+//
+// Height is a trap: a 2.39:1 scope film is letterboxed in the *encode*, not with
+// black bars, so a 4K scope movie is 3840x1606 and a 1080p scope movie is
+// 1920x800. Keying on height calls the first one "1080p" and the second "720p",
+// which would have handed the entire 4K scope collection to the video re-encoder
+// that 4K is explicitly meant to be protected from. Width is stable across
+// aspect ratios; height is only the fallback for the odd file with no width.
+export function tierOf(width, height) {
+  const w = Number(width) || 0;
+  if (w >= 3000) return '4K';
+  if (w >= 1700) return '1080p';
+  if (w >= 1100) return '720p';
+  if (w > 0) return 'SD';
+  const h = Number(height) || 0;
+  if (h >= 1500) return '4K';
+  if (h >= 900) return '1080p';
+  if (h >= 600) return '720p';
+  return 'SD';
+}
+
+// ---- Schema ------------------------------------------------------------
+
+// Probing 20k files takes hours, so results are cached and keyed on
+// (size, mtime) — a file that hasn't changed is never re-probed.
+export function ensureSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS media_info (
+      file_kind  TEXT NOT NULL,
+      file_id    INTEGER NOT NULL,
+      path       TEXT NOT NULL,
+      size       INTEGER,
+      mtime      INTEGER,
+      duration   REAL,
+      container  TEXT,
+      vcodec     TEXT,
+      width      INTEGER,
+      height     INTEGER,
+      pix_fmt    TEXT,
+      hdr        INTEGER DEFAULT 0,
+      vkbps      INTEGER,
+      acodec     TEXT,
+      achannels  INTEGER,
+      akbps      INTEGER,
+      audio_json TEXT,
+      probed_at  INTEGER,
+      probe_error TEXT,
+      PRIMARY KEY (file_kind, file_id)
+    );
+  `);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_media_info_path ON media_info(path);');
+
+  // One row per optimization attempt — the audit trail. Kept after success so
+  // the admin panel can show what was reclaimed and what a file used to be.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS optimize_jobs (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      file_kind   TEXT NOT NULL,
+      file_id     INTEGER NOT NULL,
+      profile     TEXT NOT NULL,
+      state       TEXT NOT NULL DEFAULT 'queued',
+      path        TEXT,
+      old_size    INTEGER,
+      new_size    INTEGER,
+      old_summary TEXT,
+      new_summary TEXT,
+      reason      TEXT,
+      error       TEXT,
+      pct         REAL DEFAULT 0,
+      created_at  INTEGER,
+      started_at  INTEGER,
+      ended_at    INTEGER
+    );
+  `);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_optjobs_state ON optimize_jobs(state);');
+}
+
+// ---- Probing -----------------------------------------------------------
+
+function run(cmd, args, timeout = 120000) {
+  return new Promise((resolve) => {
+    if (!cmd) return resolve(null);
+    execFile(cmd, args, { windowsHide: true, maxBuffer: 16 * 1024 * 1024, timeout },
+      (err, stdout) => resolve(err ? null : String(stdout)));
+  });
+}
+
+// Run ffmpeg and resolve to null on success, or its stderr tail on failure.
+// (Verification cares about *why* something failed, so we keep the message.)
+function runFfmpeg(args, { timeout = 0, onLine } = {}) {
+  return new Promise((resolve) => {
+    const bin = ffmpegBin();
+    if (!bin) return resolve('ffmpeg unavailable');
+    const child = execFile(bin, args, { windowsHide: true, maxBuffer: 32 * 1024 * 1024, timeout },
+      (err, _stdout, stderr) => {
+        if (!err) return resolve(null);
+        const tail = String(stderr || err.message).trim().split('\n').slice(-4).join(' ').slice(0, 400);
+        resolve(tail || 'ffmpeg failed');
+      });
+    if (onLine && child.stderr) {
+      let buf = '';
+      child.stderr.on('data', (d) => {
+        buf += d;
+        const lines = buf.split(/[\r\n]/);
+        buf = lines.pop();
+        for (const l of lines) if (l.trim()) onLine(l);
+      });
+    }
+  });
+}
+
+// HDR is worth knowing even though we never re-encode 4K video: it's the reason
+// a file is off-limits to the video profile, and the admin panel shows it.
+function isHdr(v) {
+  const trc = String(v.color_transfer || '').toLowerCase();
+  const pri = String(v.color_primaries || '').toLowerCase();
+  return trc.includes('smpte2084') || trc.includes('arib-std-b67') || pri.includes('bt2020') ? 1 : 0;
+}
+
+async function probeOne(filePath) {
+  const bin = ffprobeBin();
+  if (!bin) return { error: 'ffprobe unavailable' };
+  const out = await run(bin, [
+    '-v', 'error', '-print_format', 'json',
+    '-show_entries',
+    'format=duration,bit_rate,format_name:stream=index,codec_type,codec_name,width,height,pix_fmt,channels,bit_rate,color_transfer,color_primaries:stream_tags=language,title',
+    filePath
+  ], 60000);
+  let j = null;
+  try { j = JSON.parse(out); } catch {}
+  if (!j || !j.streams) return { error: 'probe failed' };
+
+  const streams = j.streams || [];
+  const v = streams.find((s) => s.codec_type === 'video') || {};
+  const audio = streams.filter((s) => s.codec_type === 'audio');
+  const a = audio[0] || {};
+  let size = 0, mtime = 0;
+  try { const st = fs.statSync(filePath); size = st.size; mtime = Math.round(st.mtimeMs); } catch {}
+  const duration = +(j.format && j.format.duration) || 0;
+
+  // Per-track audio detail — the audio profile needs to know *which* tracks are
+  // bloated, and its output index, to build the right -c:a:N flags.
+  const audio_json = JSON.stringify(audio.map((s, i) => ({
+    i,                                     // index among audio streams (the "a:N" specifier)
+    codec: s.codec_name || '?',
+    ch: +s.channels || 0,
+    kbps: Math.round((+s.bit_rate || 0) / 1000) || null,
+    lang: (s.tags && s.tags.language) || null
+  })));
+
+  return {
+    size, mtime, duration,
+    container: (j.format && j.format.format_name) || null,
+    vcodec: v.codec_name || null,
+    width: +v.width || 0,
+    height: +v.height || 0,
+    pix_fmt: v.pix_fmt || null,
+    hdr: isHdr(v),
+    // Overall file bitrate is the honest number for "what does this cost me" —
+    // a per-stream video bit_rate is frequently absent in MKV.
+    vkbps: duration > 0 && size ? Math.round(size * 8 / duration / 1000) : null,
+    acodec: a.codec_name || null,
+    achannels: +a.channels || 0,
+    akbps: Math.round((+a.bit_rate || 0) / 1000) || null,
+    audio_json
+  };
+}
+
+// Every file the optimizer is allowed to look at. Files on a drive that isn't
+// mounted are excluded outright — the F: library is offline, and a missing
+// drive must never be mistaken for a missing file.
+export function scannableFiles(db) {
+  const roots = mountedRoots();
+  const rows = [
+    ...db.prepare('SELECT id AS file_id, path, size FROM movie_files').all().map((r) => ({ ...r, file_kind: 'movie' })),
+    ...db.prepare('SELECT id AS file_id, path, size FROM episode_files').all().map((r) => ({ ...r, file_kind: 'episode' }))
+  ];
+  return rows.filter((r) => roots.has(String(r.path).slice(0, 2).toUpperCase()));
+}
+
+// Drive letters that are actually present AND readable right now.
+//
+// This is deliberately the same test `pruneMissing` in scan.js uses (statSync +
+// isDirectory), not `existsSync`: on Windows a drive letter can answer
+// existsSync while the volume behind it is not really usable. An external USB
+// disk that has dropped out must read as "not mounted" here, so the optimizer
+// leaves its files completely alone rather than drawing conclusions about
+// media it cannot currently see.
+export function mountedRoots() {
+  const set = new Set();
+  for (let c = 65; c <= 90; c++) {
+    const d = String.fromCharCode(c) + ':';
+    try { if (fs.statSync(d + '\\').isDirectory()) set.add(d); } catch {}
+  }
+  return set;
+}
+
+export const scan = { running: false, done: 0, total: 0, startedAt: 0, error: null };
+
+// Background pass: probe everything not already cached at its current size+mtime.
+// Paced with a yield between files so playback and the UI stay responsive.
+export async function runProbeScan(db, { log = () => {}, limit = 0 } = {}) {
+  if (scan.running) return 0;
+  ensureSchema(db);
+  const cached = new Map();
+  for (const r of db.prepare('SELECT file_kind, file_id, size, mtime FROM media_info').all()) {
+    cached.set(r.file_kind + ':' + r.file_id, r);
+  }
+  let todo = scannableFiles(db).filter((f) => {
+    const c = cached.get(f.file_kind + ':' + f.file_id);
+    if (!c) return true;
+    let st = null;
+    try { st = fs.statSync(f.path); } catch { return false; } // gone: leave the stale row, the scanner owns deletions
+    return c.size !== st.size || c.mtime !== Math.round(st.mtimeMs);
+  });
+  if (limit > 0) todo = todo.slice(0, limit);
+  if (!todo.length) return 0;
+
+  scan.running = true; scan.done = 0; scan.total = todo.length; scan.startedAt = Date.now(); scan.error = null;
+  const up = db.prepare(`
+    INSERT INTO media_info (file_kind, file_id, path, size, mtime, duration, container, vcodec, width, height,
+                            pix_fmt, hdr, vkbps, acodec, achannels, akbps, audio_json, probed_at, probe_error)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(file_kind, file_id) DO UPDATE SET
+      path=excluded.path, size=excluded.size, mtime=excluded.mtime, duration=excluded.duration,
+      container=excluded.container, vcodec=excluded.vcodec, width=excluded.width, height=excluded.height,
+      pix_fmt=excluded.pix_fmt, hdr=excluded.hdr, vkbps=excluded.vkbps, acodec=excluded.acodec,
+      achannels=excluded.achannels, akbps=excluded.akbps, audio_json=excluded.audio_json,
+      probed_at=excluded.probed_at, probe_error=excluded.probe_error`);
+
+  try {
+    for (const f of todo) {
+      const info = await probeOne(f.path);
+      const now = Date.now();
+      if (info.error) {
+        up.run(f.file_kind, f.file_id, f.path, Number(f.size) || 0, 0, null, null, null, 0, 0,
+          null, 0, null, null, 0, null, null, now, info.error);
+      } else {
+        up.run(f.file_kind, f.file_id, f.path, info.size, info.mtime, info.duration, info.container,
+          info.vcodec, info.width, info.height, info.pix_fmt, info.hdr, info.vkbps, info.acodec,
+          info.achannels, info.akbps, info.audio_json, now, null);
+      }
+      scan.done++;
+      if (scan.done % 200 === 0) log(`Optimizer: probed ${scan.done}/${scan.total}`);
+      await yield_();
+    }
+    log(`Optimizer: probed ${scan.done} file(s).`);
+  } catch (e) {
+    scan.error = e.message;
+    log('Optimizer probe error: ' + e.message);
+  } finally {
+    scan.running = false;
+  }
+  return scan.done;
+}
+
+// ---- Analysis ----------------------------------------------------------
+
+// Decide what (if anything) should be done to one probed file.
+//
+// Both `allow4kVideo` and `allowHdrVideo` are off unless the owner turns them
+// on. A vetoed file is not skipped — it still gets its bloated audio fixed,
+// which is where most of the easy savings live anyway.
+export function planFor(info, { allow4kVideo = false, allowHdrVideo = false } = {}) {
+  if (!info || info.probe_error) return { profile: 'none', reason: info?.probe_error || 'not probed' };
+  if (!info.vcodec) return { profile: 'none', reason: 'no video stream' };
+
+  const tier = tierOf(info.width, info.height);
+  const target = TIER_TARGET[tier];
+  const size = Number(info.size) || 0;
+  const dur = Number(info.duration) || 0;
+  if (!size || !dur) return { profile: 'none', reason: 'unknown size/duration' };
+
+  let audio = [];
+  try { audio = JSON.parse(info.audio_json || '[]'); } catch {}
+
+  // What a track currently costs. A per-track bit_rate is often missing in MKV,
+  // so fall back to a conservative estimate per codec — deliberately low, so we
+  // never over-promise savings.
+  const estKbps = (a) => a.kbps || (a.codec === 'truehd' || a.codec === 'mlp' ? 4500
+    : a.codec === 'dts' ? 1500
+    : a.codec.startsWith('pcm') ? (a.ch || 2) * 1152
+    : a.codec === 'flac' ? 900 : 700);
+
+  // What a track would become: 5.1 gets the full 640k, stereo doesn't need it.
+  const newKbps = (a) => ((a.ch || 2) > 2 ? AUDIO_KBPS : 320);
+
+  // Only worth touching if the replacement is meaningfully smaller — converting
+  // a 900 kbps stereo FLAC to 640k E-AC-3 costs quality and saves nothing.
+  const bloated = audio.filter((a) => {
+    if (!BLOAT_AUDIO.has(String(a.codec).toLowerCase())) return false;
+    return estKbps(a) > newKbps(a) * 1.5;
+  });
+
+  const audioKbps = bloated.reduce((n, a) => n + estKbps(a), 0);
+  const audioNewKbps = bloated.reduce((n, a) => n + newKbps(a), 0);
+  const audioSaveBytes = Math.max(0, (audioKbps - audioNewKbps) * 1000 / 8 * dur);
+
+  const totalKbps = Number(info.vkbps) || Math.round(size * 8 / dur / 1000);
+  const videoKbps = Math.max(0, totalKbps - audio.reduce((n, a) => n + estKbps(a), 0));
+
+  // Is the *video* over its tier? Judge the video stream, not the file total —
+  // otherwise a lossless audio track alone makes a modest video look wasteful.
+  const videoOver = videoKbps > target * OVER_TIER;
+
+  // Two independent vetoes, both on by default:
+  //   4K  — this box's Pascal NVENC is a real quality step down at 4K.
+  //   HDR — any re-encode drops Dolby Vision, at every resolution, so an HDR
+  //         file is off-limits to the video profile whatever size it is.
+  // Neither veto affects audio: a vetoed file still gets its TrueHD/DTS fixed.
+  const veto = (tier === '4K' && !allow4kVideo) ? '4K'
+    : (info.hdr && !allowHdrVideo) ? 'HDR'
+    : null;
+  const videoAllowed = videoOver && !veto;
+  const videoSaveBytes = videoAllowed ? Math.max(0, (videoKbps - target) * 1000 / 8 * dur) : 0;
+
+  const wantAudio = bloated.length > 0 && audioSaveBytes > 200 * 2 ** 20; // ignore <200 MB of audio waste
+  const wantVideo = videoAllowed && videoSaveBytes > 300 * 2 ** 20;
+
+  let profile = 'none';
+  if (wantAudio && wantVideo) profile = 'both';
+  else if (wantAudio) profile = 'audio';
+  else if (wantVideo) profile = 'video';
+
+  const reason = profile === 'none'
+    ? (veto && videoOver ? `${veto} video left alone by policy` : 'already efficient')
+    : [
+        wantAudio ? `${bloated.map((a) => a.codec.toUpperCase()).join('+')} audio → E-AC-3` : null,
+        wantVideo ? `${Math.round(videoKbps / 100) / 10} Mbps ${tier} video → HEVC ~${target / 1000} Mbps` : null,
+        // Say out loud when big video is being deliberately left alone, so the
+        // panel never looks like it just missed a 35 Mbps file.
+        !wantVideo && veto && videoOver ? `${veto} video kept as-is` : null
+      ].filter(Boolean).join(', ');
+
+  return {
+    profile, reason, tier, hdr: !!info.hdr, veto,
+    totalKbps, videoKbps: Math.round(videoKbps),
+    bloatedAudio: bloated,
+    saveBytes: Math.round((wantAudio ? audioSaveBytes : 0) + (wantVideo ? videoSaveBytes : 0))
+  };
+}
+
+// The whole library's plan, newest waste first.
+export function analyze(db, { allow4kVideo = false, allowHdrVideo = false } = {}) {
+  ensureSchema(db);
+  const rows = db.prepare(`
+    SELECT mi.*, COALESCE(m.title, s.title) AS title, e.season, e.episode
+    FROM media_info mi
+    LEFT JOIN movie_files   mf ON mi.file_kind = 'movie'   AND mf.id = mi.file_id
+    LEFT JOIN movies        m  ON m.id  = mf.movie_id
+    LEFT JOIN episode_files ef ON mi.file_kind = 'episode' AND ef.id = mi.file_id
+    LEFT JOIN episodes      e  ON e.id  = ef.episode_id
+    LEFT JOIN shows         s  ON s.id  = e.show_id
+    WHERE (mf.id IS NOT NULL OR ef.id IS NOT NULL)`).all();
+
+  const mounted = mountedRoots();
+  const items = [];
+  const totals = { files: 0, bytes: 0, saveBytes: 0, byProfile: {}, byTier: {} };
+
+  for (const r of rows) {
+    if (!mounted.has(String(r.path).slice(0, 2).toUpperCase())) continue;
+    const plan = planFor(r, { allow4kVideo, allowHdrVideo });
+    const size = Number(r.size) || 0;
+    totals.files++; totals.bytes += size;
+    const tier = plan.tier || tierOf(r.width, r.height);
+    totals.byTier[tier] = totals.byTier[tier] || { files: 0, bytes: 0, saveBytes: 0 };
+    totals.byTier[tier].files++; totals.byTier[tier].bytes += size;
+    if (plan.profile === 'none') continue;
+    totals.saveBytes += plan.saveBytes;
+    totals.byTier[tier].saveBytes += plan.saveBytes;
+    totals.byProfile[plan.profile] = totals.byProfile[plan.profile] || { files: 0, saveBytes: 0 };
+    totals.byProfile[plan.profile].files++;
+    totals.byProfile[plan.profile].saveBytes += plan.saveBytes;
+    items.push({
+      kind: r.file_kind, fileId: r.file_id, path: r.path,
+      title: r.title || path.basename(r.path),
+      season: r.season, episode: r.episode,
+      size, duration: r.duration, tier, hdr: !!r.hdr,
+      vcodec: r.vcodec, width: r.width, height: r.height, acodec: r.acodec, achannels: r.achannels,
+      totalKbps: plan.totalKbps, videoKbps: plan.videoKbps,
+      profile: plan.profile, reason: plan.reason, saveBytes: plan.saveBytes
+    });
+  }
+  items.sort((a, b) => b.saveBytes - a.saveBytes);
+  return { items, totals };
+}
+
+// ---- Encoding ----------------------------------------------------------
+
+function freeSpaceOn(filePath) {
+  try {
+    const st = fs.statfsSync(path.parse(filePath).root);
+    return st.bavail * st.bsize;
+  } catch { return Infinity; } // if we can't tell, let the encode fail loudly instead
+}
+
+// Build the ffmpeg command for a profile.
+//
+// Audio profile: `-map 0 -c copy` keeps every stream — video, subtitles, chapters,
+// attachments — byte-identical, and only the bloated audio tracks are re-encoded
+// in place. That's why it's fast and lossless where it matters.
+function buildArgs(info, plan, src, dst) {
+  const args = ['-hide_banner', '-nostdin', '-y', '-i', src, '-map', '0', '-map', '-0:d?', '-max_interleave_delta', '0'];
+  const doVideo = plan.profile === 'video' || plan.profile === 'both';
+  const doAudio = plan.profile === 'audio' || plan.profile === 'both';
+
+  if (doVideo) {
+    const target = TIER_TARGET[plan.tier];
+    // 10-bit sources stay 10-bit — dropping to 8-bit would band the gradients
+    // this bitrate is trying to protect.
+    const tenBit = /10le|10be|p010/.test(String(info.pix_fmt || ''));
+    if (nvencAvailable()) {
+      args.push('-c:v', 'hevc_nvenc', '-preset', 'p5', '-rc', 'vbr', '-cq', '26',
+        '-b:v', `${target}k`, '-maxrate', `${Math.round(target * 1.5)}k`, '-bufsize', `${target * 3}k`);
+      if (tenBit) args.push('-pix_fmt', 'p010le');
+    } else {
+      args.push('-c:v', 'libx265', '-preset', 'medium', '-crf', '22',
+        '-maxrate', `${Math.round(target * 1.5)}k`, '-bufsize', `${target * 3}k`);
+      if (tenBit) args.push('-pix_fmt', 'yuv420p10le');
+    }
+    // hvc1 (not hev1) is what Apple's players require; harmless everywhere else.
+    args.push('-tag:v', 'hvc1');
+    // A keyframe every 2s keeps seeking snappy in every one of our players.
+    args.push('-g', '48', '-keyint_min', '48');
+    // Carry HDR signalling through verbatim rather than letting ffmpeg guess.
+    if (info.hdr) args.push('-color_primaries', 'bt2020', '-color_trc', 'smpte2084', '-colorspace', 'bt2020nc');
+  } else {
+    args.push('-c:v', 'copy');
+  }
+
+  args.push('-c:a', 'copy', '-c:s', 'copy', '-c:t', 'copy');
+  if (doAudio) {
+    for (const a of plan.bloatedAudio) {
+      const ch = Math.min(a.ch || 2, AUDIO_MAX_CH); // E-AC-3 tops out at 5.1
+      args.push(`-c:a:${a.i}`, AUDIO_CODEC, `-b:a:${a.i}`, `${ch > 2 ? AUDIO_KBPS : 320}k`);
+      if ((a.ch || 0) > AUDIO_MAX_CH) args.push(`-ac:a:${a.i}`, String(AUDIO_MAX_CH));
+    }
+  }
+  args.push(dst);
+  return args;
+}
+
+// ---- Verification gate -------------------------------------------------
+
+// The output has to prove itself before the source is allowed to die. Probing
+// alone isn't enough: a truncated file often probes fine, so we also force a
+// real decode at the start, middle, and end and require all three to be clean.
+async function verify(src, dst, info, plan) {
+  let sStat, dStat;
+  try { sStat = fs.statSync(src); dStat = fs.statSync(dst); }
+  catch (e) { return 'output missing: ' + e.message; }
+
+  if (dStat.size < 1 << 20) return 'output is implausibly small';
+  if (dStat.size >= sStat.size) return `output is not smaller (${(dStat.size / 2 ** 30).toFixed(2)} GB vs ${(sStat.size / 2 ** 30).toFixed(2)} GB)`;
+
+  const out = await probeOne(dst);
+  if (out.error) return 'output failed to probe: ' + out.error;
+
+  const srcDur = Number(info.duration) || 0;
+  if (srcDur > 0) {
+    const drift = Math.abs((out.duration || 0) - srcDur);
+    if (drift > Math.max(1.5, srcDur * 0.005)) return `duration drifted ${drift.toFixed(1)}s (${srcDur.toFixed(0)}s → ${(out.duration || 0).toFixed(0)}s)`;
+  }
+  if (!out.vcodec) return 'output has no video stream';
+  if (!out.acodec) return 'output has no audio stream';
+
+  // Copied video must come through pixel-identical in shape.
+  if (plan.profile === 'audio' && (out.width !== info.width || out.height !== info.height)) {
+    return `copied video changed size (${info.width}x${info.height} → ${out.width}x${out.height})`;
+  }
+  if (plan.profile !== 'audio' && (!out.height || out.height !== info.height)) {
+    return `re-encoded video height changed (${info.height} → ${out.height})`;
+  }
+
+  // Decode spot-checks. `-xerror` turns any decode warning into a failure, so a
+  // corrupt or truncated stream can't slip through as "probed fine."
+  const dur = out.duration || srcDur || 0;
+  const points = dur > 60 ? [1, Math.max(2, dur / 2), Math.max(3, dur - 15)] : [0];
+  for (const t of points) {
+    const err = await runFfmpeg(['-hide_banner', '-nostdin', '-xerror', '-v', 'error',
+      '-ss', String(Math.floor(t)), '-i', dst, '-t', '4', '-map', '0:v:0?', '-map', '0:a:0?',
+      '-f', 'null', '-'], { timeout: 180000 });
+    if (err) return `decode check failed at ${Math.floor(t)}s: ${err}`;
+  }
+  return null; // clean
+}
+
+// ---- Job queue ---------------------------------------------------------
+
+export const worker = { running: false, current: null, stop: false, log: [] };
+
+function note(msg) {
+  worker.log.push({ ts: Date.now(), msg });
+  if (worker.log.length > 300) worker.log.splice(0, worker.log.length - 300);
+}
+
+export function enqueue(db, kind, fileId, { allow4kVideo = false, allowHdrVideo = false } = {}) {
+  ensureSchema(db);
+  const info = db.prepare('SELECT * FROM media_info WHERE file_kind = ? AND file_id = ?').get(kind, fileId);
+  if (!info) return { error: 'file has not been probed yet' };
+  const plan = planFor(info, { allow4kVideo, allowHdrVideo });
+  if (plan.profile === 'none') return { error: 'nothing to optimize: ' + plan.reason };
+  const existing = db.prepare("SELECT id FROM optimize_jobs WHERE file_kind = ? AND file_id = ? AND state IN ('queued','running')").get(kind, fileId);
+  if (existing) return { error: 'already queued', jobId: existing.id };
+  const r = db.prepare(`INSERT INTO optimize_jobs (file_kind, file_id, profile, state, path, old_size, old_summary, reason, created_at)
+                        VALUES (?,?,?,'queued',?,?,?,?,?)`)
+    .run(kind, fileId, plan.profile, info.path, info.size, summarize(info), plan.reason, Date.now());
+  return { jobId: Number(r.lastInsertRowid), profile: plan.profile, reason: plan.reason };
+}
+
+function summarize(info) {
+  const mb = Number(info.size) ? (Number(info.size) / 2 ** 30).toFixed(2) + ' GB' : '?';
+  return `${info.vcodec || '?'} ${info.height || '?'}p ${info.vkbps ? Math.round(info.vkbps / 100) / 10 + ' Mbps' : ''} · ${info.acodec || '?'} ${info.achannels || '?'}ch · ${mb}`.replace(/\s+/g, ' ');
+}
+
+// Run queued jobs one at a time. One at a time is deliberate: the box also has
+// to serve playback, and two concurrent encodes on a 1050 Ti help nobody.
+export async function runQueue(db, { log = () => {}, allow4kVideo = false, allowHdrVideo = false } = {}) {
+  if (worker.running) return;
+  worker.running = true; worker.stop = false;
+  try {
+    for (;;) {
+      if (worker.stop) { note('Stopped by request.'); break; }
+      const job = db.prepare("SELECT * FROM optimize_jobs WHERE state = 'queued' ORDER BY id LIMIT 1").get();
+      if (!job) break;
+      await runJob(db, job, { log, allow4kVideo, allowHdrVideo });
+    }
+  } finally {
+    worker.running = false; worker.current = null;
+  }
+}
+
+async function runJob(db, job, { log, allow4kVideo, allowHdrVideo }) {
+  const setState = (state, fields = {}) => {
+    const cols = Object.keys(fields);
+    db.prepare(`UPDATE optimize_jobs SET state = ?${cols.map((c) => `, ${c} = ?`).join('')} WHERE id = ?`)
+      .run(state, ...cols.map((c) => fields[c]), job.id);
+  };
+
+  const info = db.prepare('SELECT * FROM media_info WHERE file_kind = ? AND file_id = ?').get(job.file_kind, job.file_id);
+  if (!info) return setState('failed', { error: 'file no longer in the library', ended_at: Date.now() });
+
+  const src = info.path;
+  if (!fs.existsSync(src)) return setState('failed', { error: 'source file is gone', ended_at: Date.now() });
+
+  // A file whose bytes changed since the probe must be re-probed before we act
+  // on stale conclusions.
+  try {
+    const st = fs.statSync(src);
+    if (st.size !== Number(info.size) || Math.round(st.mtimeMs) !== Number(info.mtime)) {
+      return setState('failed', { error: 'file changed since it was probed — rescan and requeue', ended_at: Date.now() });
+    }
+  } catch (e) { return setState('failed', { error: 'cannot stat source: ' + e.message, ended_at: Date.now() }); }
+
+  const plan = planFor(info, { allow4kVideo, allowHdrVideo });
+  if (plan.profile === 'none') return setState('skipped', { error: 'no longer worth optimizing: ' + plan.reason, ended_at: Date.now() });
+
+  const need = Number(info.size) * FREE_SPACE_FACTOR;
+  if (freeSpaceOn(src) < need) {
+    return setState('failed', { error: `not enough free space on ${src.slice(0, 2)} (needs ~${(need / 2 ** 30).toFixed(1)} GB to work safely)`, ended_at: Date.now() });
+  }
+
+  // Same directory as the source so the final move is a rename on one volume,
+  // never a multi-gigabyte cross-drive copy.
+  const ext = plan.profile === 'audio' ? path.extname(src) : '.mkv';
+  const dst = src.replace(/\.[^.]+$/, '') + TMP_SUFFIX + ext;
+  fs.rmSync(dst, { force: true });
+
+  worker.current = { jobId: job.id, path: src, profile: plan.profile, pct: 0, startedAt: Date.now() };
+  setState('running', { started_at: Date.now(), profile: plan.profile, reason: plan.reason });
+  note(`Optimizing ${path.basename(src)} — ${plan.reason}`);
+  log(`Optimizer: ${path.basename(src)} — ${plan.reason}`);
+
+  const totalDur = Number(info.duration) || 0;
+  const args = buildArgs(info, plan, src, dst);
+  const err = await runFfmpeg(args, {
+    onLine: (line) => {
+      const m = /time=(\d+):(\d+):(\d+\.?\d*)/.exec(line);
+      if (m && totalDur > 0) {
+        const t = (+m[1]) * 3600 + (+m[2]) * 60 + (+m[3]);
+        const pct = Math.min(99, Math.round(t / totalDur * 100));
+        if (worker.current) worker.current.pct = pct;
+        db.prepare('UPDATE optimize_jobs SET pct = ? WHERE id = ?').run(pct, job.id);
+      }
+    }
+  });
+
+  if (worker.stop) {
+    fs.rmSync(dst, { force: true });
+    return setState('queued', { error: null, pct: 0 });
+  }
+  if (err) {
+    fs.rmSync(dst, { force: true });
+    note(`FAILED ${path.basename(src)}: ${err}`);
+    return setState('failed', { error: err, ended_at: Date.now() });
+  }
+
+  // ---- The gate. Nothing is deleted until this returns clean. ----
+  setState('verifying', {});
+  const bad = await verify(src, dst, info, plan);
+  if (bad) {
+    fs.rmSync(dst, { force: true });
+    note(`REJECTED ${path.basename(src)}: ${bad} — original untouched.`);
+    log(`Optimizer rejected ${path.basename(src)}: ${bad}`);
+    return setState('failed', { error: 'verification failed: ' + bad, ended_at: Date.now() });
+  }
+
+  // Verified. Replace the source, keeping its exact name where possible so
+  // nothing else in the library (subtitles, artwork, .nfo) loses its partner.
+  const newSize = fs.statSync(dst).size;
+  const finalPath = path.extname(src).toLowerCase() === ext.toLowerCase()
+    ? src
+    : src.replace(/\.[^.]+$/, '') + ext;
+  try {
+    fs.rmSync(src, { force: true });
+    fs.renameSync(dst, finalPath);
+  } catch (e) {
+    // The source is gone but the rename failed — surface it loudly; the encoded
+    // file is still on disk under its temp name and can be renamed by hand.
+    note(`CRITICAL: ${path.basename(src)} replaced but rename failed: ${e.message}. Encoded file is at ${dst}`);
+    return setState('failed', { error: `replace failed after delete — encoded file is at ${dst}: ${e.message}`, ended_at: Date.now() });
+  }
+
+  // Repoint the library at the new file.
+  const table = job.file_kind === 'episode' ? 'episode_files' : 'movie_files';
+  db.prepare(`UPDATE ${table} SET path = ?, filename = ?, size = ? WHERE id = ?`)
+    .run(finalPath, path.basename(finalPath), newSize, job.file_id);
+
+  const fresh = await probeOne(finalPath);
+  if (!fresh.error) {
+    db.prepare(`UPDATE media_info SET path=?, size=?, mtime=?, duration=?, container=?, vcodec=?, width=?, height=?,
+                 pix_fmt=?, hdr=?, vkbps=?, acodec=?, achannels=?, akbps=?, audio_json=?, probed_at=?, probe_error=NULL
+                 WHERE file_kind=? AND file_id=?`)
+      .run(finalPath, fresh.size, fresh.mtime, fresh.duration, fresh.container, fresh.vcodec, fresh.width,
+        fresh.height, fresh.pix_fmt, fresh.hdr, fresh.vkbps, fresh.acodec, fresh.achannels, fresh.akbps,
+        fresh.audio_json, Date.now(), job.file_kind, job.file_id);
+  }
+
+  const saved = Number(info.size) - newSize;
+  note(`Done ${path.basename(finalPath)} — saved ${(saved / 2 ** 30).toFixed(2)} GB`);
+  log(`Optimizer: ${path.basename(finalPath)} saved ${(saved / 2 ** 30).toFixed(2)} GB`);
+  setState('done', {
+    new_size: newSize, path: finalPath, pct: 100, ended_at: Date.now(),
+    new_summary: fresh.error ? null : summarize({ ...fresh, size: newSize })
+  });
+}
+
+// ---- Status ------------------------------------------------------------
+
+export function status(db) {
+  ensureSchema(db);
+  const counts = {};
+  for (const r of db.prepare('SELECT state, COUNT(*) n FROM optimize_jobs GROUP BY state').all()) counts[r.state] = r.n;
+  const reclaimed = db.prepare("SELECT COALESCE(SUM(old_size - new_size), 0) AS b FROM optimize_jobs WHERE state = 'done'").get().b;
+  const probed = db.prepare('SELECT COUNT(*) n FROM media_info WHERE probe_error IS NULL').get().n;
+  return {
+    scan: { running: scan.running, done: scan.done, total: scan.total, error: scan.error },
+    worker: { running: worker.running, current: worker.current },
+    jobs: counts,
+    reclaimedBytes: Number(reclaimed) || 0,
+    probed,
+    scannable: scannableFiles(db).length,
+    nvenc: nvencAvailable(),
+    log: worker.log.slice(-60)
+  };
+}

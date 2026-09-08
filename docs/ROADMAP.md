@@ -7,6 +7,50 @@ Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed
 
 ---
 
+## 💾 Storage optimizer (NEW — built 2026-09-07, not yet run on real media)
+`src/optimize.js` + **Settings ▸ Storage** (admin). Finds files carrying more bits than they
+need and rewrites them smaller, then repoints the library row at the new file.
+
+**The rule that shapes the whole design: it works per FILE, never per title.** Multiple
+versions of the same movie are deliberate on this server, so nothing in the optimizer ever
+compares versions or proposes dropping "a duplicate" — it only asks whether one file is
+carrying more bits than it needs.
+
+**Safety model — verify before delete.** Every job encodes to a sidecar temp file, then has to
+pass a gate before the source dies: output smaller, probes clean, duration within 0.5%, video
+stream present at the same resolution (identical if the video was copied), audio present, and
+a real `-xerror` decode at start/middle/end. Fail any of it and the temp file is deleted and
+the original is left exactly where it was. Free space is checked first (needs 1.15× the source
+on the same drive, so the promotion is a rename, not a cross-drive copy).
+
+**Profiles:**
+- `audio` — video **stream-copied**, only bloated audio re-encoded (TrueHD/DTS/PCM/FLAC →
+  E-AC-3 640k 5.1, 320k stereo). No video quality loss, minutes per file, no HDR/DV risk. Also
+  fixes Apple TV, which can't copy TrueHD and crashes ffmpeg decoding it.
+- `video` — HEVC to a per-tier bitrate target (4K 16 / 1080p 5 / 720p 2.5 / SD 1.2 Mbps), only
+  when the source is >1.5× over. Two vetoes, both ON by default: **4K** (`optimizeAllow4kVideo`)
+  and **HDR at any resolution** (`optimizeAllowHdrVideo`) — a re-encode drops Dolby Vision. A
+  vetoed file still gets its audio fixed.
+- `both`, and `none` for anything already efficient.
+
+**⚠️ Tier is judged on WIDTH, not height** — a 2.39:1 scope film is 3840x1606 (4K) or 1920x800
+(1080p). Keying on height called the entire 4K scope collection "1080p" and queued it for the
+aggressive re-encoder that 4K is explicitly protected from. Don't reintroduce that.
+
+**🔜 Next:**
+1. **NVENC is dead on this box** — bundled ffmpeg 8.1.2 wants nvenc API 13.1 (driver 610+); the
+   GTX 1050 Ti is on 560.94 / API 12.2, and Pascal will never get 610. So `h264_nvenc` AND
+   `hevc_nvenc` both fail their probe and *live transcoding already silently runs on libx264
+   CPU*. Fix is an ffmpeg **7.x** build (nvenc API 12.x) via `config.ffmpegPath`. Until then the
+   `video` profile falls back to libx265 CPU (~0.3-0.6× realtime) and isn't viable at scale —
+   the `audio` profile is unaffected because it copies video.
+2. Run the probe scan over the full library and act on the `audio` profile first.
+3. The external USB drives drop out intermittently (F: was invisible to some tooling mid-session
+   and fully healthy minutes later). `mountedRoots()` uses the same statSync+isDirectory test as
+   `pruneMissing`, so an absent drive is skipped, never "optimized" or pruned. Keep it that way.
+
+---
+
 ## 🚀 Shared access — a friend's TV over the internet (CURRENT FOCUS)
 Turning the single-user LAN server into a **multi-user, internet-reachable** service with a
 native-feeling app on a friend's **TCL 58S470G (Google TV / Android TV)**.

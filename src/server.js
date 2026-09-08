@@ -17,6 +17,7 @@ import { detectWhisper, status as whisperStatus, installWhisper, generate as gen
 import { translateVttFile } from './translate.js';
 import { radarrEnabled, sonarrEnabled, testConn, radarrSearch, radarrAdd, sonarrSearch, sonarrAdd, getProfiles, radarrQueue, sonarrQueue } from './arr.js';
 import { runIntroDetection, introForFile, fpcalcReady } from './introdetect.js';
+import * as optimize from './optimize.js';
 import { hashPassword, verifyPassword, newToken, tokenFromReq, cookieHeader } from './auth.js';
 import { PROVIDERS, providersList, refreshCatalog, catalogFor, catalogProviderMap, titleProviders, watchLink, status as streamingStatus } from './streaming.js';
 import { registerHls } from './hls.js';
@@ -880,6 +881,120 @@ app.post('/api/intro/run', async (req, reply) => {
   if (introJobRunning) return { ok: true, started: false, running: true };
   runIntroJob(req.query.force === '1');
   return { ok: true, started: true };
+});
+
+// ---- Storage optimizer (admin) ----
+// Finds files carrying more bits than they need and rewrites them smaller. It
+// works strictly per FILE, never per title: multiple versions of the same movie
+// are deliberate here, so nothing below ever proposes dropping "a duplicate."
+// Every rewrite has to pass a verification gate before the original is deleted
+// — see src/optimize.js.
+
+// Two vetoes on re-encoding VIDEO, both on unless config turns them off. 4K:
+// this box's Pascal NVENC is a real quality step down there. HDR (at any
+// resolution): a re-encode drops Dolby Vision. Neither stops a vetoed file
+// from having its bloated TrueHD/DTS audio fixed, which is the bigger win.
+const optPolicy = () => ({
+  allow4kVideo: config.optimizeAllow4kVideo === true,
+  allowHdrVideo: config.optimizeAllowHdrVideo === true
+});
+
+app.get('/api/optimize/status', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  return optimize.status(db);
+});
+
+// Probe pass: fills the media_info cache (codec/bitrate/audio per file). Files
+// on an unmounted drive are skipped, never treated as missing.
+app.post('/api/optimize/scan', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  if (optimize.scan.running) return { ok: true, started: false, running: true };
+  optimize.runProbeScan(db, { log: (x) => console.log(x), limit: Number(req.query.limit) || 0 })
+    .catch((e) => console.error('Optimizer scan error:', e.message));
+  return { ok: true, started: true };
+});
+
+// The plan: what would be changed, and what it would save. Read-only.
+app.get('/api/optimize/plan', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const { items, totals } = optimize.analyze(db, optPolicy());
+  const limit = Math.min(Number(req.query.limit) || 200, 2000);
+  const profile = req.query.profile;
+  const filtered = profile ? items.filter((i) => i.profile === profile) : items;
+  return { totals, count: filtered.length, items: filtered.slice(0, limit) };
+});
+
+// Queue one file, or `POST {profile, limit}` to queue the top N of a profile.
+app.post('/api/optimize/queue', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const b = req.body || {};
+  if (b.kind && b.fileId != null) {
+    const r = optimize.enqueue(db, b.kind === 'episode' ? 'episode' : 'movie', Number(b.fileId), optPolicy());
+    if (r.error && !r.jobId) return reply.code(400).send(r);
+    return r;
+  }
+  const { items } = optimize.analyze(db, optPolicy());
+  const pool = b.profile ? items.filter((i) => i.profile === b.profile) : items;
+  const n = Math.min(Number(b.limit) || 25, 500);
+  const queued = [];
+  for (const it of pool.slice(0, n)) {
+    const r = optimize.enqueue(db, it.kind, it.fileId, optPolicy());
+    if (r.jobId && !r.error) queued.push(r.jobId);
+  }
+  return { ok: true, queued: queued.length };
+});
+
+// Start working the queue (one job at a time — the box also serves playback).
+app.post('/api/optimize/start', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  if (optimize.worker.running) return { ok: true, started: false, running: true };
+  optimize.runQueue(db, { log: (x) => console.log(x), ...optPolicy() })
+    .catch((e) => console.error('Optimizer queue error:', e.message));
+  return { ok: true, started: true };
+});
+
+// Ask the worker to stop. The job in flight finishes its encode and is put back
+// in the queue — a half-written temp file is deleted, never promoted.
+app.post('/api/optimize/stop', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  optimize.worker.stop = true;
+  return { ok: true };
+});
+
+app.get('/api/optimize/jobs', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const state = req.query.state;
+  const rows = state
+    ? db.prepare('SELECT * FROM optimize_jobs WHERE state = ? ORDER BY id DESC LIMIT 300').all(state)
+    : db.prepare('SELECT * FROM optimize_jobs ORDER BY id DESC LIMIT 300').all();
+  return { jobs: rows };
+});
+
+// Drop queued/failed jobs from the list. Never touches media.
+app.delete('/api/optimize/jobs', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const state = req.query.state;
+  if (state === 'queued') db.prepare("DELETE FROM optimize_jobs WHERE state = 'queued'").run();
+  else if (state === 'failed') db.prepare("DELETE FROM optimize_jobs WHERE state IN ('failed','skipped')").run();
+  else return reply.code(400).send({ error: 'state must be queued or failed' });
+  return { ok: true };
+});
+
+// Libraries whose drive isn't mounted right now. Surfaced so a disconnected
+// disk reads as "unplugged", not as thousands of missing files — and so the
+// optimizer's totals can say plainly what they're not counting.
+app.get('/api/optimize/offline', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const mounted = optimize.mountedRoots();
+  const out = [];
+  for (const lib of db.prepare('SELECT id, path, type, name FROM libraries').all()) {
+    const root = String(lib.path).slice(0, 2).toUpperCase();
+    if (mounted.has(root)) continue;
+    const table = lib.type === 'tv' ? 'episode_files' : 'movie_files';
+    const r = db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(size),0) b FROM ${table} WHERE path LIKE ?`).get(root + '%');
+    out.push({ library: lib.path, type: lib.type, files: r.n, bytes: Number(r.b) || 0 });
+  }
+  return { offline: out };
 });
 
 // Admin: permanently delete one media file from the server — the physical file

@@ -1438,3 +1438,43 @@ body.tv-nav .card:not(.tv-focus) { opacity: 1; }
 /* No backdrop: collapse the band rather than leave a tall empty rectangle. */
 .dp-splash.no-art { padding-top: 0; }
 .dp-splash.no-art::before { content: none; }
+
+/* ---- Storage optimizer (Settings ▸ Storage, admin) ---- */
+/* Reuses .diag-card / .diag-f from Diagnostics; these are the two card slots
+   that panel didn't already have, plus the rows and the progress bar. */
+.diag-card-v { font-size: 22px; font-weight: 800; line-height: 1.1; margin-bottom: 4px; background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; font-variant-numeric: tabular-nums; }
+.diag-card-k { font-size: 10.5px; font-weight: 800; letter-spacing: 0.6px; text-transform: uppercase; color: var(--muted); }
+
+/* A disconnected drive is news, not an error — loud enough to notice, calm
+   enough not to imply the files were lost. */
+.opt-offline { border: 1px solid var(--accent); background: rgba(222, 95, 16, 0.1); padding: 11px 13px; margin-bottom: 14px; font-size: 13px; line-height: 1.5; }
+
+.opt-drives { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.opt-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+.opt-progress { margin-bottom: 14px; font-size: 12px; }
+.opt-bar { height: 5px; background: var(--panel-2); border: 1px solid var(--line); margin-bottom: 5px; overflow: hidden; }
+.opt-bar > span { display: block; height: 100%; background: var(--grad); transition: width 0.4s linear; }
+.opt-queue-btn { margin-left: auto; }
+
+.opt-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; max-height: 460px; overflow-y: auto; }
+.opt-row { display: flex; gap: 12px; align-items: flex-start; justify-content: space-between; background: var(--panel-2); border: 1px solid var(--line); padding: 9px 11px; }
+.opt-row-main { min-width: 0; flex: 1 1 auto; }
+.opt-title { font-weight: 700; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.opt-file { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The "why" line is the whole point of the panel — it should read as a
+   sentence, not a debug string. */
+.opt-why { font-size: 11.5px; color: #cfd6e4; margin-top: 3px; }
+.opt-row-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 5px; flex: 0 0 auto; }
+.opt-badges { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+.opt-badge { font-size: 10px; font-weight: 700; letter-spacing: 0.3px; text-transform: uppercase; color: var(--muted); border: 1px solid var(--line); padding: 1px 5px; }
+.opt-size { font-size: 12px; font-variant-numeric: tabular-nums; }
+.opt-save { color: var(--accent); font-weight: 800; }
+
+.opt-log { font-size: 11px; color: var(--muted); max-height: 160px; overflow-y: auto; }
+.opt-log-line { padding: 2px 0; border-top: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+
+@media (max-width: 620px) {
+  .opt-row { flex-direction: column; }
+  .opt-row-meta { align-items: flex-start; width: 100%; }
+  .opt-badges { justify-content: flex-start; }
+}
