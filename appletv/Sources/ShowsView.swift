@@ -35,6 +35,7 @@ struct ShowsView: View {
 
 struct ShowDetailView: View {
     @EnvironmentObject var store: Store
+    @EnvironmentObject var downloads: DownloadManager
     @Environment(\.pal) private var pal
     let showId: Int
 
@@ -44,6 +45,9 @@ struct ShowDetailView: View {
     @State private var selectedSeason = 0
     @State private var session: PlaySession?
     @State private var subJobText: String?
+    @State private var showOnlineSubs = false
+    @State private var onlineSubs: [Store.OSResult] = []
+    @State private var subsForFile: Int?
     @State private var episodePage: Episode?     // selected episode → its description scene
 
     private var flatEpisodes: [Episode] { detail?.seasons.flatMap { $0.episodes } ?? [] }
@@ -79,7 +83,13 @@ struct ShowDetailView: View {
             EpisodeDetailView(showTitle: detail?.title ?? "", episode: ep,
                               fallbackArt: seasonPoster(ep.season ?? selectedSeason) ?? detail?.backdrop)
                 .environmentObject(store)
+                .environmentObject(downloads)
                 .environment(\.pal, pal)
+        }
+        .confirmationDialog("Subtitles", isPresented: $showOnlineSubs, titleVisibility: .visible) {
+            ForEach(onlineSubs) { r in
+                Button(r.label) { getSub(r) }
+            }
         }
     }
 
@@ -224,7 +234,7 @@ struct ShowDetailView: View {
         return cells
     }
 
-    // Long-press menu on an episode: versions, restart, AI subtitles.
+    // Long-press menu on an episode: versions, restart, subtitles.
     @ViewBuilder
     private func episodeMenu(_ ep: Episode) -> some View {
         if ep.files.count > 1 {
@@ -236,9 +246,32 @@ struct ShowDetailView: View {
         }
         Button("Play From Beginning", systemImage: "gobackward") { play(ep, at: 0) }
         if let f = ep.bestFile {
+            Button("Find Subtitles Online", systemImage: "text.magnifyingglass") {
+                findSubs(fileId: f.id)
+            }
             Button("Generate AI Subtitles", systemImage: "captions.bubble") {
                 generateAISubs(fileId: f.id)
             }
+        }
+    }
+
+    // Same search the episode page offers, from the long-press menu.
+    private func findSubs(fileId: Int) {
+        subJobText = "Searching OpenSubtitles\u{2026}"
+        subsForFile = fileId
+        Task {
+            let (rows, err) = await store.searchOpenSubtitles(kind: "episode", fileId: fileId)
+            onlineSubs = rows
+            if rows.isEmpty { subJobText = err ?? "No subtitles found." }
+            else { subJobText = nil; showOnlineSubs = true }
+        }
+    }
+    private func getSub(_ r: Store.OSResult) {
+        guard let fileId = subsForFile else { return }
+        subJobText = "Downloading subtitle\u{2026}"
+        Task {
+            let err = await store.downloadOpenSubtitle(kind: "episode", fileId: fileId, osFileId: r.fileId)
+            subJobText = err ?? "Subtitle added \u{2014} pick it from the player's subtitle menu."
         }
     }
 
@@ -380,6 +413,7 @@ struct EpisodeRouteView: View {
 
 struct EpisodeDetailView: View {
     @EnvironmentObject var store: Store
+    @EnvironmentObject var downloads: DownloadManager
     @Environment(\.pal) private var pal
     @Environment(\.dismiss) private var dismiss
     let showTitle: String
@@ -393,6 +427,8 @@ struct EpisodeDetailView: View {
     @State private var selectedFile: MovieFile?
     @State private var subJobText: String?
     @State private var showVersions = false
+    @State private var showOnlineSubs = false          // OpenSubtitles result picker
+    @State private var onlineSubs: [Store.OSResult] = []
 
     private var art: String? { extra?.still ?? episode.still ?? fallbackArt }
 
@@ -414,6 +450,15 @@ struct EpisodeDetailView: View {
 
     private func play(at position: Double) {
         guard let f = selectedFile ?? episode.bestFile else { return }
+        // A downloaded copy plays from disk, so it works with the server down.
+        if let local = downloads.localURL(kind: "episode", fileId: f.id) {
+            session = PlaySession(url: local, ref: .episode(episode.id), duration: episode.duration,
+                                  startAt: position, title: showTitle,
+                                  subtitle: "\(episode.tag) \u{00B7} \(episode.displayTitle)",
+                                  fileId: f.id,
+                                  localSubs: downloads.localSubs(kind: "episode", fileId: f.id))
+            return
+        }
         Task {
             guard let url = await store.resolvePlaybackURL(kind: "episode", file: f) else { return }
             session = PlaySession(url: url, ref: .episode(episode.id), duration: episode.duration,
@@ -480,6 +525,14 @@ struct EpisodeDetailView: View {
                                 Task { await store.setEpisodeWatched(episode.id, watched) }
                             }
                             if let f = selectedFile ?? episode.bestFile {
+                                ControlRow(name: "Download",
+                                           value: downloads.statusText(kind: "episode", fileId: f.id),
+                                           on: downloads.localURL(kind: "episode", fileId: f.id) != nil) {
+                                    toggleDownload(file: f)
+                                }
+                                ControlRow(name: "Find subtitles", value: "OpenSubtitles") {
+                                    findSubs(fileId: f.id)
+                                }
                                 ControlRow(name: "Generate subtitles", value: "Whisper") {
                                     generateAISubs(fileId: f.id)
                                 }
@@ -492,6 +545,11 @@ struct EpisodeDetailView: View {
                     .confirmationDialog("Version", isPresented: $showVersions, titleVisibility: .visible) {
                         ForEach(episode.files) { f in
                             Button(f.quality ?? f.filename ?? "Version") { selectedFile = f }
+                        }
+                    }
+                    .confirmationDialog("Subtitles", isPresented: $showOnlineSubs, titleVisibility: .visible) {
+                        ForEach(onlineSubs) { r in
+                            Button(r.label) { getSub(r, fileId: (selectedFile ?? episode.bestFile)?.id) }
                         }
                     }
                 }
@@ -512,6 +570,40 @@ struct EpisodeDetailView: View {
             cells.append(.init(key: "Video", value: q, mono: false))
         }
         return cells
+    }
+
+    // Start it, cancel it while it runs, delete it when it's down, fetch it
+    // again if tvOS reclaimed the file.
+    private func toggleDownload(file f: MovieFile) {
+        let id = "episode-\(f.id)"
+        if let it = downloads.item(kind: "episode", fileId: f.id), !downloads.evicted.contains(id) {
+            switch it.state {
+            case .downloading, .queued: downloads.cancel(id); return
+            case .ready:                downloads.remove(id); return
+            case .failed:               break
+            }
+        }
+        downloads.start(kind: "episode", file: f, refId: episode.id,
+                        title: showTitle, subtitle: "\(episode.tag) \u{00B7} \(episode.displayTitle)",
+                        poster: art, duration: episode.duration, store: store)
+    }
+
+    private func findSubs(fileId: Int) {
+        subJobText = "Searching OpenSubtitles\u{2026}"
+        Task {
+            let (rows, err) = await store.searchOpenSubtitles(kind: "episode", fileId: fileId)
+            onlineSubs = rows
+            if rows.isEmpty { subJobText = err ?? "No subtitles found." }
+            else { subJobText = nil; showOnlineSubs = true }
+        }
+    }
+    private func getSub(_ r: Store.OSResult, fileId: Int?) {
+        guard let fileId else { return }
+        subJobText = "Downloading subtitle\u{2026}"
+        Task {
+            let err = await store.downloadOpenSubtitle(kind: "episode", fileId: fileId, osFileId: r.fileId)
+            subJobText = err ?? "Subtitle added \u{2014} pick it from the player's subtitle menu."
+        }
     }
 
     private func generateAISubs(fileId: Int) {

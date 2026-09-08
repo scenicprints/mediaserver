@@ -12,6 +12,7 @@ import SwiftUI
 
 struct MovieDetailView: View {
     @EnvironmentObject var store: Store
+    @EnvironmentObject var downloads: DownloadManager
     @Environment(\.pal) private var pal
     @Binding var route: [Route]
     let movieId: Int
@@ -26,6 +27,8 @@ struct MovieDetailView: View {
     @State private var preroll: URL?
     @State private var subJobText: String?     // AI subtitle job progress line
     @State private var showVersions = false
+    @State private var showOnlineSubs = false          // OpenSubtitles result picker
+    @State private var onlineSubs: [Store.OSResult] = []
     @State private var info: Store.MediaInfo?  // probed facts for the spec grid
 
     var body: some View {
@@ -46,6 +49,13 @@ struct MovieDetailView: View {
 
     private func play(at position: Double) {
         guard let d = detail, let f = selectedFile ?? d.bestFile else { return }
+        // A downloaded copy plays from disk, so it works with the server down.
+        if let local = downloads.localURL(kind: "movie", fileId: f.id) {
+            session = PlaySession(url: local, ref: .movie(movieId), duration: d.duration,
+                                  startAt: position, title: d.title, fileId: f.id,
+                                  localSubs: downloads.localSubs(kind: "movie", fileId: f.id))
+            return
+        }
         Task {
             guard let url = await store.resolvePlaybackURL(kind: "movie", file: f) else { return }
             // Pre-roll plays ONLY when starting from the beginning (matches the
@@ -161,6 +171,14 @@ struct MovieDetailView: View {
                     Task { await store.setWatched(movieId, watched); await store.loadHome() }
                 }
                 if let f = selectedFile ?? d.bestFile {
+                    ControlRow(name: "Download",
+                               value: downloads.statusText(kind: "movie", fileId: f.id),
+                               on: downloads.localURL(kind: "movie", fileId: f.id) != nil) {
+                        toggleDownload(d, file: f)
+                    }
+                    ControlRow(name: "Find subtitles", value: "OpenSubtitles") {
+                        findSubs(fileId: f.id)
+                    }
                     ControlRow(name: "Generate subtitles", value: "Whisper") {
                         generateAISubs(fileId: f.id)
                     }
@@ -173,6 +191,11 @@ struct MovieDetailView: View {
         .confirmationDialog("Version", isPresented: $showVersions, titleVisibility: .visible) {
             ForEach(d.files) { f in
                 Button(versionLabel(f)) { selectedFile = f }
+            }
+        }
+        .confirmationDialog("Subtitles", isPresented: $showOnlineSubs, titleVisibility: .visible) {
+            ForEach(onlineSubs) { r in
+                Button(r.label) { getSub(r, fileId: (selectedFile ?? d.bestFile)?.id) }
             }
         }
     }
@@ -206,6 +229,45 @@ struct MovieDetailView: View {
         var out: [(String, String)] = (extra?.directors ?? []).map { ($0, "Director") }
         out += (extra?.cast ?? []).prefix(8).map { ($0.name, $0.character ?? "") }
         return Array(out.prefix(10))
+    }
+
+    // One control does the whole life cycle: start it, cancel it while it runs,
+    // delete it when it's down, fetch it again if tvOS reclaimed the file.
+    private func toggleDownload(_ d: MovieDetail, file f: MovieFile) {
+        let id = "movie-\(f.id)"
+        if let it = downloads.item(kind: "movie", fileId: f.id), !downloads.evicted.contains(id) {
+            switch it.state {
+            case .downloading, .queued: downloads.cancel(id)
+            case .ready:                downloads.remove(id)
+            case .failed:               startDownload(d, file: f)
+            }
+            return
+        }
+        startDownload(d, file: f)
+    }
+    private func startDownload(_ d: MovieDetail, file f: MovieFile) {
+        downloads.start(kind: "movie", file: f, refId: movieId, title: d.title,
+                        poster: d.poster, duration: d.duration, store: store)
+    }
+
+    // Search OpenSubtitles for this file and offer the hits. Downloading one
+    // saves it beside the video, so it's in the player's subtitle menu next play.
+    private func findSubs(fileId: Int) {
+        subJobText = "Searching OpenSubtitles\u{2026}"
+        Task {
+            let (rows, err) = await store.searchOpenSubtitles(kind: "movie", fileId: fileId)
+            onlineSubs = rows
+            if rows.isEmpty { subJobText = err ?? "No subtitles found." }
+            else { subJobText = nil; showOnlineSubs = true }
+        }
+    }
+    private func getSub(_ r: Store.OSResult, fileId: Int?) {
+        guard let fileId else { return }
+        subJobText = "Downloading subtitle\u{2026}"
+        Task {
+            let err = await store.downloadOpenSubtitle(kind: "movie", fileId: fileId, osFileId: r.fileId)
+            subJobText = err ?? "Subtitle added \u{2014} pick it from the player's subtitle menu."
+        }
     }
 
     // Kick off (or resume polling) a Whisper subtitle job for this file. When it

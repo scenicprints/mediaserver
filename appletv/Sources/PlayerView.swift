@@ -17,6 +17,9 @@ struct UpNextItem: Identifiable, Hashable {
 }
 
 struct PlaySession: Identifiable {
+    // A subtitle file already on this Apple TV, alongside a downloaded film.
+    struct LocalSub: Hashable { let label: String; let url: URL }
+
     let id = UUID()
     let url: URL
     let ref: Store.PlayRef
@@ -28,6 +31,9 @@ struct PlaySession: Identifiable {
     var preroll: URL? = nil
     var live: Bool = false
     var upNext: [UpNextItem] = []
+    // Set when playing a downloaded copy: the server is not necessarily
+    // reachable, so the subtitle menu is built from these files instead.
+    var localSubs: [LocalSub] = []
 }
 
 extension PlayerView {
@@ -36,7 +42,7 @@ extension PlayerView {
                   duration: session.duration, store: store, prerollURL: session.preroll,
                   title: session.title, subtitle: session.subtitle,
                   fileId: session.fileId, live: session.live, upNext: session.upNext,
-                  useAVPlayer: useAVPlayer)
+                  localSubs: session.localSubs, useAVPlayer: useAVPlayer)
     }
 }
 
@@ -78,6 +84,7 @@ struct PlayerView: View {
     var fileId: Int? = nil
     var live: Bool = false
     var upNext: [UpNextItem] = []
+    var localSubs: [PlaySession.LocalSub] = []
     // HDR path: drive playback with AVPlayer (the only tvOS pipeline that outputs
     // real HDR + lights the badge) instead of libVLC, but keep this exact same
     // web-styled HUD on top. SDR stays on VLCKit (direct-plays every codec).
@@ -120,7 +127,8 @@ struct PlayerView: View {
             m.bind(store: store)
             m.start(url: url, startAt: startAt, ref: ref, kind: kind, duration: duration,
                     title: title, subtitle: subtitle, fileId: fileId, live: live,
-                    preroll: prerollURL, upNext: upNext, useAVPlayer: useAVPlayer)
+                    preroll: prerollURL, upNext: upNext, localSubs: localSubs,
+                    useAVPlayer: useAVPlayer)
             focus = .catcher
         }
         .onDisappear { m.teardown() }
@@ -131,6 +139,7 @@ struct PlayerView: View {
         .onChange(of: m.menu) { menu in
             if menu == .settings { focus = .menuRow(0) }
             else if menu == .aiPicker { focus = .menuRow(0) }
+            else if menu == .osSearch { focus = .menuRow(0) }
         }
         .onChange(of: m.showSkipIntro) { on in if on { focus = .skipIntro } else if focus == .skipIntro { focus = m.controlsVisible ? .play : .catcher } }
         .onChange(of: m.showUpNext) { on in if on { focus = .upNext } else if focus == .upNext { focus = m.controlsVisible ? .play : .catcher } }
@@ -302,18 +311,31 @@ struct PlayerView: View {
                     Text("Runs on the server. Great when there are no subtitles, or to translate.")
                         .font(.callout).foregroundStyle(VP.muted).padding(10)
                     menuButton("‹ Back", 3, false) { m.menu = .settings; focus = .menuRow(0) }
+                case .osSearch:
+                    menuHeader("Find subtitles online")
+                    if let st = m.osStatus {
+                        Text(st).font(.callout).foregroundStyle(VP.muted)
+                            .padding(.horizontal, 10).padding(.bottom, 4)
+                    }
+                    ForEach(Array(m.osResults.enumerated()), id: \.offset) { i, r in
+                        menuButton(r.label, i, false) { m.fetchOnlineSub(r) }
+                    }
+                    menuButton("\u{2039} Back", m.osResults.count, false) { m.menu = .settings; focus = .menuRow(0) }
                 default:
                     menuHeader("Subtitles")
                     // AI first — it's what you see the moment you open captions.
                     menuButton(m.aiActive ? "✨  Generating subtitles… \(m.aiPct)%" : "✨  Generate with AI…", 0, false) {
                         if m.aiActive { m.menu = .aiProgress } else { m.menu = .aiPicker; focus = .menuRow(0) }
                     }
+                    menuButton("\u{1F50E}  Find subtitles online\u{2026}", 1, false) {
+                        m.menu = .osSearch; focus = .menuRow(0); m.searchOnlineSubs()
+                    }
                     ForEach(Array(m.subtitleRows.enumerated()), id: \.offset) { i, row in
-                        menuButton(row.label, i + 1, row.id == m.currentSubtitle) { m.selectSubtitle(row.id); m.closeMenu(); focus = .catcher }
+                        menuButton(row.label, i + 2, row.id == m.currentSubtitle) { m.selectSubtitle(row.id); m.closeMenu(); focus = .catcher }
                     }
                     if m.audioOptions.count > 1 {
                         menuHeader("Audio")
-                        let base = m.subtitleRows.count + 1
+                        let base = m.subtitleRows.count + 2
                         ForEach(Array(m.audioOptions.enumerated()), id: \.offset) { j, a in
                             menuButton(a.label, base + j, a.id == m.currentAudio) { m.selectAudio(a.id); m.closeMenu(); focus = .catcher }
                         }
@@ -419,7 +441,7 @@ struct AVPlayerLayerHost: UIViewRepresentable {
 @MainActor
 final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     struct TrackOption: Identifiable, Hashable { let id: Int; let label: String }
-    enum Menu { case none, settings, aiPicker, aiProgress }
+    enum Menu { case none, settings, aiPicker, aiProgress, osSearch }
 
     private let player = VLCMediaPlayer()
 
@@ -451,6 +473,15 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     @Published var currentSubtitle = -1
     @Published var currentAudio = 0
     @Published var aiPhase: String?
+    // Sidecars that came down with a downloaded film. When these exist the
+    // subtitle menu is built from them, because the server may be unreachable.
+    var localSubs: [PlaySession.LocalSub] = []
+    // Playing from disk: never block the open on a server request.
+    private(set) var offline = false
+    // OpenSubtitles search results for the current file, and the line above them.
+    @Published var osResults: [Store.OSResult] = []
+    @Published var osStatus: String?
+    @Published var osBusy = false
     @Published var aiPct = 0
     @Published var aiActive = false
 
@@ -497,7 +528,10 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
 
     func start(url: URL, startAt: Double, ref: Store.PlayRef, kind: String, duration: Double?,
                title: String, subtitle: String?, fileId: Int?, live: Bool,
-               preroll: URL?, upNext: [UpNextItem], useAVPlayer: Bool = false) {
+               preroll: URL?, upNext: [UpNextItem], localSubs: [PlaySession.LocalSub] = [],
+               useAVPlayer: Bool = false) {
+        self.localSubs = localSubs
+        self.offline = url.isFileURL
         self.ref = ref; self.kind = kind; self.fileId = fileId; self.mediaTitle = title
         self.mediaSubtitle = subtitle; self.declaredDuration = duration; self.live = live
         self.startAt = startAt; self.prerollURL = preroll; self.upNext = upNext
@@ -858,13 +892,22 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
 
     private func loadMeta() async {
         guard let store, let fileId else { return }
-        if kind == "episode", let pm = await store.playMeta(kind: kind, fileId: fileId) { introRange = pm.intro }
+        // Skip the server round-trip when playing a downloaded copy.
+        if kind == "episode", !offline, let pm = await store.playMeta(kind: kind, fileId: fileId) { introRange = pm.intro }
         // AV builds its subtitle list from the HLS media-selection groups
         // (refreshAVTracks); the VLC path pulls the server track list.
         if !useAV { await reloadSubtitles() }
     }
 
     private func reloadSubtitles() async {
+        // An offline copy lists what came down with it; ids index localSubs.
+        // It never asks the server, which may not be reachable at all.
+        if offline {
+            var opts: [TrackOption] = [TrackOption(id: -1, label: "Off")]
+            for (i, l) in localSubs.enumerated() { opts.append(TrackOption(id: i, label: l.label)) }
+            subtitleOptions = opts
+            return
+        }
         guard let store, let fileId else { return }
         let tracks = await store.subtitleTracks(kind: kind, fileId: fileId)
         var opts: [TrackOption] = [TrackOption(id: -1, label: "Off")]
@@ -921,6 +964,12 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
             return
         }
         if id == -1 { player.currentVideoSubTitleIndex = -1; return }
+        if offline {
+            if id < localSubs.count {
+                _ = player.addPlaybackSlave(localSubs[id].url, type: .subtitle, enforce: true)
+            }
+            return
+        }
         if let store, let fileId, let url = store.subtitleURL(kind: kind, fileId: fileId, idx: id) {
             _ = player.addPlaybackSlave(url, type: .subtitle, enforce: true)
         }
@@ -940,6 +989,38 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         for (i, n) in zip(idxs, names) where i.int32Value >= 0 { opts.append(TrackOption(id: Int(i.int32Value), label: n)) }
         audioOptions = opts
         currentAudio = Int(player.currentAudioTrackIndex)
+    }
+
+    // MARK: OpenSubtitles — search the catalogue and pull one down mid-play
+    // The server writes the chosen file next to the video as a sidecar, so the
+    // new track then arrives through the ordinary track list.
+    func searchOnlineSubs() {
+        guard let store, let fileId else { return }
+        osBusy = true; osResults = []; osStatus = "Searching\u{2026}"
+        Task {
+            let (rows, err) = await store.searchOpenSubtitles(kind: kind, fileId: fileId)
+            osBusy = false
+            osResults = rows
+            osStatus = err ?? "Pick one to download."
+        }
+    }
+    func fetchOnlineSub(_ r: Store.OSResult) {
+        guard let store, let fileId, !osBusy else { return }
+        osBusy = true; osStatus = "Downloading\u{2026}"
+        Task {
+            let err = await store.downloadOpenSubtitle(kind: kind, fileId: fileId, osFileId: r.fileId)
+            osBusy = false
+            if let err { osStatus = err; return }
+            // Same landing as a finished AI job: refresh the tracks and switch
+            // the new one on, so the subtitles are simply there.
+            if useAV {
+                avReloadForNewSubtitles(selectNewest: true)
+            } else {
+                await reloadSubtitles()
+                if let newest = subtitleOptions.last(where: { $0.id >= 0 }) { selectSubtitle(newest.id) }
+            }
+            menu = .none
+        }
     }
 
     // MARK: AI subtitles (Whisper) — the flow the web player has

@@ -31,8 +31,10 @@ struct PlayerRouter: View {
 
     @MainActor
     private func decide() async {
-        // Live TV and any file with no id stay on the universal VLCKit path.
-        guard let fid = session.fileId, !session.live else { decision = .vlc; return }
+        // Live TV, a file with no id, and anything already on disk stay on the
+        // universal VLCKit path. A downloaded copy must not wait on /api/mediainfo:
+        // the server may be unreachable, and that probe would hang the open.
+        guard let fid = session.fileId, !session.live, !session.url.isFileURL else { decision = .vlc; return }
         let hdr = (await store.mediaInfo(kind: session.kindString, fileId: fid))?.isHDR == true
         decision = hdr ? .hdr : .vlc
     }

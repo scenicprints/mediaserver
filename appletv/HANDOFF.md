@@ -149,6 +149,45 @@ auto-memory for the list.** The headline pieces of that batch:
   movie overview moved BELOW the splash, Live TV guide times floored to
   :00/:30 + wider labels + custom row focus (no white platter).
 
+## Offline downloads + OpenSubtitles (2026-09-07) — UNVERIFIED, never compiled
+Both were meant to be in v1 and neither was in the app. Written in one batch;
+there is no Mac here, so **nothing below has been through a compiler** — the
+preview workflow is the first check.
+
+**OpenSubtitles in the app.** The server has had `/api/subtitles/search` and
+`/api/subtitles/download` all along (`src/opensubtitles.js`); only the web UI
+ever called them, and tvOS Settings just stored the account. Now
+`Store.searchOpenSubtitles` / `downloadOpenSubtitle` drive: a **Find subtitles**
+row on movie + episode detail, **Find Subtitles Online** in the episode
+long-press menu, and **Find subtitles online…** in the player's subtitle menu
+(new `Menu.osSearch`; picking a result downloads it, re-reads the track list and
+switches the new track on, exactly where a finished AI job lands). Adding that
+row shifted the subtitle/audio row indices in the player menu by one — that is
+what the `+ 2` is.
+
+**Downloads.** `Sources/Downloads.swift`. Apple gives a tvOS app 500 KB of
+persistent storage and no Documents directory, so a download is a CACHE and the
+UI says so: the manifest is JSON in UserDefaults (survives), the media sits in
+`Library/Caches/Downloads` (tvOS may reclaim it), and `reconcile()` on every
+foreground marks anything gone as **Removed by tvOS**, one press to re-fetch.
+The owner was told this and chose the Apple TV anyway rather than an iOS target.
+- Background `URLSession` against the ordinary `/api/stream/<fileId>` — no new
+  server route. `taskDescription` carries `"<id>
+<filename>"` because
+  `didFinishDownloadingTo` runs off the main actor and must move the temp file
+  **before it returns**.
+- Subtitle sidecars are pulled after the film lands (`.vtt` per track) and
+  `PlaySession.localSubs` feeds the player's menu offline.
+- A file URL short-circuits `PlayerRouter.decide()` and `PlayerModel.offline`
+  skips `playMeta` / the server track list, or an offline Apple TV would sit on
+  a black screen for the 60s URLSession timeout.
+- **Downloads** pane in Settings: per-title state, total size, remove, remove all.
+
+**Test on-device:** a real download start→finish→play with the server then
+unplugged; that the Removed-by-tvOS path actually fires (fill the box or leave it
+a while); background continuation while browsing; and the subtitle search on a
+title the library has no captions for.
+
 **Still open / verify next:**
 1. **On-device re-test of everything above** — especially mkv seek/scrub (HLS
    v2 is unverified on real hardware), Skip Intro appearing, CC picker showing

@@ -13,11 +13,19 @@ import SwiftUI
 @main
 struct MediaServerApp: App {
     @StateObject private var store = Store()
+    @StateObject private var downloads = DownloadManager.shared
+    @Environment(\.scenePhase) private var phase
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(store)
+                .environmentObject(downloads)
+                .onAppear { downloads.attach(store) }
+                // tvOS can reclaim a downloaded file at any point while the app
+                // is away, so the list is re-checked against the disk each time
+                // we come back rather than trusted from the manifest.
+                .onChange(of: phase) { p in if p == .active { downloads.reconcile() } }
                 .environment(\.pal, Theme.palette(store.finish))
                 // System surfaces (keyboard, alerts) follow the chosen finish.
                 .preferredColorScheme(store.finish == .white ? .light : .dark)

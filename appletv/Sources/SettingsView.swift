@@ -11,10 +11,11 @@ import SwiftUI
 
 struct SettingsView: View {
     @EnvironmentObject var store: Store
+    @EnvironmentObject var dl: DownloadManager
     @Environment(\.pal) private var pal
 
     enum Section: String, CaseIterable, Identifiable {
-        case display, audio, subtitles, streaming, server, account
+        case display, audio, subtitles, downloads, streaming, server, account
         case requests, accounts, engines, nowPlaying, about
         var id: String { rawValue }
         var label: String {
@@ -22,6 +23,7 @@ struct SettingsView: View {
             case .display: return "Display"
             case .audio: return "Audio"
             case .subtitles: return "Subtitles"
+            case .downloads: return "Downloads"
             case .streaming: return "Streaming"
             case .server: return "Server"
             case .account: return "Account"
@@ -121,6 +123,7 @@ struct SettingsView: View {
         case .display:    display
         case .audio:      audio
         case .subtitles:  subtitles
+        case .downloads:  downloadsPane
         case .streaming:  streaming
         case .server:     server
         case .account:    account
@@ -168,7 +171,7 @@ struct SettingsView: View {
 
     private var subtitles: some View {
         VStack(alignment: .leading, spacing: 0) {
-            note("Add your free OpenSubtitles account to enable subtitle search.")
+            note("Add your free OpenSubtitles account, then Find subtitles appears on any movie or episode and in the player's subtitle menu.")
             MField(prompt: "API key", text: $osKey).padding(.top, 24)
             MField(prompt: "Username", text: $osUser).padding(.top, 18)
             MField(prompt: "Password", text: $osPass, secure: true).padding(.top, 18)
@@ -176,6 +179,39 @@ struct SettingsView: View {
                 Task { showToast(await store.saveOpenSubtitles(apiKey: osKey, username: osUser, password: osPass)) }
             }
             .padding(.top, 26)
+        }
+    }
+
+    private var downloadsPane: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if dl.items.isEmpty {
+                note("Nothing is downloaded. Open a film or an episode and press Download to keep a copy on this Apple TV.")
+            } else {
+                rows {
+                    ForEach(dl.items) { it in
+                        ControlRow(name: rowName(it), value: rowValue(it),
+                                   on: it.state == .ready && !dl.evicted.contains(it.id)) {
+                            dl.remove(it.id)
+                        }
+                    }
+                    ControlRow(name: "Remove all", value: dl.totalText) { dl.removeAll() }
+                }
+                .padding(.bottom, 4)
+            }
+            note("Apple gives a tvOS app no permanent storage, so a downloaded film lives in the system cache and tvOS can reclaim it whenever it wants the space. Anything it has taken back reads \"Removed by tvOS\" here and on the title's own page, where one press fetches it again. Pressing a row here deletes that download.")
+        }
+    }
+    private func rowName(_ it: DownloadItem) -> String {
+        guard let sub = it.subtitle, !sub.isEmpty else { return it.title }
+        return "\(it.title) \u{00B7} \(sub)"
+    }
+    private func rowValue(_ it: DownloadItem) -> String {
+        if dl.evicted.contains(it.id) { return "Removed by tvOS" }
+        switch it.state {
+        case .queued:      return "Queued"
+        case .downloading: return it.expected > 0 ? "\(it.pct)%" : "Downloading"
+        case .ready:       return it.sizeText
+        case .failed:      return it.error ?? "Failed"
         }
     }
 

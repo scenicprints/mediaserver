@@ -812,6 +812,53 @@ final class Store: ObservableObject {
         await get("api/subtitles/generate?kind=\(kind)&fileId=\(fileId)&target=orig", as: SubJob.self)
     }
 
+    // ---- OpenSubtitles search + download ----
+    // The account lives in Settings (per user, so quotas don't mix). The server
+    // does the talking: /search returns candidates, /download writes the chosen
+    // one next to the video as a .en.srt sidecar, after which it shows up in
+    // subtitleTracks() like any other track.
+    struct OSResult: Decodable, Hashable, Identifiable {
+        let fileId: Int
+        let release: String?
+        let language: String?
+        let downloads: Int?
+        let hearingImpaired: Bool?
+
+        var id: Int { fileId }
+        // "EN · Blade.Runner.2049.2160p · 4,821 · HI" — language first because
+        // that's what you're scanning the list for.
+        var label: String {
+            var parts = [(language ?? "en").uppercased(), release ?? "Subtitle"]
+            if let d = downloads, d > 0 {
+                parts.append(NumberFormatter.localizedString(from: NSNumber(value: d), number: .decimal))
+            }
+            if hearingImpaired == true { parts.append("HI") }
+            return parts.joined(separator: " · ")
+        }
+    }
+
+    func searchOpenSubtitles(kind: String, fileId: Int) async -> (results: [OSResult], error: String?) {
+        if previewMode { return ([], nil) }
+        do {
+            let (data, http) = try await request("api/subtitles/search?kind=\(kind)&fileId=\(fileId)")
+            guard (200..<300).contains(http.statusCode) else {
+                return ([], serverError(data) ?? "Subtitle search failed (\(http.statusCode)).")
+            }
+            let rows = (try? decoder().decode([OSResult].self, from: data)) ?? []
+            return (rows, rows.isEmpty ? "No subtitles found for this title." : nil)
+        } catch { return ([], "Couldn't reach the server.") }
+    }
+
+    // nil on success; otherwise the message to show.
+    func downloadOpenSubtitle(kind: String, fileId: Int, osFileId: Int) async -> String? {
+        do {
+            let (data, http) = try await request("api/subtitles/download", method: "POST",
+                body: ["kind": kind, "fileId": fileId, "file_id": osFileId])
+            if (200..<300).contains(http.statusCode) { return nil }
+            return serverError(data) ?? "Download failed (\(http.statusCode))."
+        } catch { return "Couldn't reach the server." }
+    }
+
     // Mark a Continue Watching entry watched (the web card's ✓) and drop it.
     func markContinueWatched(_ item: ContinueItem) async {
         let path = item.kind == "movie" ? "api/movies/\(item.id)/watched" : "api/episodes/\(item.id)/watched"
