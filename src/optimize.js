@@ -63,6 +63,59 @@ const FREE_SPACE_FACTOR = 1.15;
 
 const TMP_SUFFIX = '.marquee-opt.tmp';
 
+// ---- Never overwrite a file that already exists ------------------------
+//
+// `fs.renameSync` on Windows maps to MoveFileEx with MOVEFILE_REPLACE_EXISTING:
+// if something is already at the destination it is silently destroyed. On
+// 2026-09-08 that behaviour, in a migration that computed destination paths
+// without checking them, overwrote 55 4K remuxes with the smaller web-rip of the
+// same film — 1.29 TiB, unrecoverable from disk. The library deliberately holds
+// several versions of a title under the same filename in different folders, so
+// collisions are not an edge case here; they are the normal shape of the data.
+//
+// Every move in this codebase goes through these two functions. They refuse
+// rather than replace. A refusal is a bug report; an overwrite is a bereavement.
+export function moveNoClobber(src, dst) {
+  if (fs.existsSync(dst)) {
+    throw new Error(`destination already exists, refusing to overwrite: ${dst}`);
+  }
+  fs.mkdirSync(path.dirname(dst), { recursive: true });
+  fs.renameSync(src, dst);
+}
+
+export function copyNoClobber(src, dst) {
+  if (fs.existsSync(dst)) {
+    throw new Error(`destination already exists, refusing to overwrite: ${dst}`);
+  }
+  fs.mkdirSync(path.dirname(dst), { recursive: true });
+  const tmp = dst + '.partial';
+  fs.rmSync(tmp, { force: true });
+  fs.copyFileSync(src, tmp);
+  const a = fs.statSync(src).size, b = fs.statSync(tmp).size;
+  if (a !== b) { fs.rmSync(tmp, { force: true }); throw new Error(`size mismatch after copy: ${a} vs ${b}`); }
+  fs.renameSync(tmp, dst);
+  return b;
+}
+
+// Pre-flight for any batch of moves: find every collision BEFORE a single file
+// is touched — against files already on disk, and against other moves in the
+// same batch that would land on the same path. Acting first and validating
+// afterwards is what turned a bug into data loss.
+export function findCollisions(moves) {
+  const problems = [];
+  const claimed = new Map();
+  for (const m of moves) {
+    const to = String(m.to);
+    const from = String(m.from);
+    if (to.toLowerCase() === from.toLowerCase()) continue;
+    if (fs.existsSync(to)) problems.push({ ...m, why: 'a different file is already at the destination' });
+    const prior = claimed.get(to.toLowerCase());
+    if (prior) problems.push({ ...m, why: `two files in this batch both want this path (also ${prior})` });
+    claimed.set(to.toLowerCase(), from);
+  }
+  return problems;
+}
+
 // Resolution tier, judged on WIDTH.
 //
 // Height is a trap: a 2.39:1 scope film is letterboxed in the *encode*, not with

@@ -26,16 +26,53 @@
 //   node tools/organize-library.mjs --go      do it
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 
-const { tierOf } = await import(pathToFileURL('C:\\mediaserver\\src\\optimize.js').href);
+const { tierOf, moveNoClobber, copyNoClobber, findCollisions } =
+  await import(pathToFileURL('C:\\mediaserver\\src\\optimize.js').href);
 
 const GO = process.argv.includes('--go');
+// Folder fixes only: same-drive renames, no cross-drive copying. This is the
+// safe half when a drive is suspect — a rename is a metadata operation that
+// moves no data at all.
+const FOLDERS_ONLY = process.argv.includes('--folders-only');
 const SEP = path.sep;
 const TiB = (b) => (Number(b) / 2 ** 40).toFixed(2) + ' TiB';
 const GiB = (b) => (Number(b) / 2 ** 30).toFixed(1) + ' GB';
 const log = (m) => console.log(`[${new Date().toISOString().slice(11, 19)}] ${m}`);
+
+// ---- I/O health guard ----
+// E: has been logging "the IO operation had to be retried" (event 153) under
+// sustained load, and that is what wedged this machine twice. So rather than
+// trust a drive to behave, watch Windows' own view of it: take a baseline, then
+// re-check as we go and stop the moment new disk errors appear. Aborting a
+// migration half-done is safe — every individual step is — whereas pushing a
+// sick drive ends with the whole box unresponsive and a hard reset.
+const RUN_START = new Date();
+function diskErrorsSinceStart() {
+  const ps = `$t=[datetime]::Parse('${RUN_START.toISOString()}').ToLocalTime();` +
+    `$e=Get-WinEvent -FilterHashtable @{LogName='System';ID=153,51,50,129,157;StartTime=$t} -ErrorAction SilentlyContinue;` +
+    `if($e){$e.Count}else{0}`;
+  try {
+    const out = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps],
+      { windowsHide: true, encoding: 'utf8', timeout: 30000 });
+    return parseInt(String(out).trim(), 10) || 0;
+  } catch { return -1; }   // can't tell — treat as no news
+}
+let aborted = false;
+function ioHealthy(where) {
+  const n = diskErrorsSinceStart();
+  if (n > 0) {
+    log('');
+    log(`!! ${n} new disk I/O error(s) logged by Windows since this run began (${where}).`);
+    log('!! Stopping now. Nothing is half-written — each step completes or does not start.');
+    aborted = true;
+    return false;
+  }
+  return true;
+}
 
 const db = new DatabaseSync('C:\\mediaserver\\data\\library.db');
 
@@ -168,6 +205,33 @@ if (copies.length && freeOn(light) < copyBytes * 1.05) {
   process.exit(1);
 }
 
+// ---- Collision pre-flight: check EVERY destination before touching anything ----
+//
+// This library holds several versions of the same film under the same filename
+// in different folders — that is deliberate. So a computed destination path
+// frequently already exists, and moving onto it destroys the other version.
+// Every planned move is checked here, before the first byte moves.
+const allMoves = plan.flatMap((p) => p.moves);
+const collisions = findCollisions(allMoves);
+log('');
+if (collisions.length) {
+  log(`!! ${collisions.length} of ${allMoves.length} planned moves would land on a path that is already occupied.`);
+  log('!! These are almost certainly your deliberate alternate versions of the same title.');
+  log('!! NOTHING will run. Each of these needs a decision, not a default.');
+  for (const c of collisions.slice(0, 25)) {
+    let exist = '';
+    try { exist = ` (occupied by ${(fs.statSync(c.to).size / 2 ** 30).toFixed(1)} GB)`; } catch {}
+    log(`     ${c.from}`);
+    log(`       -> ${c.to}${exist}  — ${c.why}`);
+  }
+  if (collisions.length > 25) log(`     … and ${collisions.length - 25} more`);
+  log('');
+  log('Resolve by renaming one version (e.g. "Title (2019) - remux.mkv") so the two');
+  log('can coexist, then re-run. This script will not choose which copy survives.');
+  process.exit(1);
+}
+log(`collision pre-flight: clear — all ${allMoves.length} destinations are free.`);
+
 if (!GO) { log(''); log('dry run — nothing changed. Re-run with --go.'); process.exit(0); }
 
 // ---- Execute ----
@@ -180,21 +244,15 @@ function sidecarsOf(filePath) {
       .map((f) => path.join(dir, f));
   } catch { return []; }
 }
-function copyVerified(src, dst) {
-  fs.mkdirSync(path.dirname(dst), { recursive: true });
-  const tmp = dst + '.partial';
-  fs.rmSync(tmp, { force: true });
-  fs.copyFileSync(src, tmp);
-  const a = fs.statSync(src).size, b = fs.statSync(tmp).size;
-  if (a !== b) { fs.rmSync(tmp, { force: true }); throw new Error(`size mismatch ${a} vs ${b}`); }
-  fs.renameSync(tmp, dst);
-}
+// Both of these refuse to overwrite; see moveNoClobber/copyNoClobber.
+const copyVerified = copyNoClobber;
 function copyTreeVerified(srcDir, dstDir) {
   fs.mkdirSync(dstDir, { recursive: true });
   for (const ent of fs.readdirSync(srcDir, { withFileTypes: true })) {
     const s = path.join(srcDir, ent.name), d = path.join(dstDir, ent.name);
     if (ent.isDirectory()) copyTreeVerified(s, d);
-    else if (!(fs.existsSync(d) && fs.statSync(d).size === fs.statSync(s).size)) copyVerified(s, d);
+    else if (fs.existsSync(d) && fs.statSync(d).size === fs.statSync(s).size) continue; // already there from a resumed run
+    else copyNoClobber(s, d);
   }
 }
 
@@ -204,6 +262,7 @@ function apply(p) {
     const srcDir = p.srcRoot, dstDir = p.destRoot;
     if (fs.existsSync(srcDir)) {
       if (p.sameDrive) {
+        if (fs.existsSync(dstDir)) throw new Error(`destination folder already exists, refusing: ${dstDir}`);
         fs.mkdirSync(path.dirname(dstDir), { recursive: true });
         fs.renameSync(srcDir, dstDir);                     // same volume: instant
       } else {
@@ -217,13 +276,14 @@ function apply(p) {
       const sides = fs.existsSync(m.from) ? sidecarsOf(m.from) : [];
       if (fs.existsSync(m.from)) {
         if (p.sameDrive) {
-          fs.mkdirSync(path.dirname(m.to), { recursive: true });
-          fs.renameSync(m.from, m.to);
+          moveNoClobber(m.from, m.to);                     // refuses if occupied
           for (const s of sides) {
-            try { fs.renameSync(s, path.join(path.dirname(m.to), path.basename(s))); } catch {}
+            const sd = path.join(path.dirname(m.to), path.basename(s));
+            try { moveNoClobber(s, sd); } catch (e) { log(`  sidecar ${path.basename(s)}: ${e.message}`); }
           }
         } else {
-          if (!(fs.existsSync(m.to) && fs.statSync(m.to).size === fs.statSync(m.from).size)) copyVerified(m.from, m.to);
+          if (fs.existsSync(m.to) && fs.statSync(m.to).size === fs.statSync(m.from).size) { /* resumed run */ }
+          else copyVerified(m.from, m.to);
           for (const s of sides) {
             const sd = path.join(path.dirname(m.to), path.basename(s));
             try { if (!fs.existsSync(sd)) copyVerified(s, sd); } catch (e) { log(`  sidecar ${path.basename(s)}: ${e.message}`); }
@@ -258,22 +318,34 @@ function apply(p) {
 log('');
 log('=== phase 1: folder fixes (renames, instant) ===');
 let ok = 0, bad = 0;
-for (const p of renames) {
+for (const [n, p] of renames.entries()) {
+  if (n % 40 === 0 && !ioHealthy('phase 1')) break;
   try { apply(p); ok++; } catch (e) { bad++; log(`FAILED ${p.key}: ${e.message}`); }
 }
 log(`phase 1 done: ${ok} moved, ${bad} failed`);
 
-log('');
-log(`=== phase 2: drive balance (${TiB(copyBytes)} to copy) ===`);
 let cOk = 0, cBad = 0, doneBytes = 0;
-const t0 = Date.now();
-for (const [n, p] of copies.entries()) {
-  try {
-    apply(p); cOk++; doneBytes += p.size;
-    const rate = doneBytes / ((Date.now() - t0) / 1000) / 2 ** 20;
-    const eta = rate > 0 ? ((copyBytes - doneBytes) / 2 ** 20 / rate / 60).toFixed(0) : '?';
-    log(`[${n + 1}/${copies.length}] ${(doneBytes / copyBytes * 100).toFixed(1)}%  ${GiB(p.size)}  ${path.basename(p.moves[0].to)}  (${rate.toFixed(0)} MB/s, ~${eta} min left)`);
-  } catch (e) { cBad++; log(`FAILED ${p.key}: ${e.message}`); }
+if (aborted) {
+  log('');
+  log('phase 2 skipped — disk errors appeared during phase 1.');
+} else if (FOLDERS_ONLY) {
+  log('');
+  log(`phase 2 skipped (--folders-only): ${copies.length} cross-drive moves, ${TiB(copyBytes)}, left for later.`);
+} else {
+  log('');
+  log(`=== phase 2: drive balance (${TiB(copyBytes)} to copy) ===`);
+  const t0 = Date.now();
+  for (const [n, p] of copies.entries()) {
+    // Check between every title. A cross-drive copy is the load that actually
+    // hurts, so this is where the guard earns its keep.
+    if (!ioHealthy('phase 2')) break;
+    try {
+      apply(p); cOk++; doneBytes += p.size;
+      const rate = doneBytes / ((Date.now() - t0) / 1000) / 2 ** 20;
+      const eta = rate > 0 ? ((copyBytes - doneBytes) / 2 ** 20 / rate / 60).toFixed(0) : '?';
+      log(`[${n + 1}/${copies.length}] ${(doneBytes / copyBytes * 100).toFixed(1)}%  ${GiB(p.size)}  ${path.basename(p.moves[0].to)}  (${rate.toFixed(0)} MB/s, ~${eta} min left)`);
+    } catch (e) { cBad++; log(`FAILED ${p.key}: ${e.message}`); }
+  }
 }
 
 log('');
