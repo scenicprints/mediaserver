@@ -53,14 +53,23 @@ extension PlayerView {
 
 // Player colors — the web player's tokens (style.css :root).
 private enum VP {
-    static let accent = Color(hex: 0x6c5cff)
-    static let accent2 = Color(hex: 0x37c2ff)
-    static let grad = LinearGradient(colors: [Color(hex: 0x6c5cff), Color(hex: 0x37c2ff)],
-                                     startPoint: .topLeading, endPoint: .bottomTrailing)
-    static let panel = Color(hex: 0x10121a)
-    static let panel2 = Color(hex: 0x1e222d)
-    static let line = Color(hex: 0x262b38)
-    static let muted = Color(hex: 0x9aa1b4)
+    // ALWAYS the dark finish, whatever the app's finish setting is: this chrome
+    // sits on top of a picture, and light chrome over a picture is unreadable.
+    static let pal = Theme.black
+
+    // One signal colour, used for state and never for decoration — the whole
+    // point of the Braun palette. There is no second accent any more: the old
+    // purple/cyan pair existed only to make a gradient, and Braun does not
+    // gradient. Both names survive so every call site keeps reading sensibly.
+    static let accent = pal.signal
+    static let accent2 = pal.signal
+    static let grad = pal.signal
+
+    static let panel = pal.panel
+    static let panel2 = pal.panel2
+    static let line = pal.rule
+    static let muted = pal.ink2
+    static let ink = pal.ink
 }
 
 enum PlayerFocus: Hashable {
@@ -197,19 +206,17 @@ struct PlayerView: View {
                 if !live { scrubber }
                 HStack(spacing: 18) {
                     if live {
-                        // VP.accent2, the same treatment the player already
-                        // gives its own "UP NEXT" label. The web flags LIVE in
-                        // Braun orange, but nothing else on THIS screen is orange
-                        // — the player deliberately runs on its own palette.
-                        HStack(spacing: 9) {
-                            Circle().fill(VP.accent2).frame(width: 13, height: 13)
-                            Text("LIVE").font(.system(size: 24, weight: .heavy)).tracking(2)
-                                .foregroundStyle(VP.accent2)
+                        // Signal orange: state, never decoration — which is
+                        // exactly what LIVE is.
+                        HStack(spacing: 10) {
+                            Rectangle().fill(VP.accent).frame(width: 12, height: 12)
+                            Text("LIVE").font(.system(size: 22, weight: .semibold)).tracking(3)
+                                .foregroundStyle(VP.accent)
                         }
                     } else {
                         Text("\(m.clock(m.position)) / \(m.clock(m.duration))")
-                            .font(.system(size: 28, weight: .medium).monospacedDigit())
-                            .foregroundStyle(Color(hex: 0xeef1f8))
+                            .font(.system(size: 26, weight: .medium).monospacedDigit()).tracking(1.5)
+                            .foregroundStyle(VP.ink)
                     }
                     Spacer()
                     utilityButton(.cc) { Text("CC").font(.system(size: 26, weight: .heavy)) } action: { m.menu = .settings }
@@ -230,19 +237,18 @@ struct PlayerView: View {
         let f = (focus == .scrubber)
         return GeometryReader { geo in
             ZStack(alignment: .leading) {
-                Capsule().fill(.white.opacity(0.22)).frame(height: f ? 12 : 8)
-                Capsule().fill(.white.opacity(0.38))
-                    .frame(width: geo.size.width * m.buffered, height: f ? 12 : 8)
-                Capsule().fill(VP.grad)
-                    .frame(width: max(0, geo.size.width * m.progress), height: f ? 12 : 8)
+                Rectangle().fill(.white.opacity(0.18)).frame(height: f ? 10 : 6)
+                Rectangle().fill(.white.opacity(0.30))
+                    .frame(width: geo.size.width * m.buffered, height: f ? 10 : 6)
+                Rectangle().fill(VP.grad)
+                    .frame(width: max(0, geo.size.width * m.progress), height: f ? 10 : 6)
                 // thumb
-                Circle().fill(.white)
-                    .frame(width: f ? 22 : 0, height: f ? 22 : 0)
-                    .shadow(color: VP.accent.opacity(f ? 0.9 : 0), radius: 14)
-                    .offset(x: max(0, geo.size.width * m.progress - (f ? 11 : 0)))
+                // A cursor, not a jewel: a hairline bar the width of a switch.
+                Rectangle().fill(VP.ink)
+                    .frame(width: f ? 4 : 0, height: f ? 30 : 0)
+                    .offset(x: max(0, geo.size.width * m.progress - (f ? 2 : 0)))
             }
             .frame(height: 40)
-            .shadow(color: VP.accent.opacity(f ? 0.55 : 0), radius: 16)
         }
         .frame(height: 40)
         .focusable(m.controlsVisible && m.menu == .none)
@@ -263,10 +269,11 @@ struct PlayerView: View {
                 Spacer()
                 if m.showSkipIntro {
                     Button { m.skipIntro() } label: {
-                        Label("Skip Intro", systemImage: "forward.end.fill").font(.system(size: 26, weight: .bold))
+                        Label("SKIP INTRO", systemImage: "forward.end.fill")
+                            .font(.system(size: 22, weight: .semibold)).tracking(2.4)
                             .padding(.horizontal, 26).padding(.vertical, 16)
-                            .background(Color(hex: 0x14161e).opacity(0.9), in: RoundedRectangle(cornerRadius: 10))
-                            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.white.opacity(0.35), lineWidth: 1))
+                            .background(VP.pal.paper.opacity(0.82), in: Rectangle())
+                            .overlay(Rectangle().strokeBorder(VP.line, lineWidth: 1))
                     }
                     .buttonStyle(.plain).foregroundStyle(.white)
                     .focused($focus, equals: .skipIntro)
@@ -274,10 +281,11 @@ struct PlayerView: View {
                 }
                 if m.showSkipCredits {
                     Button { m.skipCredits() } label: {
-                        Label("Skip Credits", systemImage: "forward.end.fill").font(.system(size: 26, weight: .bold))
+                        Label("SKIP CREDITS", systemImage: "forward.end.fill")
+                            .font(.system(size: 22, weight: .semibold)).tracking(2.4)
                             .padding(.horizontal, 26).padding(.vertical, 16)
-                            .background(Color(hex: 0x14161e).opacity(0.9), in: RoundedRectangle(cornerRadius: 10))
-                            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.white.opacity(0.35), lineWidth: 1))
+                            .background(VP.pal.paper.opacity(0.82), in: Rectangle())
+                            .overlay(Rectangle().strokeBorder(VP.line, lineWidth: 1))
                     }
                     .buttonStyle(.plain).foregroundStyle(.white)
                     .focused($focus, equals: .skipCredits)
@@ -294,10 +302,10 @@ struct PlayerView: View {
                             .focused($focus, equals: .upNext)
                             .focusRing(focus == .upNext)
                         Button { m.dismissUpNext() } label: {
-                            Text("Dismiss").font(.callout.weight(.semibold))
-                                .padding(.horizontal, 20).padding(.vertical, 10)
-                                .background(VP.panel2.opacity(0.96), in: Capsule())
-                                .overlay(Capsule().strokeBorder(.white.opacity(0.22), lineWidth: 1))
+                            Text("DISMISS").font(.system(size: 20, weight: .semibold)).tracking(2.2)
+                                .padding(.horizontal, 22).padding(.vertical, 11)
+                                .background(VP.panel2.opacity(0.96), in: Rectangle())
+                                .overlay(Rectangle().strokeBorder(VP.line, lineWidth: 1))
                         }
                         .buttonStyle(.plain).foregroundStyle(.white)
                         .focused($focus, equals: .upNextDismiss)
@@ -312,9 +320,10 @@ struct PlayerView: View {
     private func upNextCard(_ n: UpNextItem) -> some View {
         HStack(spacing: 16) {
             ArtImage(url: n.still, aspect: 16.0/9.0).frame(width: 168, height: 94)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .clipShape(Rectangle())
             VStack(alignment: .leading, spacing: 5) {
-                Text("UP NEXT").font(.caption).fontWeight(.heavy).foregroundStyle(VP.accent2)
+                Text("UP NEXT").font(.system(size: 17, weight: .semibold)).tracking(3)
+                    .foregroundStyle(VP.accent)
                 Text(n.title).font(.title3.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
                 if let s = n.subtitle { Text(s).font(.subheadline).foregroundStyle(VP.muted) }
                 // Visible countdown: the card acts on its own, so say when.
@@ -325,8 +334,8 @@ struct PlayerView: View {
             Spacer(minLength: 0)
         }
         .padding(16).frame(width: 460)
-        .background(VP.panel.opacity(0.96), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(VP.line, lineWidth: 1))
+        .background(VP.panel.opacity(0.96), in: Rectangle())
+        .overlay(Rectangle().strokeBorder(VP.line, lineWidth: 1))
     }
 
     // MARK: End card (web .vp-endcard)
@@ -336,18 +345,19 @@ struct PlayerView: View {
         ZStack {
             Color.black.opacity(0.86).ignoresSafeArea()
             VStack(spacing: 10) {
-                Text(title).font(.system(size: 46, weight: .semibold)).foregroundStyle(.white)
+                Text(title).font(.system(size: 46, weight: .semibold)).foregroundStyle(VP.ink)
                     .lineLimit(2).multilineTextAlignment(.center)
-                Text("Finished").font(.title3).foregroundStyle(VP.muted)
+                Text("FINISHED").font(.system(size: 20, weight: .semibold)).tracking(3)
+                    .foregroundStyle(VP.muted)
                 HStack(spacing: 18) {
                     if let n = m.endCardNext {
                         Button { m.playEndCardNext() } label: {
-                            Text("\u{25B6} \(n.title)")
-                                .font(.title3.weight(.semibold))
+                            Text("\u{25B6}  \(n.title.uppercased())")
+                                .font(.system(size: 22, weight: .semibold)).tracking(2.2)
                                 .lineLimit(1)
                                 .padding(.horizontal, 28).padding(.vertical, 14)
-                                .background(VP.grad, in: Capsule())
-                                .foregroundStyle(.white)
+                                .background(VP.grad, in: Rectangle())
+                                .foregroundStyle(VP.pal.onSignal)
                         }
                         .buttonStyle(.plain)
                         .focused($focus, equals: .endNext)
@@ -365,10 +375,11 @@ struct PlayerView: View {
 
     private func endCardButton(_ label: String, _ f: PlayerFocus, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Text(label).font(.title3.weight(.semibold))
+            Text(label.uppercased()).font(.system(size: 22, weight: .semibold)).tracking(2.2)
                 .padding(.horizontal, 28).padding(.vertical, 14)
-                .background(VP.panel2.opacity(0.96), in: Capsule())
-                .foregroundStyle(.white)
+                .background(VP.panel2.opacity(0.96), in: Rectangle())
+                .overlay(Rectangle().strokeBorder(VP.line, lineWidth: 1))
+                .foregroundStyle(VP.ink)
         }
         .buttonStyle(.plain)
         .focused($focus, equals: f)
@@ -398,8 +409,8 @@ struct PlayerView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         GeometryReader { g in
                             ZStack(alignment: .leading) {
-                                Capsule().fill(.white.opacity(0.15)).frame(height: 10)
-                                Capsule().fill(VP.grad).frame(width: g.size.width * Double(m.aiPct)/100.0, height: 10)
+                                Rectangle().fill(.white.opacity(0.15)).frame(height: 10)
+                                Rectangle().fill(VP.grad).frame(width: g.size.width * Double(m.aiPct)/100.0, height: 10)
                             }
                         }.frame(height: 10)
                         Text("\(m.aiPhase ?? "Working")… \(m.aiPct)%").foregroundStyle(.white).font(.title3)
@@ -449,8 +460,8 @@ struct PlayerView: View {
             .padding(16)
         }
         .frame(maxHeight: 620)
-        .background(VP.panel.opacity(0.97), in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(VP.line, lineWidth: 1))
+        .background(VP.panel.opacity(0.97), in: Rectangle())
+        .overlay(Rectangle().strokeBorder(VP.line, lineWidth: 1))
     }
 
     private func menuHeader(_ t: String) -> some View {
@@ -466,8 +477,8 @@ struct PlayerView: View {
             }
             .font(.title3).padding(.vertical, 12).padding(.horizontal, 14)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background((focus == .menuRow(idx)) ? VP.panel2 : .clear, in: RoundedRectangle(cornerRadius: 8))
-            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder((focus == .menuRow(idx)) ? VP.accent : .clear, lineWidth: 2))
+            .background((focus == .menuRow(idx)) ? VP.panel2 : .clear, in: Rectangle())
+            .overlay(Rectangle().strokeBorder((focus == .menuRow(idx)) ? VP.accent : .clear, lineWidth: 2))
         }
         .buttonStyle(.plain).focused($focus, equals: .menuRow(idx))
     }
@@ -476,15 +487,15 @@ struct PlayerView: View {
 
     private func glassButton(_ icon: String, _ size: CGFloat, _ id: PlayerFocus, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: icon).font(.system(size: size * 0.42, weight: .semibold)).foregroundStyle(.white)
+            Image(systemName: icon).font(.system(size: size * 0.42, weight: .semibold)).foregroundStyle(VP.ink)
                 .frame(width: size, height: size)
-                .background(Color(hex: 0x08090d).opacity(0.55), in: Circle())
+                .background(VP.pal.sunk.opacity(0.62), in: Circle())
         }
         .buttonStyle(.plain).focused($focus, equals: id).focusRing(focus == id)
     }
     private func utilityButton<L: View>(_ id: PlayerFocus, @ViewBuilder label: () -> L, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            label().foregroundStyle(Color(hex: 0xeef1f8)).frame(width: 70, height: 70)
+            label().foregroundStyle(VP.ink).frame(width: 70, height: 70)
                 .background(.white.opacity(0.08), in: Circle())
         }
         .buttonStyle(.plain).focused($focus, equals: id).focusRing(focus == id)
@@ -498,14 +509,15 @@ struct PlayerView: View {
 // The web player's focus ring: white inner + purple outer ring + ambient glow + scale.
 private extension View {
     func focusRing(_ on: Bool) -> some View {
+        // A switch that is selected, not a light that is glowing: a hard
+        // rectangle in the signal colour, no bloom, barely any lift.
         self.overlay(
-            RoundedRectangle(cornerRadius: 999)
-                .strokeBorder(.white, lineWidth: on ? 3 : 0)
-                .overlay(RoundedRectangle(cornerRadius: 999).strokeBorder(VP.accent, lineWidth: on ? 3 : 0).padding(-3))
+            Rectangle()
+                .strokeBorder(VP.accent, lineWidth: on ? 3 : 0)
+                .padding(-4)
                 .allowsHitTesting(false)
         )
-        .shadow(color: VP.accent.opacity(on ? 0.65 : 0), radius: on ? 22 : 0)
-        .scaleEffect(on ? 1.08 : 1)
+        .scaleEffect(on ? 1.03 : 1)
         .animation(.easeOut(duration: 0.14), value: on)
     }
 }

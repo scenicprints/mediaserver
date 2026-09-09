@@ -286,3 +286,38 @@ purple/blue ones, so orange would have been the only warm thing on that screen.
 **That divergence is worth a decision at some point**: the tvOS player is styled
 to a version of the web player that no longer exists. Left as-is here rather than
 restyled in passing.
+
+---
+
+## 2026-09-09 — The Apple TV player joins the rest of the app
+
+The tvOS **browse** UI is Braun. The **player** was not, and nobody had noticed
+because it looked deliberate: `PlayerView.swift` carried its own palette called
+`VP`, commented "the web player's tokens (style.css :root)" — but those tokens
+were the ones the web had *before* it was restyled. Purple `#6c5cff`, cyan
+`#37c2ff`, a diagonal gradient between them, and glow shadows. 29 uses of `VP`,
+zero uses of the app's `Palette`.
+
+So the one screen you spend a whole film looking at was the only screen not
+speaking the app's language.
+
+`VP` is now defined in terms of `Theme.black` rather than deleted, so all 29 call
+sites keep reading sensibly while the look changes underneath them:
+
+- **One signal colour.** `accent` and `accent2` both resolve to `pal.signal` now,
+  and `grad` is a flat colour, not a `LinearGradient` — the purple/cyan pair only
+  ever existed to make a gradient, and Braun does not gradient.
+- **Always the dark finish**, whatever the app's finish setting says. This chrome
+  sits on top of a picture, and light chrome over a picture is unreadable.
+- **Squared off.** Every `Capsule` and `RoundedRectangle` is a `Rectangle`. The
+  round transport buttons stay round — a dial is Braun; rounded plastic is not.
+- **Small caps, letterspaced.** SKIP INTRO, SKIP CREDITS, DISMISS, UP NEXT,
+  FINISHED, LIVE.
+- **The scrub bar is a scale, not a tube**: thinner, and its thumb is a hairline
+  cursor rather than a glowing dot.
+- **The focus ring is a switch that is selected, not a light that is glowing**: a
+  hard rectangle in the signal colour, no 22pt bloom, and a 1.03 lift instead of
+  1.08.
+
+The LIVE flag added earlier the same day is `pal.signal` accordingly — state,
+never decoration, which is what LIVE is.
