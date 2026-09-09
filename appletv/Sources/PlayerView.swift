@@ -246,6 +246,22 @@ struct PlayerView: View {
         let f = (focus == .scrubber)
         return GeometryReader { geo in
             ZStack(alignment: .leading) {
+                if m.scrubbing {
+                    let x = geo.size.width * m.progress
+                    VStack(spacing: 4) {
+                        Text(m.clock(m.shownPosition))
+                            .font(.system(size: 30, weight: .semibold).monospacedDigit())
+                            .foregroundStyle(VP.ink)
+                        Text((m.scrubDelta < 0 ? "\u{2212}" : "+") + m.clock(abs(m.scrubDelta)))
+                            .font(.system(size: 20, weight: .semibold).monospacedDigit()).tracking(1)
+                            .foregroundStyle(VP.accent)
+                    }
+                    .padding(.horizontal, 16).padding(.vertical, 10)
+                    .background(VP.pal.paper.opacity(0.92), in: Rectangle())
+                    .overlay(Rectangle().strokeBorder(VP.line, lineWidth: 1))
+                    .fixedSize()
+                    .offset(x: min(max(0, x - 60), max(0, geo.size.width - 120)), y: -74)
+                }
                 Rectangle().fill(.white.opacity(0.18)).frame(height: f ? 10 : 6)
                 Rectangle().fill(.white.opacity(0.30))
                     .frame(width: geo.size.width * m.buffered, height: f ? 10 : 6)
@@ -263,8 +279,7 @@ struct PlayerView: View {
         .focusable(m.controlsVisible && m.menu == .none)
         .focused($focus, equals: .scrubber)
         .onMoveCommand { dir in
-            switch dir { case .left: m.jump(-10); case .right: m.jump(10); default: break }
-            m.flashControls()
+            switch dir { case .left: m.nudge(-10); case .right: m.nudge(10); default: break }
         }
         .animation(.easeOut(duration: 0.12), value: f)
     }
@@ -599,6 +614,21 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     // A film has nothing to roll into, so instead of a frozen last frame it gets
     // an end card. Live TV and a dismissed binge just leave.
     @Published var showEndCard = false
+
+    // ---- Scrubbing ----
+    // Where the viewer is dragging TO, before it has been committed. The bar
+    // draws from this, so it moves the instant a button is pressed instead of
+    // waiting for the decoder to report back from a seek it has not been asked
+    // to make yet.
+    @Published var scrubTarget: Double?
+    // A seek that has been issued but whose new position the engine has not
+    // reported yet. Without this the bar snaps back to the OLD position for the
+    // half-second the seek takes, which reads as the seek having failed.
+    private var seekPending: Double?
+    private var seekPendingAt: Date = .distantPast
+    private var scrubCommit: Task<Void, Never>?
+    private var lastNudgeAt: Date = .distantPast
+    private var nudgeRun = 0
     @Published var finishedPlayback = false
     @Published var subtitleOptions: [TrackOption] = []
     @Published var audioOptions: [TrackOption] = []
@@ -646,7 +676,13 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
 
     var subtitleRows: [TrackOption] { subtitleOptions }
     var upNextItem: UpNextItem? { upNext.first }
-    var progress: Double { duration > 0 ? min(1, max(0, position / duration)) : 0 }
+    // What the BAR shows: the pending scrub if there is one, else the real
+    // position. These are different numbers on purpose.
+    var shownPosition: Double { scrubTarget ?? position }
+    var progress: Double { duration > 0 ? min(1, max(0, shownPosition / duration)) : 0 }
+    var scrubbing: Bool { scrubTarget != nil }
+    // Signed distance the pending scrub would travel, for the preview.
+    var scrubDelta: Double { (scrubTarget ?? position) - position }
     private var upNextLead: Double { max(20, min(60, duration * 0.04)) }
 
     func clock(_ s: Double) -> String {
@@ -966,7 +1002,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     private func avTick() {
         guard useAV, onMain, let q = av, q.currentItem != nil else { return }
         let t = q.currentTime().seconds
-        if t.isFinite { position = max(0, avBase + t) }
+        if t.isFinite { position = settle(max(0, avBase + t)) }
         if duration <= 0, let d = q.currentItem?.duration.seconds, d.isFinite, d > 0 { duration = avBase + d }
         if let r = q.currentItem?.loadedTimeRanges.last?.timeRangeValue {
             let end = avBase + r.start.seconds + r.duration.seconds
@@ -1067,6 +1103,83 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         if useAV { if av?.timeControlStatus == .paused { av?.play() } else { av?.pause() }; return }
         if player.isPlaying { player.pause() } else { player.play() }
     }
+    // One press of left/right. It does NOT seek — it moves a target and waits,
+    // so a burst of presses becomes ONE seek instead of ten.
+    //
+    // The old behaviour issued a real seek per press. On a 60 GB remux each of
+    // those is expensive, they queued up behind each other, and the bar sat
+    // still through all of it because it only ever drew the last position the
+    // decoder had reported. Hence "janky", and hence only ever getting ten
+    // seconds: one press, one seek, and the next press landing before the first
+    // had finished.
+    //
+    // Held or repeated presses accelerate, because crossing an hour of film ten
+    // seconds at a time is not seeking, it is waiting.
+    func nudge(_ seconds: Double) {
+        guard !live, duration > 0 else { return }
+        let now = Date()
+        nudgeRun = now.timeIntervalSince(lastNudgeAt) < 0.7 ? nudgeRun + 1 : 0
+        lastNudgeAt = now
+
+        let step = seconds * nudgeScale(nudgeRun)
+        let from = scrubTarget ?? position
+        scrubTarget = min(max(0, from + step), max(0, duration - 1))
+        flashControls()
+
+        // Commit once the presses stop. Re-armed on every press, so holding the
+        // direction down keeps travelling and only lands when you let go.
+        scrubCommit?.cancel()
+        scrubCommit = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 420_000_000)
+            guard let self, !Task.isCancelled, let t = self.scrubTarget else { return }
+            self.commitScrub(t)
+        }
+    }
+
+    // 10s a press to start, then bigger the longer you hold it: 30s, then a
+    // minute, then two. Fine control where you need it, real distance when you
+    // are looking for a scene.
+    private func nudgeScale(_ run: Int) -> Double {
+        switch run {
+        case 0...2:  return 1
+        case 3...6:  return 3
+        case 7...12: return 6
+        default:     return 12
+        }
+    }
+
+    private func commitScrub(_ t: Double) {
+        scrubCommit?.cancel(); scrubCommit = nil
+        nudgeRun = 0
+        // Hold the bar at the target until the engine catches up, then let the
+        // real position take over again.
+        seekPending = t
+        seekPendingAt = Date()
+        position = t
+        scrubTarget = nil
+        seek(to: t)
+    }
+
+    // The one place a seek actually happens.
+    func seek(to t: Double) {
+        guard !live else { return }
+        let target = max(0, duration > 0 ? min(t, duration - 1) : t)
+        if useAV { avSeek(target) }
+        else { player.time = VLCTime(int: Int32(target * 1000)) }
+    }
+
+    // Has the engine caught up with the seek we asked for? Returns the position
+    // the UI should believe. Also gives up after a few seconds, so a seek that
+    // never lands unfreezes the bar rather than pinning it for ever.
+    private func settle(_ reported: Double) -> Double {
+        guard let p = seekPending else { return reported }
+        if abs(reported - p) < 2.5 || Date().timeIntervalSince(seekPendingAt) > 6 {
+            seekPending = nil
+            return reported
+        }
+        return p
+    }
+
     func jump(_ s: Int) {
         // Nothing on a live channel is seekable — see the LIVE branch in
         // bottomChrome. Guarded here too so no future caller can reintroduce it.
@@ -1315,6 +1428,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         // New file, new streams: re-ask and re-rank rather than carrying over.
         serverAudio = []; audioRequested = false; autoAudioApplied = false
         upNextDismissed = false
+        scrubTarget = nil; seekPending = nil; scrubCommit?.cancel(); scrubCommit = nil
         // A Live TV channel mixes films and episodes, so the endpoint — and the
         // kind everything downstream reports and probes with — has to follow
         // what is actually being played, not what came before it.
@@ -1372,7 +1486,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
             player.time = VLCTime(int: Int32(startAt * 1000))
             return
         }
-        position = Double(player.time.intValue) / 1000.0
+        position = settle(Double(player.time.intValue) / 1000.0)
         if duration <= 0 { duration = Double(player.media?.length.intValue ?? 0) / 1000.0 }
         buffered = min(1, progress + 0.06)
         if let r = introRange { showSkipIntro = position >= r.start && position <= r.end }

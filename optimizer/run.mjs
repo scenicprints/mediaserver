@@ -74,7 +74,12 @@ const policy = {
 // in config.json under "optimizeThrottle" if the drives turn out to be fine.
 engine.setThrottle({
   pauseBetweenJobsMs: 60_000,
-  readRate: 0,
+  // Cap the read at 8x realtime. Uncapped, ffmpeg pulls as hard as the drive
+  // allows, which is what made the machine unresponsive twice on 2026-09-08.
+  // 8x is still far faster than the encode for any video job, so this costs
+  // almost nothing except on pure stream-copies — where the drive is the only
+  // thing working and is exactly where the gentleness is wanted.
+  readRate: 8,
   stopOnDiskErrors: true,
   maxJobsPerRun: 0,
   ...(config.optimizeThrottle || {})

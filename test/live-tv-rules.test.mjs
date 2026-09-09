@@ -73,7 +73,11 @@ test('apple tv: seeking is blocked on a live channel', () => {
     /func jump\(_ s: Int\) \{ .{0,400}?guard !live else \{ return \}/,
     // The scrubber is the D-pad's seek surface — it must not be rendered.
     /if !live \{ scrubber \}/,
-  ], 'jump() must refuse when live AND the scrubber must not be rendered');
+    // The scrub path added for the janky-seeking fix: a nudge moves a target
+    // and seek(to:) is the single place a seek actually happens. Both refuse.
+    /func nudge\(_ seconds: Double\) \{ guard !live,/,
+    /func seek\(to t: Double\) \{ guard !live else \{ return \}/,
+  ], 'every seek path must refuse when live AND the scrubber must not be rendered');
 });
 
 test('android tv: seeking is blocked on a live channel', () => {
