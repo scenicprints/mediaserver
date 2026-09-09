@@ -21,7 +21,7 @@
 // can't copy TrueHD and crashes ffmpeg trying to decode it.
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { ffmpegBin, ffprobeBin, nvencAvailable } from './ffmpeg.mjs';
 
 const yield_ = () => new Promise((r) => setImmediate(r));
@@ -62,6 +62,36 @@ const AUDIO_MAX_CH = 6; // ffmpeg's E-AC-3 encoder tops out at 5.1
 const FREE_SPACE_FACTOR = 1.15;
 
 const TMP_SUFFIX = '.marquee-opt.tmp';
+
+// ---- Pacing, so this cannot flatten the drives -------------------------
+//
+// These are USB disks. Two of them logged "the IO operation had to be retried"
+// under sustained load on 2026-09-08 and the machine became unresponsive twice.
+// The work here is inherently heavy — a full read and a full write per file —
+// so it is paced rather than run flat out, and it watches Windows' own view of
+// disk health and stops rather than pushing a drive that is complaining.
+export const throttle = {
+  pauseBetweenJobsMs: 60_000,  // let the drive settle between files
+  readRate: 0,                 // ffmpeg -readrate multiplier; 0 = uncapped
+  stopOnDiskErrors: true,      // abort the run if Windows logs new disk errors
+  maxJobsPerRun: 0             // 0 = no limit
+};
+
+export function setThrottle(opts = {}) { Object.assign(throttle, opts); }
+
+// Count disk errors Windows has logged since a given moment. Event 153 is "the
+// IO operation had to be retried", 51/50 are worse. Returns -1 if it cannot be
+// determined, which is treated as "no news" rather than as an error.
+export function diskErrorsSince(since) {
+  const ps = `$t=[datetime]::Parse('${new Date(since).toISOString()}').ToLocalTime();` +
+    `$e=Get-WinEvent -FilterHashtable @{LogName='System';ID=153,51,50,129,157;StartTime=$t} -ErrorAction SilentlyContinue;` +
+    `if($e){$e.Count}else{0}`;
+  try {
+    const out = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps],
+      { windowsHide: true, encoding: 'utf8', timeout: 30000 });
+    return parseInt(String(out).trim(), 10) || 0;
+  } catch { return -1; }
+}
 
 // ---- Never overwrite a file that already exists ------------------------
 //
@@ -567,7 +597,12 @@ function freeSpaceOn(filePath) {
 // them and keep the file's existing compatible track). 'drop' decodes no audio
 // at all, which is what makes it a reliable fallback.
 function buildArgs(info, plan, src, dst, { audioMode = 'convert' } = {}) {
-  const args = ['-hide_banner', '-nostdin', '-y', '-i', src, '-map', '0', '-map', '-0:d?', '-max_interleave_delta', '0'];
+  const args = ['-hide_banner', '-nostdin', '-y'];
+  // Cap how fast ffmpeg reads the source when asked to. 1 = realtime, 4 = four
+  // times realtime. Uncapped it will pull as hard as the drive allows, which is
+  // what these USB disks did not enjoy.
+  if (throttle.readRate > 0) args.push('-readrate', String(throttle.readRate));
+  args.push('-i', src, '-map', '0', '-map', '-0:d?', '-max_interleave_delta', '0');
   const doVideo = plan.profile === 'video' || plan.profile === 'both';
   const doAudio = plan.profile === 'audio' || plan.profile === 'both';
   if (doAudio && audioMode === 'drop') {
@@ -709,9 +744,10 @@ export function enqueueAddAudio(db, kind, fileId, { force = false } = {}) {
   return { jobId: Number(r.lastInsertRowid), profile: 'addaudio', reason: plan.reason };
 }
 
-// Everything in the library that would play better on a TV with one more audio
-// track. Used by the Storage panel and by automatic mode.
-export function surroundCandidates(db) {
+// Everything that does not currently play on every supported device, or plays
+// only in stereo when the source has surround. No channel-count filter: a
+// DTS-stereo file is as unplayable on an Apple TV as a DTS 7.1 one.
+export function compatibilityCandidates(db) {
   ensureSchema(db);
   const rows = db.prepare(`
     SELECT mi.*, COALESCE(m.title, s.title) AS title, e.season, e.episode
@@ -726,17 +762,18 @@ export function surroundCandidates(db) {
   for (const r of rows) {
     const p = planAddAudio(r);
     if (!p.need) continue;
-    // Only surround sources are worth it — adding a stereo E-AC-3 next to a
-    // stereo MP3 achieves nothing.
-    if (p.channels < 6) continue;
     out.push({
       kind: r.file_kind, fileId: r.file_id, path: r.path,
       title: r.title || path.basename(r.path), season: r.season, episode: r.episode,
       size: Number(r.size) || 0, tier: tierOf(r.width, r.height), hdr: !!r.hdr,
-      from: p.srcDesc, reason: p.reason
+      from: p.srcDesc, why: p.why, reason: p.reason
     });
   }
-  out.sort((a, b) => (b.hdr ? 1 : 0) - (a.hdr ? 1 : 0) || b.size - a.size);
+  // 4K HDR first (the projector), then biggest — but "cannot play at all" beats
+  // "plays in stereo" regardless of size, because one is broken and one is not.
+  out.sort((a, b) =>
+    (a.why === b.why ? 0 : a.why.startsWith('nothing') ? -1 : 1) ||
+    (b.hdr ? 1 : 0) - (a.hdr ? 1 : 0) || b.size - a.size);
   return out;
 }
 
@@ -750,12 +787,46 @@ function summarize(info) {
 export async function runQueue(db, { log = () => {}, allow4kVideo = false, allowHdrVideo = false } = {}) {
   if (worker.running) return;
   worker.running = true; worker.stop = false;
+
+  // Baseline for the disk-health watch: anything Windows logs from here on is
+  // attributable to this run.
+  const runStart = Date.now();
+  let done = 0;
+
   try {
     for (;;) {
       if (worker.stop) { note('Stopped by request.'); break; }
+      if (throttle.maxJobsPerRun && done >= throttle.maxJobsPerRun) {
+        note(`Reached this run's limit of ${throttle.maxJobsPerRun} job(s).`);
+        break;
+      }
+
+      // Stop the moment the drives start complaining. Better to leave a queue
+      // half-done — every job is individually safe — than to keep pushing a disk
+      // that is retrying I/O, which is how this machine locked up twice.
+      if (throttle.stopOnDiskErrors) {
+        const errs = diskErrorsSince(runStart);
+        if (errs > 0) {
+          note(`STOPPING: Windows logged ${errs} disk error(s) since this run began.`);
+          log(`Optimizer stopped — ${errs} disk error(s) during this run. Nothing is half-written.`);
+          break;
+        }
+      }
+
       const job = db.prepare("SELECT * FROM optimize_jobs WHERE state = 'queued' ORDER BY id LIMIT 1").get();
       if (!job) break;
+
+      // Breathe between files. A drive that has just streamed 60 GB benefits
+      // from a moment before the next one, and it keeps playback responsive.
+      if (done > 0 && throttle.pauseBetweenJobsMs > 0) {
+        note(`Pausing ${Math.round(throttle.pauseBetweenJobsMs / 1000)}s before the next file.`);
+        const until = Date.now() + throttle.pauseBetweenJobsMs;
+        while (Date.now() < until && !worker.stop) await new Promise((r) => setTimeout(r, 1000));
+        if (worker.stop) { note('Stopped by request.'); break; }
+      }
+
       await runJob(db, job, { log, allow4kVideo, allowHdrVideo });
+      done++;
     }
   } finally {
     worker.running = false; worker.current = null;
@@ -944,8 +1015,19 @@ async function runJob(db, job, { log, allow4kVideo, allowHdrVideo }) {
 // prefers E-AC-3 above every other codec), so the projector gets real surround
 // with no server work at all.
 
-// Codecs a file can already carry that make this unnecessary.
-const APPLE_COPYABLE = new Set(['aac', 'ac3', 'eac3', 'mp3', 'alac']);
+// Codecs EVERY supported TV can decode. This is an intersection, not a union,
+// and getting it wrong in either direction is expensive: too generous and files
+// silently transcode, too strict and we rewrite files that were already fine.
+//
+//   Apple TV 4K       aac ac3 eac3 mp3 alac   — no DTS, no TrueHD, no Opus
+//   Roku              aac ac3 eac3 mp3        — no TrueHD; DTS passthrough only
+//   Android/Google TV aac ac3 eac3 mp3 opus vorbis flac
+//   VAVA 4K           aac ac3 eac3, DTS-HD but with a documented lip-sync bug
+//
+// Intersection: aac, ac3, eac3, mp3. ALAC is excluded because Roku cannot decode
+// it, and Opus because Apple TV and Roku cannot — Opus was the blind spot that
+// made an earlier version of this miss 273 files.
+const UNIVERSAL_AUDIO = new Set(['aac', 'ac3', 'eac3', 'mp3']);
 
 // MD5 of the VIDEO BITSTREAM alone — not the container, not the file. Copying a
 // stream into a new container changes the file completely while leaving this
@@ -961,30 +1043,49 @@ async function videoStreamHash(file) {
 // Does this file need a compatible surround track, and which stream should it be
 // built from? Applies to any file, protected or not — this operation is safe for
 // both by construction.
+// Two separate tests, and both matter:
+//
+//   1. CAN IT PLAY AT ALL? A file whose only audio is DTS or Opus is undecodable
+//      on an Apple TV or a Roku, so the server must re-encode it live. That is
+//      the case worth fixing, whatever the channel count — a DTS *stereo* file is
+//      just as broken as a DTS 7.1 one.
+//   2. CAN IT PLAY IN SURROUND? A file with a compatible stereo track but a
+//      surround source plays fine and sounds worse than it should.
+//
+// An earlier version tested only for surround, which skipped every stereo-only
+// incompatible file. Judging playability by channel count was the mistake.
+// "5.1" reads better than "6 channels" in anything the owner sees.
+const layoutName = (ch) => (ch >= 8 ? '7.1' : ch >= 6 ? '5.1' : ch >= 2 ? 'stereo' : 'mono');
+
 export function planAddAudio(info) {
   if (!info || info.probe_error) return { need: false, reason: 'not probed' };
   let audio = [];
   try { audio = JSON.parse(info.audio_json || '[]'); } catch {}
   if (!audio.length) return { need: false, reason: 'no audio streams' };
 
-  // Already has something Apple/Roku/Android can play natively in surround.
-  const copyable = audio.filter((a) => APPLE_COPYABLE.has(String(a.codec).toLowerCase()));
-  if (copyable.some((a) => (a.ch || 0) >= 6)) {
-    return { need: false, reason: 'already has a copyable surround track' };
-  }
+  const compat = audio.filter((a) => UNIVERSAL_AUDIO.has(String(a.codec).toLowerCase()));
+  const maxSrcCh = Math.max(0, ...audio.map((a) => a.ch || 0));
+  const maxCompatCh = compat.length ? Math.max(0, ...compat.map((a) => a.ch || 0)) : 0;
 
-  // Build from the richest track available — most channels wins, then the
-  // lossless one, so the added track comes from the best source in the file.
-  const src = audio.slice().sort((a, b) => (b.ch || 0) - (a.ch || 0))[0];
+  const cantPlay = compat.length === 0;
+  const stereoOnly = !cantPlay && maxCompatCh < 6 && maxSrcCh >= 6;
+  if (!cantPlay && !stereoOnly) return { need: false, reason: 'already plays on every device' };
+
+  // Build from the richest track in the file: most channels first, then prefer a
+  // lossless source over a lossy one at the same channel count.
+  const rank = (a) => (BLOAT_AUDIO.has(String(a.codec).toLowerCase()) ? 1 : 0);
+  const src = audio.slice().sort((a, b) => (b.ch || 0) - (a.ch || 0) || rank(b) - rank(a))[0];
   if (!src) return { need: false, reason: 'no usable source track' };
 
+  const channels = Math.min(src.ch || 2, AUDIO_MAX_CH);
   return {
     need: true,
     srcIndex: src.i,
     srcDesc: `${src.codec}/${src.ch || '?'}ch`,
     lang: src.lang || null,
-    channels: Math.min(src.ch || 6, AUDIO_MAX_CH),
-    reason: `add E-AC-3 ${Math.min(src.ch || 6, AUDIO_MAX_CH) > 2 ? '5.1' : 'stereo'} built from ${src.codec}/${src.ch || '?'}ch`,
+    channels,
+    why: cantPlay ? 'nothing here plays on an Apple TV or Roku' : 'only a stereo track is playable',
+    reason: `add E-AC-3 ${layoutName(channels)} from ${src.codec}/${src.ch || '?'}ch — ${cantPlay ? 'no playable track' : 'surround source, stereo-only playback'}`,
     existing: audio.length
   };
 }
@@ -1016,13 +1117,15 @@ export async function addCompatibleAudio(db, kind, fileId, { log = () => {}, dry
 
   const n = plan.existing;                       // output index of the appended track
   const args = [
-    '-hide_banner', '-nostdin', '-y', '-i', src,
+    '-hide_banner', '-nostdin', '-y',
+    ...(throttle.readRate > 0 ? ['-readrate', String(throttle.readRate)] : []),
+    '-i', src,
     '-map', '0', '-map', `0:a:${plan.srcIndex}`, '-map', '-0:d?',
     '-max_interleave_delta', '0',
     '-c', 'copy',                                 // everything copied, including video
     `-c:a:${n}`, AUDIO_CODEC, `-b:a:${n}`, `${plan.channels > 2 ? AUDIO_KBPS : 320}k`,
     `-ac:a:${n}`, String(plan.channels),
-    `-metadata:s:a:${n}`, `title=Surround ${plan.channels > 2 ? '5.1' : '2.0'} (E-AC-3)`
+    `-metadata:s:a:${n}`, `title=Surround ${layoutName(plan.channels)} (E-AC-3)`
   ];
   if (plan.lang) args.push(`-metadata:s:a:${n}`, `language=${plan.lang}`);
   args.push(dst);
@@ -1158,7 +1261,7 @@ export function startAuto(db, {
       // profiles: they make files bigger, and they are the only thing allowed
       // to touch a 4K HDR file, so switching one on must not switch on the other.
       if (profiles.includes('addaudio')) {
-        for (const it of surroundCandidates(db)) {
+        for (const it of compatibilityCandidates(db)) {
           if (queued >= batch) break;
           const r = enqueueAddAudio(db, it.kind, it.fileId);
           if (r.jobId && !r.error) queued++;

@@ -16,12 +16,15 @@
 //   node optimizer/run.mjs plan        what it would do, changes nothing
 //   node optimizer/run.mjs work [N]    do up to N jobs, then stop
 //   node optimizer/run.mjs watch       stay running; handle new content as it lands
+//   node optimizer/run.mjs duplicates  find real duplicates and recommend which
+//                                      copy to keep. Reports only, never deletes.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import * as ff from './ffmpeg.mjs';
 import * as engine from './engine.mjs';
+import { findDuplicates } from './duplicates.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const cmd = process.argv[2] || 'status';
@@ -60,6 +63,18 @@ const policy = {
   allowHdrVideo: config.optimizeAllowHdrVideo === true
 };
 
+// Pacing. These drives are USB and two of them logged I/O retries under load,
+// so the defaults here are deliberately gentle: a minute between files, and the
+// run aborts if Windows reports any disk trouble while it is working. Override
+// in config.json under "optimizeThrottle" if the drives turn out to be fine.
+engine.setThrottle({
+  pauseBetweenJobsMs: 60_000,
+  readRate: 0,
+  stopOnDiskErrors: true,
+  maxJobsPerRun: 0,
+  ...(config.optimizeThrottle || {})
+});
+
 async function doScan() {
   const before = db.prepare('SELECT COUNT(*) n FROM media_info').get().n;
   const n = await engine.runProbeScan(db, { log });
@@ -73,7 +88,7 @@ function showPlan() {
   log(`${totals.files.toLocaleString()} files known, holding ${TB(totals.bytes)}`);
   log(`reclaimable: ${TB(totals.saveBytes)}`);
   for (const [k, v] of Object.entries(totals.byProfile)) log(`  ${k.padEnd(6)} ${String(v.files).padStart(5)} files  ${GB(v.saveBytes)}`);
-  const sur = engine.surroundCandidates(db);
+  const sur = engine.compatibilityCandidates(db);
   log(`${sur.length} file(s) would play better on a TV with an added surround track (${sur.filter((s) => s.hdr).length} of them 4K HDR)`);
   // Printed every run so a regression is loud rather than silent.
   const bad = items.filter((i) => i.tier === '4K' && i.hdr);
@@ -95,7 +110,7 @@ async function work(limit) {
     if (engine.enqueue(db, it.kind, it.fileId, policy).jobId) queued++;
   }
   if (profiles.includes('addaudio')) {
-    for (const it of engine.surroundCandidates(db)) {
+    for (const it of engine.compatibilityCandidates(db)) {
       if (queued >= limit) break;
       if (engine.enqueueAddAudio(db, it.kind, it.fileId).jobId) queued++;
     }
@@ -129,6 +144,32 @@ if (cmd === 'status') {
 } else if (cmd === 'work') {
   await doScan();
   await work(arg || 5);
+} else if (cmd === 'duplicates') {
+  log('Metadata alone cannot tell a duplicate from two episodes that encode alike,');
+  log('so every candidate is confirmed by reading the bytes. Nothing is deleted.');
+  log('');
+  const res = await findDuplicates(db, {
+    log,
+    full: process.argv.includes('--full'),
+    onProgress: (n, total) => { if (n % 10 === 0) log(`  checked ${n}/${total} candidate groups`); }
+  });
+  log('');
+  if (!res.confirmed.length) {
+    log('No genuine duplicates found.');
+  } else {
+    let total = 0;
+    for (const d of res.confirmed) {
+      total += d.reclaimable;
+      log(`${GB(d.size)}  ${d.title}${d.note ? '   [' + d.note + ']' : ''}`);
+      log(`   KEEP  ${d.keep.r.path}`);
+      log(`         (${d.keep.reasons.join(', ') || 'no particular advantage'})`);
+      for (const x of d.drop) log(`   DROP  ${x.r.path}`);
+    }
+    log('');
+    log(`${res.confirmed.length} duplicate group(s), ${GB(total)} reclaimable if you remove the DROP copies.`);
+    log('Nothing has been deleted. Review the list and remove what you want gone.');
+  }
+  log(`${res.falsePositives} candidate group(s) turned out to be different files that merely look identical.`);
 } else if (cmd === 'watch') {
   log('watching for new content. Ctrl+C to stop.');
   for (;;) {
@@ -139,6 +180,6 @@ if (cmd === 'status') {
     await new Promise((r) => setTimeout(r, 15 * 60 * 1000));
   }
 } else {
-  console.error(`unknown command "${cmd}" — try status, scan, plan, work or watch`);
+  console.error(`unknown command "${cmd}" — try status, scan, plan, work, watch or duplicates`);
   process.exit(1);
 }
