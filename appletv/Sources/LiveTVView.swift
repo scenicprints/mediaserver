@@ -208,7 +208,7 @@ struct LiveTVView: View {
         .onReceive(timer) { now = $0 }
         .onChange(of: focusedChannel) { if let f = focusedChannel { selected = f } }
         .fullScreenCover(item: $tuned) { t in
-            LivePlayer(item: t.item, offset: t.offset)
+            LivePlayer(item: t.item, offset: t.offset, channel: t.channel)
                 .environmentObject(store)
                 .environment(\.pal, pal)
                 .ignoresSafeArea()
@@ -248,7 +248,7 @@ struct LiveTVView: View {
 
             Spacer(minLength: 20)
             MButton(title: "Join", kind: .primary, play: true) {
-                tuned = TunedLive(item: on.item, offset: on.offset)
+                tuned = TunedLive(item: on.item, offset: on.offset, channel: ch)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -303,7 +303,7 @@ struct LiveTVView: View {
         let focused = focusedChannel == ch.id
         return Button {
             let on = LiveTV.nowOn(ch, now.timeIntervalSince1970)
-            tuned = TunedLive(item: on.item, offset: on.offset)
+            tuned = TunedLive(item: on.item, offset: on.offset, channel: ch)
         } label: {
             HStack(spacing: 0) {
                 HStack(spacing: 12) {
@@ -377,6 +377,9 @@ struct LiveTVView: View {
 
 struct TunedLive: Identifiable, Hashable {
     let item: LiveItem; let offset: Double
+    // The channel it was tuned from, so a finished programme can roll on to the
+    // next one instead of dropping back to the guide.
+    var channel: LiveChannel? = nil
     var id: String { "\(item.kind)-\(item.movieLocalId ?? item.epId ?? 0)" }
 }
 
@@ -386,10 +389,14 @@ struct LivePlayer: View {
     @EnvironmentObject var store: Store
     let item: LiveItem
     let offset: Double
+    // The channel this was tuned from, so the programme after this one can be
+    // worked out. Optional so existing callers keep compiling.
+    var channel: LiveChannel? = nil
     @State private var url: URL?
     @State private var ref: Store.PlayRef?
     @State private var dur: Double?
     @State private var failed = false
+    @State private var upNext: [UpNextItem] = []
 
     @State private var fileId: Int?
 
@@ -397,7 +404,8 @@ struct LivePlayer: View {
         Group {
             if let url, let ref {
                 PlayerView(url: url, startAt: offset, ref: ref, duration: dur, store: store,
-                           title: item.title, subtitle: item.sub, fileId: fileId, live: true)
+                           title: item.title, subtitle: item.sub, fileId: fileId, live: true,
+                           upNext: upNext)
             } else if failed {
                 ZStack { Color.black; Text("Can't play this right now.").foregroundStyle(.white) }
             } else {
@@ -416,6 +424,29 @@ struct LivePlayer: View {
                 url = store.playbackURL(kind: "episode", file: f); ref = .episode(epId); dur = ep.duration; fileId = f.id
             }
         }
-        if url == nil { failed = true }
+        if url == nil { failed = true; return }
+        // A real channel keeps going. Resolve whatever the guide says is on next
+        // and hand it over as the player's Up Next queue, so the existing
+        // end-of-playback path rolls the channel over — all Live TV used to do
+        // when a programme finished was dismiss back to the guide.
+        if let ch = channel { upNext = await resolveNext(ch) }
+    }
+
+    // The programme after this one, resolved to something playable. Returns an
+    // empty queue on any failure: a channel that stops is a disappointment, a
+    // channel that crashes is a bug.
+    private func resolveNext(_ ch: LiveChannel) async -> [UpNextItem] {
+        let after = Date().timeIntervalSince1970 + max(1, item.duration - offset) + 1
+        let nxt = LiveTV.nowOn(ch, after).item
+        if let mid = nxt.movieLocalId, let d = await store.movieDetail(mid), let f = d.bestFile {
+            return [UpNextItem(fileId: f.id, ref: .movie(mid), title: nxt.title,
+                               subtitle: nxt.sub, still: nxt.backdrop ?? nxt.poster, duration: d.duration)]
+        }
+        if let sid = nxt.showId, let epId = nxt.epId, let d = await store.showDetail(sid),
+           let ep = d.seasons.flatMap({ $0.episodes }).first(where: { $0.id == epId }), let f = ep.bestFile {
+            return [UpNextItem(fileId: f.id, ref: .episode(epId), title: nxt.title,
+                               subtitle: nxt.sub, still: nxt.still ?? nxt.backdrop, duration: ep.duration)]
+        }
+        return []
     }
 }

@@ -119,3 +119,66 @@ reported duration.
 API 13.1 (driver 610+) and this box's GTX 1050 Ti is on 560.94 / API 12.2, so
 every NVENC encode was failing its probe and all transcoding silently ran on CPU.
 Restarting picks this up; hardware encoding returns.
+
+---
+
+## 2026-09-09 — Batch 3: the same behaviour on the Apple TV app
+
+Batch 2 ported to `appletv/` (SwiftUI + VLCKit). Same behaviour, three
+deliberate differences, all of them because tvOS is not a browser.
+
+### Version selection for remote viewers — same
+
+`PlaybackPolicy` in `Store.swift`: `isRemote` is filled from `GET /api/settings`
+on every home load, and both `bestFile` properties go through it. Off-network a
+title with several versions plays the **smallest non-4K** copy; on-network the
+server's own best-first order stands.
+
+### Audio track selection — same ranking, different surface
+
+**Difference 1: there is no chooser dialog before the pre-roll.** libVLC
+software-decodes every codec in the library, so on tvOS the question is never
+*can this play* — only *which one is right*. A modal in front of every film on a
+projector would be worse than the problem. The tracks are instead auto-picked
+silently and the player's existing audio menu (gear ▸ Audio) is the manual
+override, now labelled from the server (`ENG · DTS · 5.1`) instead of libVLC's
+"Track 1".
+
+Ranking is Batch 2's, unchanged: speaker layout first (surround wants the most
+channels, stereo prefers a real 2.0 mix), then bitrate, then the container's
+default flag; **commentary never wins automatically**.
+
+**The bridge between the two track lists is ordinal position.** libVLC's track
+ids are not stream indexes and its names are not parseable, while the server
+returns ffprobe's audio streams in container order. Position N in one is
+position N in the other. If the two counts disagree, something is being
+filtered, the mapping is not trustworthy, and VLC's own choice is left alone.
+
+**Difference 2: no device-type setting.** The device is an Apple TV; there is
+nothing to choose. The Audio output (Stereo/Surround) setting stays, and now
+*defaults* from the actual HDMI route — more than two output channels means a
+receiver, so it starts on Surround. A stored choice always wins.
+
+### Playback endings — the same three faults, and one more
+
+1. **Live TV never advanced.** `TunedLive` and `LivePlayer` now carry the
+   channel they were tuned from, and `LivePlayer` resolves whatever the guide
+   says is on next into the player's Up Next queue. So a finished programme
+   rolls on through the ordinary advance path instead of dismissing to the
+   guide. The channel is captured at tune time, so a programme ending never
+   tunes whatever has since been highlighted.
+2. **The Up Next card had no countdown.** tvOS did auto-advance at the end, but
+   silently — the card just sat there giving no sign it was going to act. It now
+   counts down visibly, and has a **Dismiss** button, which stops the roll-on for
+   that episode only.
+3. **Films dismissed straight back to the detail screen.** Correct, but abrupt
+   enough to read as a crash. There is now the same end card as the web —
+   *Watch again*, *Back*, and **the next film in the collection** when the
+   library has it — returning on its own after 90 seconds. The next part is
+   resolved to a playable file at play time, so the end card never has to wait.
+   Live TV that runs out of guide, and a dismissed binge, still just leave.
+4. **`playNext()` was hardcoded to the episode endpoint.** Fine for a TV binge,
+   wrong for a Live TV channel, which mixes films and episodes: rolling into a
+   film asked `/api/stream/episode/<movie file id>` and got nothing. It now
+   picks the endpoint — and the `kind` that progress reporting and audio probing
+   use — from what is actually being played.

@@ -58,12 +58,17 @@ struct MovieDetailView: View {
         }
         Task {
             guard let url = await store.resolvePlaybackURL(kind: "movie", file: f) else { return }
+            // The sequel, for the end card. Resolved now rather than when the
+            // film finishes, so it is ready the instant it is needed — and if it
+            // fails, the end card simply offers one fewer button.
+            let next = await store.nextInCollection(after: movieId, extra: extra)
             // Pre-roll plays ONLY when starting from the beginning (matches the
             // web). On a Resume the pre-roll queue also swallowed the seek and
             // restarted from 0 — dropping it fixes both.
             session = PlaySession(url: url, ref: .movie(movieId), duration: d.duration,
                                   startAt: position, title: d.title,
-                                  fileId: f.id, preroll: position <= 1 ? preroll : nil)
+                                  fileId: f.id, preroll: position <= 1 ? preroll : nil,
+                                  endNext: next)
         }
     }
 

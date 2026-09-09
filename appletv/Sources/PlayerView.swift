@@ -31,6 +31,10 @@ struct PlaySession: Identifiable {
     var preroll: URL? = nil
     var live: Bool = false
     var upNext: [UpNextItem] = []
+    // Offered on the end card when this finishes — the next film in the
+    // franchise. Deliberately NOT in `upNext`: a film should not roll into its
+    // sequel unasked, the way an episode rolls into the next episode.
+    var endNext: UpNextItem? = nil
     // Set when playing a downloaded copy: the server is not necessarily
     // reachable, so the subtitle menu is built from these files instead.
     var localSubs: [LocalSub] = []
@@ -42,6 +46,7 @@ extension PlayerView {
                   duration: session.duration, store: store, prerollURL: session.preroll,
                   title: session.title, subtitle: session.subtitle,
                   fileId: session.fileId, live: session.live, upNext: session.upNext,
+                  endNext: session.endNext,
                   localSubs: session.localSubs, useAVPlayer: useAVPlayer)
     }
 }
@@ -60,7 +65,8 @@ private enum VP {
 
 enum PlayerFocus: Hashable {
     case catcher, skipBack, play, skipFwd, scrubber, cc, gear
-    case skipIntro, upNext
+    case skipIntro, upNext, upNextDismiss
+    case endNext, endBack, endReplay
     case menuRow(Int)
 }
 
@@ -84,6 +90,7 @@ struct PlayerView: View {
     var fileId: Int? = nil
     var live: Bool = false
     var upNext: [UpNextItem] = []
+    var endNext: UpNextItem? = nil
     var localSubs: [PlaySession.LocalSub] = []
     // HDR path: drive playback with AVPlayer (the only tvOS pipeline that outputs
     // real HDR + lights the badge) instead of libVLC, but keep this exact same
@@ -108,7 +115,7 @@ struct PlayerView: View {
             // no-op style so there's NO tvOS focus highlight (no white flash).
             Button(action: { m.togglePlay(); m.flashControls() }) { Color.clear }
                 .buttonStyle(InvisibleButtonStyle())
-                .disabled(chromeUp || m.showSkipIntro || m.showUpNext)
+                .disabled(chromeUp || m.showSkipIntro || m.showUpNext || m.showEndCard)
                 .focused($focus, equals: .catcher)
                 .onMoveCommand { _ in m.flashControls() }
                 .onPlayPauseCommand { m.togglePlay(); m.flashControls() }
@@ -117,9 +124,11 @@ struct PlayerView: View {
             if m.buffering { spinner }
             skipAndUpNext
             if m.menu != .none { settingsMenu }
+            if m.showEndCard { endCard }
         }
         .onExitCommand {
-            if m.menu != .none { m.closeMenu(); focus = .catcher }
+            if m.showEndCard { m.leaveEndCard() }
+            else if m.menu != .none { m.closeMenu(); focus = .catcher }
             else if m.controlsVisible { m.controlsVisible = false; focus = .catcher }
             else { m.teardown(); dismiss() }
         }
@@ -127,7 +136,7 @@ struct PlayerView: View {
             m.bind(store: store)
             m.start(url: url, startAt: startAt, ref: ref, kind: kind, duration: duration,
                     title: title, subtitle: subtitle, fileId: fileId, live: live,
-                    preroll: prerollURL, upNext: upNext, localSubs: localSubs,
+                    preroll: prerollURL, upNext: upNext, endNext: endNext, localSubs: localSubs,
                     useAVPlayer: useAVPlayer)
             focus = .catcher
         }
@@ -142,11 +151,11 @@ struct PlayerView: View {
             else if menu == .osSearch { focus = .menuRow(0) }
         }
         .onChange(of: m.showSkipIntro) { on in if on { focus = .skipIntro } else if focus == .skipIntro { focus = m.controlsVisible ? .play : .catcher } }
-        .onChange(of: m.showUpNext) { on in if on { focus = .upNext } else if focus == .upNext { focus = m.controlsVisible ? .play : .catcher } }
+        .onChange(of: m.showUpNext) { on in if on { focus = .upNext } else if focus == .upNext || focus == .upNextDismiss { focus = m.controlsVisible ? .play : .catcher } }
         .onChange(of: m.finishedPlayback) { done in if done { m.teardown(); dismiss() } }
     }
 
-    private var menuOrPrompt: Bool { m.menu != .none || m.showSkipIntro || m.showUpNext }
+    private var menuOrPrompt: Bool { m.menu != .none || m.showSkipIntro || m.showUpNext || m.showEndCard }
 
     // MARK: Top bar — Back + title (web .vp-top)
 
@@ -249,6 +258,14 @@ struct PlayerView: View {
                         .buttonStyle(.plain)
                         .focused($focus, equals: .upNext)
                         .focusRing(focus == .upNext)
+                    Button { m.dismissUpNext() } label: {
+                        Text("Dismiss").font(.callout.weight(.semibold))
+                            .padding(.horizontal, 20).padding(.vertical, 10)
+                            .background(VP.panel2.opacity(0.96), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .focused($focus, equals: .upNextDismiss)
+                    .focusRing(focus == .upNextDismiss)
                 }
             }
             .padding(.trailing, 80).padding(.bottom, 150)
@@ -263,12 +280,62 @@ struct PlayerView: View {
                 Text("UP NEXT").font(.caption).fontWeight(.heavy).foregroundStyle(VP.accent2)
                 Text(n.title).font(.title3.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
                 if let s = n.subtitle { Text(s).font(.subheadline).foregroundStyle(VP.muted) }
+                // Visible countdown: the card acts on its own, so say when.
+                Text(m.upNextIn > 0 ? "Playing in \(m.upNextIn)s" : "Playing\u{2026}")
+                    .font(.subheadline.weight(.semibold)).foregroundStyle(VP.accent2)
+                    .monospacedDigit()
             }
             Spacer(minLength: 0)
         }
         .padding(16).frame(width: 460)
         .background(VP.panel.opacity(0.96), in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(VP.line, lineWidth: 1))
+    }
+
+    // MARK: End card (web .vp-endcard)
+    // Full-bleed so the frozen last frame is not what you are looking at, and
+    // centred because at this point it is the only thing on screen.
+    private var endCard: some View {
+        ZStack {
+            Color.black.opacity(0.86).ignoresSafeArea()
+            VStack(spacing: 10) {
+                Text(title).font(.system(size: 46, weight: .semibold)).foregroundStyle(.white)
+                    .lineLimit(2).multilineTextAlignment(.center)
+                Text("Finished").font(.title3).foregroundStyle(VP.muted)
+                HStack(spacing: 18) {
+                    if let n = m.endCardNext {
+                        Button { m.playEndCardNext() } label: {
+                            Text("\u{25B6} \(n.title)")
+                                .font(.title3.weight(.semibold))
+                                .lineLimit(1)
+                                .padding(.horizontal, 28).padding(.vertical, 14)
+                                .background(VP.grad, in: Capsule())
+                                .foregroundStyle(.white)
+                        }
+                        .buttonStyle(.plain)
+                        .focused($focus, equals: .endNext)
+                        .focusRing(focus == .endNext)
+                    }
+                    endCardButton("Back", .endBack) { m.leaveEndCard() }
+                    endCardButton("Watch again", .endReplay) { m.replayFromEndCard() }
+                }
+                .padding(.top, 26)
+            }
+            .padding(48)
+        }
+        .onAppear { focus = m.endCardNext != nil ? .endNext : .endBack }
+    }
+
+    private func endCardButton(_ label: String, _ f: PlayerFocus, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(label).font(.title3.weight(.semibold))
+                .padding(.horizontal, 28).padding(.vertical, 14)
+                .background(VP.panel2.opacity(0.96), in: Capsule())
+                .foregroundStyle(.white)
+        }
+        .buttonStyle(.plain)
+        .focused($focus, equals: f)
+        .focusRing(focus == f)
     }
 
     // MARK: Settings / Subtitles menu (web .vp-menu) — scrollable, bottom-right
@@ -467,9 +534,19 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     @Published var menu: Menu = .none
     @Published var showSkipIntro = false
     @Published var showUpNext = false
+    // Dismissed by hand: the card goes away AND the chain stops, so a binge you
+    // stepped out of does not keep rolling. Cleared on the next file.
+    @Published var upNextDismissed = false
+    // A film has nothing to roll into, so instead of a frozen last frame it gets
+    // an end card. Live TV and a dismissed binge just leave.
+    @Published var showEndCard = false
     @Published var finishedPlayback = false
     @Published var subtitleOptions: [TrackOption] = []
     @Published var audioOptions: [TrackOption] = []
+    // The server's view of the same audio streams, used to label and rank them.
+    @Published var serverAudio: [AudioTrack] = []
+    private var audioRequested = false
+    private var autoAudioApplied = false
     @Published var currentSubtitle = -1
     @Published var currentAudio = 0
     @Published var aiPhase: String?
@@ -497,6 +574,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     private var prerollURL: URL?
     private var mainURL: URL?
     private var upNext: [UpNextItem] = []
+    private var endNext: UpNextItem?
     private let sessionId = UUID().uuidString
 
     private var onMain = false
@@ -528,13 +606,14 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
 
     func start(url: URL, startAt: Double, ref: Store.PlayRef, kind: String, duration: Double?,
                title: String, subtitle: String?, fileId: Int?, live: Bool,
-               preroll: URL?, upNext: [UpNextItem], localSubs: [PlaySession.LocalSub] = [],
+               preroll: URL?, upNext: [UpNextItem], endNext: UpNextItem? = nil,
+               localSubs: [PlaySession.LocalSub] = [],
                useAVPlayer: Bool = false) {
         self.localSubs = localSubs
         self.offline = url.isFileURL
         self.ref = ref; self.kind = kind; self.fileId = fileId; self.mediaTitle = title
         self.mediaSubtitle = subtitle; self.declaredDuration = duration; self.live = live
-        self.startAt = startAt; self.prerollURL = preroll; self.upNext = upNext
+        self.startAt = startAt; self.prerollURL = preroll; self.upNext = upNext; self.endNext = endNext
         self.mainURL = url; self.duration = duration ?? 0
         self.useAV = useAVPlayer
         if !useAV { player.delegate = self }
@@ -815,7 +894,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         guard useAV, let item else { return }
         if item === avMainItem {
             // Main content finished → Up Next or dismiss.
-            if !upNext.isEmpty { playNext() } else { finish(save: true); finishedPlayback = true }
+            if !upNext.isEmpty, !upNextDismissed { playNext() } else { endOfPlayback() }
         } else {
             // Pre-roll finished; the queue has advanced to the main item
             // (which already starts at avBase — no seek needed).
@@ -835,7 +914,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
             if duration > 0, end.isFinite { buffered = min(1, end / duration) }
         }
         if let r = introRange { showSkipIntro = position >= r.start && position <= r.end }
-        if !upNext.isEmpty, duration > 0 { showUpNext = position >= duration - upNextLead && position < duration }
+        if !upNext.isEmpty, !upNextDismissed, duration > 0 { showUpNext = position >= duration - upNextLead && position < duration }
         report(position: position)
     }
 
@@ -946,6 +1025,52 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         showSkipIntro = false
     }
     func closeMenu() { menu = .none }
+    // Cancels the roll-on for THIS episode only; the queue is left intact so a
+    // later manual Play Now still works.
+    func dismissUpNext() { upNextDismissed = true; showUpNext = false }
+
+    // MARK: End of a film
+    // Nothing follows a film, so rather than dismissing instantly (which felt
+    // like a crash) or sitting on the last frame (which is what it used to do),
+    // show the way back plus the next part of the franchise when we own it. It
+    // leaves on its own after 90 seconds, for when nobody is awake to press
+    // anything.
+    var endCardNext: UpNextItem? { endNext }
+
+    private func endOfPlayback() {
+        finish(save: true)
+        // Live TV that ran out of guide, and a binge the viewer dismissed, both
+        // just leave — an end card there would be in the way.
+        guard !live, !upNextDismissed else { finishedPlayback = true; return }
+        showEndCard = true
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 90_000_000_000)
+            if showEndCard { leaveEndCard() }
+        }
+    }
+
+    func leaveEndCard() { showEndCard = false; finishedPlayback = true }
+
+    func replayFromEndCard() {
+        showEndCard = false
+        finished = false; position = 0; lastSaved = 0; lastBeat = -100; seekedToStart = true
+        if useAV { avBase = 0; av?.seek(to: .zero); av?.play() }
+        else if let u = mainURL { player.media = mediaWithFilters(u); player.play() }
+    }
+
+    // Hand the franchise's next part to the ordinary advance path, so it goes
+    // through exactly the same code an episode does.
+    func playEndCardNext() {
+        guard let n = endNext else { return }
+        showEndCard = false
+        endNext = nil
+        upNext = [n]
+        finished = false
+        playNext()
+    }
+    // Whole seconds until the card fires, for the visible countdown. Without one
+    // the card just sits there and the viewer cannot tell it is going to act.
+    var upNextIn: Int { max(0, Int((duration - position).rounded())) }
 
     // MARK: Subtitles / audio
     func toggleCC() {
@@ -982,6 +1107,37 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         }
         player.currentAudioTrackIndex = Int32(id)
     }
+    // Batch 2 parity: the RIGHT audio track, not merely the first one.
+    //
+    // libVLC hands back its own track ids and free-text names; the server hands
+    // back ffprobe's audio streams in container order with codec, channels and
+    // dispositions. Both lists are the file's audio streams in the same order,
+    // so position N in one is position N in the other — that ordinal is the only
+    // safe bridge between them (VLC's ids are not stream indexes, and its names
+    // are not parseable). If the counts disagree, something is being filtered
+    // and the mapping is not trustworthy: leave VLC's own choice alone.
+    private func loadServerAudio() {
+        guard !audioRequested, let store, let fileId, !live else { return }
+        audioRequested = true
+        Task { @MainActor in
+            serverAudio = await store.audioTracks(kind: kind, fileId: fileId)
+            applyAudioPreference()
+        }
+    }
+
+    private func applyAudioPreference() {
+        guard !serverAudio.isEmpty, serverAudio.count == audioOptions.count else { return }
+        // Better labels either way — "ENG · DTS · 5.1" beats "Track 1".
+        audioOptions = zip(audioOptions, serverAudio).map { TrackOption(id: $0.id, label: $1.label) }
+        guard !autoAudioApplied, serverAudio.count > 1 else { return }
+        autoAudioApplied = true
+        let surround = (store?.audioMode ?? "stereo") == "surround"
+        guard let want = Store.rankAudio(serverAudio, surround: surround),
+              want.index < audioOptions.count,
+              audioOptions[want.index].id != currentAudio else { return }
+        selectAudio(audioOptions[want.index].id)
+    }
+
     private func refreshAudioTracks() {
         let idxs = (player.audioTrackIndexes as? [NSNumber]) ?? []
         let names = (player.audioTrackNames as? [String]) ?? []
@@ -989,6 +1145,8 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         for (i, n) in zip(idxs, names) where i.int32Value >= 0 { opts.append(TrackOption(id: Int(i.int32Value), label: n)) }
         audioOptions = opts
         currentAudio = Int(player.currentAudioTrackIndex)
+        loadServerAudio()
+        applyAudioPreference()
     }
 
     // MARK: OpenSubtitles — search the catalogue and pull one down mid-play
@@ -1065,10 +1223,19 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         ref = next.ref; fileId = next.fileId; mediaTitle = next.title
         mediaSubtitle = next.subtitle; declaredDuration = next.duration
         duration = next.duration ?? 0; position = 0; currentSubtitle = -1
+        // New file, new streams: re-ask and re-rank rather than carrying over.
+        serverAudio = []; audioRequested = false; autoAudioApplied = false
+        upNextDismissed = false
+        // A Live TV channel mixes films and episodes, so the endpoint — and the
+        // kind everything downstream reports and probes with — has to follow
+        // what is actually being played, not what came before it.
+        let isEpisode: Bool
+        if case .episode = next.ref { isEpisode = true } else { isEpisode = false }
+        kind = isEpisode ? "episode" : "movie"
         if useAV {
             avBase = 0
             // Swap the queue over to the next episode's HLS remux.
-            if let url = store.hlsURL(kind: "episode", fileId: next.fileId), let q = av {
+            if let url = store.hlsURL(kind: kind, fileId: next.fileId), let q = av {
                 q.removeAllItems()
                 let item = AVPlayerItem(url: url)
                 q.insert(item, after: nil)
@@ -1078,8 +1245,10 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
                 }
                 q.play()
             }
-        } else if let url = store.episodeStreamURL(fileId: next.fileId) {
-            player.media = mediaWithFilters(url); player.play()
+        } else {
+            let nextURL = isEpisode ? store.episodeStreamURL(fileId: next.fileId)
+                                    : store.streamURL(fileId: next.fileId)
+            if let nextURL { player.media = mediaWithFilters(nextURL); player.play() }
         }
         Task { await loadMeta() }
     }
@@ -1099,7 +1268,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
             if currentSubtitle < 0 { player.currentVideoSubTitleIndex = -1 }
             refreshAudioTracks()
         case .ended:
-            if onMain { if !upNext.isEmpty { playNext() } else { finish(save: true); finishedPlayback = true } }
+            if onMain { if !upNext.isEmpty, !upNextDismissed { playNext() } else { endOfPlayback() } }
             else if let u = mainURL { switchToMain(url: u) }
         case .error: finish(save: false); finishedPlayback = true
         default: break
@@ -1118,7 +1287,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         if duration <= 0 { duration = Double(player.media?.length.intValue ?? 0) / 1000.0 }
         buffered = min(1, progress + 0.06)
         if let r = introRange { showSkipIntro = position >= r.start && position <= r.end }
-        if !upNext.isEmpty, duration > 0 { showUpNext = position >= duration - upNextLead && position < duration }
+        if !upNext.isEmpty, !upNextDismissed, duration > 0 { showUpNext = position >= duration - upNextLead && position < duration }
         report(position: position)
     }
 

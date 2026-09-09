@@ -1,4 +1,5 @@
 import Foundation
+import AVFoundation
 
 // ---- API models (the same /api/* JSON the web UI consumes) ----
 // Posters/backdrops are full https://image.tmdb.org URLs, so AsyncImage loads
@@ -164,6 +165,33 @@ struct Collection: Identifiable, Decodable, Hashable {
     }
 }
 
+// Which version of a title to play, when a title has several.
+//
+// The owner keeps a 1080p copy alongside a 4K one *on purpose*: the 4K is for
+// the projector at home, the 1080p is what streams to friends. Nothing acted on
+// that, so an Apple TV outside the house asked for the 4K remux and the server
+// re-encoded it down to fit the remote cap — a transcode, to deliver a picture
+// worse than the 1080p file would have given directly.
+//
+// A static rather than a Store dependency, because `bestFile` is a computed
+// property on the decoded models and those have no reference to Store. Set once
+// when server settings load.
+enum PlaybackPolicy {
+    static var isRemote = false
+
+    // Smallest version that isn't 4K. Falls back to the smallest overall when
+    // every copy is 4K — still the least bad thing to send over the internet.
+    static func pick(_ files: [MovieFile]) -> MovieFile? {
+        guard files.count > 1, isRemote else { return files.first } // server sorts best-first
+        let bySize = files.sorted { ($0.size ?? 0) < ($1.size ?? 0) }
+        let underCap = bySize.first { f in
+            guard let q = f.quality else { return true }
+            return !(q.contains("4K") || q.contains("2160"))
+        }
+        return underCap ?? bySize.first
+    }
+}
+
 // ---- Playback: /api/movies/:id returns the logical movie + its files ----
 struct MovieFile: Identifiable, Decodable, Hashable {
     let id: Int
@@ -197,7 +225,8 @@ struct MovieDetail: Decodable {
     let files: [MovieFile]
 
     var genreList: [String] { Store.parseJSONStrings(genres) }
-    var bestFile: MovieFile? { files.first }   // server sorts highest quality first
+    // Remote viewers get the smaller copy; see PlaybackPolicy.
+    var bestFile: MovieFile? { PlaybackPolicy.pick(files) }
 }
 
 // ---- TV: /api/shows/:id returns the show + seasons -> episodes -> files ----
@@ -213,7 +242,7 @@ struct Episode: Identifiable, Decodable, Hashable {
     let watched: Int?
     let files: [MovieFile]
 
-    var bestFile: MovieFile? { files.first }
+    var bestFile: MovieFile? { PlaybackPolicy.pick(files) }
     var displayTitle: String { title ?? "Episode \(episode ?? 0)" }
     var tag: String { "S\(season ?? 0) · E\(episode ?? 0)" }
     var progressFraction: Double {
@@ -284,7 +313,14 @@ struct ProfilesResponse: Decodable { let radarr: ArrProfiles?; let sonarr: ArrPr
 struct CastMember: Decodable, Hashable { let name: String; let character: String?; let profile: String? }
 struct RecItem: Decodable, Hashable { let title: String; let year: Int?; let poster: String?; let localId: Int? }
 struct Trailer: Decodable, Hashable { let key: String; let name: String? }
+// The TMDB franchise this film belongs to, with each part marked with the local
+// library id when we own it — that is what makes "the next one" offerable at the
+// end of a film instead of stopping on a frozen frame.
+struct CollectionPart: Decodable, Hashable { let title: String; let localId: Int? }
+struct MovieCollectionInfo: Decodable { let name: String?; let parts: [CollectionPart]? }
+
 struct MovieExtra: Decodable {
+    let collection: MovieCollectionInfo?
     let runtime: Int?
     let tagline: String?
     let genres: [String]?
@@ -390,7 +426,12 @@ final class Store: ObservableObject {
     init() {
         serverURL = UserDefaults.standard.string(forKey: "serverURL") ?? Store.defaultServer
         token = UserDefaults.standard.string(forKey: "authToken")
-        audioMode = UserDefaults.standard.string(forKey: "audioMode") ?? "stereo"
+        // Default to what this Apple TV is actually plugged into rather than
+        // assuming stereo. The old `?? "stereo"` meant a projector wired to a
+        // surround receiver silently got a stereo downmix from the server unless
+        // someone found this setting — the owner's system was doing exactly that.
+        // An explicit choice is always kept; this only decides the first run.
+        audioMode = UserDefaults.standard.string(forKey: "audioMode") ?? Store.detectedAudioMode()
         dboost = UserDefaults.standard.string(forKey: "dboost") ?? "normal"
         night = UserDefaults.standard.bool(forKey: "night")
         norm = UserDefaults.standard.bool(forKey: "norm")
@@ -571,6 +612,27 @@ final class Store: ObservableObject {
         if old != nil { Task { _ = try? await request("api/logout", method: "POST") } }
     }
 
+    // What is this Apple TV plugged into? More than two output channels means a
+    // receiver or soundbar that can take surround, so don't fold it to stereo.
+    // Only ever used as a first-run default; a stored choice always wins.
+    static func detectedAudioMode() -> String {
+        let ch = AVAudioSession.sharedInstance().currentRoute.outputs
+            .map { $0.channels?.count ?? 0 }.max() ?? 0
+        return ch > 2 ? "surround" : "stereo"
+    }
+
+    // Ask the server whether this Apple TV is reaching it from outside the
+    // house. Off-network, a title with several versions should play the smaller
+    // one — see PlaybackPolicy. Cheap, and failure just leaves the default.
+    func loadServerPolicy() async {
+        guard !previewMode else { return }
+        struct Cap: Decodable { let height: Int?; let kbps: Int? }
+        struct S: Decodable { let remote: Bool?; let remoteCap: Cap? }
+        if let s = await get("api/settings", as: S.self) {
+            PlaybackPolicy.isRemote = s.remote ?? false
+        }
+    }
+
     // ---- Data loading ----
     // Screens call this on appear so watch state stays fresh (Continue Watching
     // updates, watched titles drop out) without hammering the server.
@@ -583,6 +645,8 @@ final class Store: ObservableObject {
 
     func loadHome() async {
         lastHomeLoad = Date()
+        // Cheap, and it decides which version of a title plays; see PlaybackPolicy.
+        await loadServerPolicy()
         loading = true; error = nil
         defer { loading = false }
         async let m: [Movie]? = get("api/movies", as: [Movie].self)
@@ -1001,5 +1065,95 @@ final class Store: ObservableObject {
 
     private func serverError(_ data: Data) -> String? {
         (try? JSONSerialization.jsonObject(with: data)).flatMap { ($0 as? [String: Any])?["error"] as? String }
+    }
+}
+
+// MARK: - Audio tracks (Batch 2 parity)
+//
+// One audio stream of a file as the server sees it, via
+// GET /api/audio/list/:kind/:fileId. tvOS runs libVLC, which software-decodes
+// every codec in the library, so unlike the web client this is not about
+// *whether* a track can play — it is about picking the RIGHT one. A remux whose
+// first stream is DTS 5.1 will otherwise be fed to a stereo TV untouched, and a
+// commentary track sitting at a:0 will play the film with a director talking
+// over it.
+struct AudioTrack: Decodable, Hashable, Identifiable {
+    let index: Int              // ordinal among audio streams == the "a:N" specifier
+    let codec: String
+    let channels: Int
+    let layout: String?
+    let language: String?
+    let title: String?
+    let bitrateKbps: Int?
+    let isDefault: Bool
+    let commentary: Bool
+
+    var id: Int { index }
+
+    private enum CodingKeys: String, CodingKey {
+        case index, codec, channels, layout, language, title, bitrateKbps
+        case isDefault = "default"
+        case commentary
+    }
+
+    // What the in-player menu shows. Language first because that is what people
+    // actually scan for.
+    var label: String {
+        var bits: [String] = []
+        if let l = language, !l.isEmpty, l != "und" { bits.append(l.uppercased()) }
+        bits.append(codec.uppercased())
+        if let ly = layout, !ly.isEmpty { bits.append(ly) } else if channels > 0 { bits.append("\(channels)ch") }
+        if commentary { bits.append("Commentary") }
+        return bits.joined(separator: " · ")
+    }
+}
+
+extension Store {
+    func audioTracks(kind: String, fileId: Int) async -> [AudioTrack] {
+        guard !previewMode else { return [] }
+        struct R: Decodable { let tracks: [AudioTrack] }
+        return await get("api/audio/list/\(kind)/\(fileId)", as: R.self)?.tracks ?? []
+    }
+
+    // Batch 2's ranking, unchanged: speaker layout first, then bitrate, then the
+    // container's default flag. Commentary never wins automatically — it is only
+    // ever reachable by hand from the player's audio menu.
+    //
+    // `surround` is the device's Audio output setting, not a guess from the
+    // route: a projector with stereo drivers may still be feeding a receiver
+    // over eARC, so the stored choice decides.
+    static func rankAudio(_ tracks: [AudioTrack], surround: Bool) -> AudioTrack? {
+        let usable = tracks.filter { !$0.commentary }
+        let pool = usable.isEmpty ? tracks : usable
+        guard !pool.isEmpty else { return nil }
+        return pool.max { a, b in score(a, surround: surround) < score(b, surround: surround) }
+    }
+
+    private static func score(_ t: AudioTrack, surround: Bool) -> Double {
+        // Layout dominates — a wrong-layout track is wrong however good it is.
+        // Surround wants the most channels; stereo prefers an actual 2.0 mix
+        // over a downmix the decoder has to fold, and never more than 2.
+        var s: Double = surround ? Double(t.channels) * 1000
+                                 : (t.channels == 2 ? 4000 : -Double(t.channels) * 100)
+        s += Double(min(t.bitrateKbps ?? 0, 4000)) / 10
+        if t.isDefault { s += 5 }
+        return s
+    }
+}
+
+extension Store {
+    // The next film in this franchise, if it is in the library. Parts arrive in
+    // release order, so take the first one after this that we actually own — a
+    // gap in the collection is skipped rather than blocking the offer. Resolved
+    // all the way to a playable file here so the player never has to think.
+    func nextInCollection(after movieId: Int, extra: MovieExtra?) async -> UpNextItem? {
+        guard let parts = extra?.collection?.parts,
+              let here = parts.firstIndex(where: { $0.localId == movieId }) else { return nil }
+        guard let nxt = parts[parts.index(after: here)...].first(where: { $0.localId != nil }),
+              let id = nxt.localId,
+              let d = await movieDetail(id), let f = d.bestFile else { return nil }
+        return UpNextItem(fileId: f.id, ref: .movie(id), title: d.title,
+                          subtitle: d.year.map(String.init), still: d.backdrop ?? d.poster,
+                          duration: d.duration)
     }
 }
