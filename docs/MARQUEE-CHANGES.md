@@ -245,3 +245,44 @@ The Apple TV Up Next card's **Dismiss** now sits under the card, right-aligned
 with it, instead of floating beside it. The web keeps its actions inside the
 card, which tvOS cannot do — a Button's label cannot contain another focusable
 Button — and beside it the capsule read as unrelated to the card.
+
+---
+
+## 2026-09-09 — Live TV offers no way to skip, on any client
+
+Not just the skip cards: **a channel exposes no seeking at all.** You cannot
+rewind, jump forward, or scrub one, because there is nowhere to scrub to — the
+schedule decides what is on.
+
+This was already true on the web (`.vp-live` hides the scrub bar, the transport
+and the clock) and on Android TV (`seekBy()` returns immediately when `live`).
+
+**Apple TV was the outlier and allowed all of it.** A tuned channel got the full
+scrubber with a progress thumb, a `position / duration` clock, and D-pad
+left/right wired straight to `jump(±10)` with no live check anywhere. Now:
+
+- `jump()` refuses when live, so no future caller can reintroduce seeking by
+  accident;
+- `skipIntro()` refuses when live too — that is the other way into a seek;
+- the scrubber is **not rendered** on a channel rather than merely disabled. It
+  is the surface the D-pad seeks from, so leaving it on screen would keep ±10s
+  reachable however well the seek itself is guarded;
+- the clock is replaced by a **LIVE** flag, because a position within a
+  programme you joined halfway is not information anyone wants.
+
+Play/pause is deliberately left alone — pausing is not skipping. Worth revisiting
+separately: the web hides it on a live feed, and pausing a simulated-live channel
+desyncs it from the schedule.
+
+### A note on the tvOS palette
+
+The LIVE flag uses `VP.accent2`, the treatment the player already gives its own
+"UP NEXT" label — not the web's Braun orange. The tvOS **browse** UI is on the
+Braun palette (`Theme.Palette.signal`, "Braun orange. State only, never
+decoration"), but `PlayerView` deliberately carries its own `VP` set, described
+in the source as "the web player's tokens". Those tokens are the pre-Braun
+purple/blue ones, so orange would have been the only warm thing on that screen.
+
+**That divergence is worth a decision at some point**: the tvOS player is styled
+to a version of the web player that no longer exists. Left as-is here rather than
+restyled in passing.

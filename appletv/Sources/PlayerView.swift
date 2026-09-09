@@ -188,11 +188,29 @@ struct PlayerView: View {
             Spacer()
             // Bottom: scrubber + utility row over a scrim.
             VStack(spacing: 14) {
-                scrubber
+                // A channel has nowhere to scrub TO. The web player hides the
+                // scrub bar, the transport and the clock outright on a live feed
+                // (.vp-live) and shows a LIVE flag instead; this is that. The
+                // scrubber is also the surface the D-pad seeks from, so leaving
+                // it on screen would keep ±10s reachable however well jump() is
+                // guarded.
+                if !live { scrubber }
                 HStack(spacing: 18) {
-                    Text("\(m.clock(m.position)) / \(m.clock(m.duration))")
-                        .font(.system(size: 28, weight: .medium).monospacedDigit())
-                        .foregroundStyle(Color(hex: 0xeef1f8))
+                    if live {
+                        // VP.accent2, the same treatment the player already
+                        // gives its own "UP NEXT" label. The web flags LIVE in
+                        // Braun orange, but nothing else on THIS screen is orange
+                        // — the player deliberately runs on its own palette.
+                        HStack(spacing: 9) {
+                            Circle().fill(VP.accent2).frame(width: 13, height: 13)
+                            Text("LIVE").font(.system(size: 24, weight: .heavy)).tracking(2)
+                                .foregroundStyle(VP.accent2)
+                        }
+                    } else {
+                        Text("\(m.clock(m.position)) / \(m.clock(m.duration))")
+                            .font(.system(size: 28, weight: .medium).monospacedDigit())
+                            .foregroundStyle(Color(hex: 0xeef1f8))
+                    }
                     Spacer()
                     utilityButton(.cc) { Text("CC").font(.system(size: 26, weight: .heavy)) } action: { m.menu = .settings }
                     utilityButton(.gear) { Image(systemName: "gearshape.fill").font(.system(size: 30)) } action: { m.menu = .settings }
@@ -1025,6 +1043,9 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         if player.isPlaying { player.pause() } else { player.play() }
     }
     func jump(_ s: Int) {
+        // Nothing on a live channel is seekable — see the LIVE branch in
+        // bottomChrome. Guarded here too so no future caller can reintroduce it.
+        guard !live else { return }
         if useAV { avSeek(position + Double(s)); return }
         if s < 0 { player.jumpBackward(Int32(-s)) } else { player.jumpForward(Int32(s)) }
     }
@@ -1055,7 +1076,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         showSkipCredits = position >= duration - 45 && position < duration - 1
     }
     func skipIntro() {
-        guard let end = introRange?.end else { return }
+        guard !live, let end = introRange?.end else { return }
         if useAV { avSeek(end) }
         else { player.time = VLCTime(int: Int32(end * 1000)) }
         showSkipIntro = false

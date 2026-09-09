@@ -349,6 +349,9 @@ class PlayerActivity : Activity() {
     }
 
     private fun skipIntroNow() {
+        // seekBy() already refuses on a channel; this is the other way into a
+        // seek, so it refuses too.
+        if (live) return
         if (introEnd <= 0) return
         introSkipped = true
         skipIntroBtn.visibility = View.GONE
