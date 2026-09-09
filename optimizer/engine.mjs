@@ -935,6 +935,16 @@ function summarize(info) {
 // Run queued jobs one at a time. One at a time is deliberate: the box also has
 // to serve playback, and two concurrent encodes on a 1050 Ti help nobody.
 export async function runQueue(db, { log = () => {}, allow4kVideo = false, allowHdrVideo = false } = {}) {
+  ensureSchema(db);
+  // A job left 'running' belongs to a process that is no longer alive — the
+  // window was closed, the machine restarted, the run was killed. Nothing picks
+  // those up again, because the queue only ever selects 'queued', so the file
+  // would sit half-considered for ever. Put them back. The work itself is safe
+  // to repeat: every job writes to a temp file beside the source and the source
+  // is only replaced after the verification gate passes.
+  const revived = db.prepare("UPDATE optimize_jobs SET state='queued', pct=0 WHERE state IN ('running','verifying')").run().changes;
+  if (revived) log(`Optimizer: requeued ${revived} job(s) left behind by an interrupted run.`);
+
   if (worker.running) return;
   worker.running = true; worker.stop = false;
 

@@ -222,11 +222,23 @@ if (cmd === 'status') {
   }
   log(`${res.falsePositives} candidate group(s) turned out to be different files that merely look identical.`);
 } else if (cmd === 'watch') {
-  log('watching for new content. Ctrl+C to stop.');
+  // How this is meant to run: unattended, for good. It clears whatever backlog
+  // exists, then wakes every 15 minutes to pick up new content.
+  //
+  // It used to work only when the probe scan found something new, which meant
+  // that on an already-probed library — the exact case of a first run — it
+  // found nothing, did nothing, and slept, for ever. The backlog IS the work
+  // the first time round, and there is nothing new to find.
+  log('watching. Clearing the existing backlog first, then new content as it lands.');
+  log('Ctrl+C to stop; it also stands down on its own whenever someone is watching.');
   for (;;) {
     try {
-      const n = await doScan();
-      if (n) await work(arg || 5);
+      await doScan();
+      // Keep going until the plan is exhausted or a viewer appears — work()
+      // returns 0 for both, so this drains rather than doing five and sleeping
+      // for a quarter of an hour with a thousand files still to go.
+      let did = 0;
+      do { did = await work(arg || 5); } while (did > 0);
     } catch (e) { log('error: ' + e.message); }
     await new Promise((r) => setTimeout(r, 15 * 60 * 1000));
   }
