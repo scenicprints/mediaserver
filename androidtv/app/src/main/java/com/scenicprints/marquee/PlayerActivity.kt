@@ -3,8 +3,6 @@ package com.scenicprints.marquee
 import android.app.Activity
 import android.content.Intent
 import android.graphics.Color
-import android.graphics.LinearGradient
-import android.graphics.Shader
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.media.AudioManager
@@ -125,8 +123,11 @@ class PlayerActivity : Activity() {
     // swallowing the next real stall.
     private var seekGateUntilMs = 0L
 
-    private val ACCENT = Color.parseColor("#6c5cff")
-    private val ACCENT2 = Color.parseColor("#37c2ff")
+    // Both names survive so every call site keeps reading sensibly, but there is
+    // only one accent now: the purple/cyan pair existed solely to make a
+    // gradient, and Braun does not gradient.
+    private val ACCENT = Braun.signal
+    private val ACCENT2 = Braun.signal
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -521,8 +522,8 @@ class PlayerActivity : Activity() {
         for (i in 1 until subsMenuList.childCount) {
             val row = subsMenuList.getChildAt(i) as? TextView ?: continue
             val on = i == menuSel
-            row.setBackgroundColor(if (on) Color.argb(70, 108, 92, 255) else Color.TRANSPARENT)
-            row.setTextColor(if (on) Color.WHITE else Color.parseColor("#c7ccda"))
+            row.setBackgroundColor(if (on) Braun.panel2 else Color.TRANSPARENT)
+            row.setTextColor(if (on) Braun.signal else Braun.ink2)
         }
     }
 
@@ -609,9 +610,9 @@ class PlayerActivity : Activity() {
             background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
                 intArrayOf(Color.argb(178, 0, 0, 0), Color.TRANSPARENT))
         }
-        titleView = TextView(this).apply { setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; text = spec.optString("title") }
+        titleView = TextView(this).apply { setTextColor(Braun.ink); typeface = Typeface.DEFAULT_BOLD; text = spec.optString("title") }
         sp(titleView, 18f)
-        subView = TextView(this).apply { setTextColor(Color.parseColor("#c7ccda")); text = spec.optString("subtitle") }
+        subView = TextView(this).apply { setTextColor(Braun.ink2); text = spec.optString("subtitle") }
         sp(subView, 13f)
         top.addView(titleView); top.addView(subView)
         if (spec.optString("subtitle").isEmpty()) subView.visibility = View.GONE
@@ -626,12 +627,17 @@ class PlayerActivity : Activity() {
         scrub = ScrubView(this, ACCENT, ACCENT2)
         bottom.addView(scrub, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(4)).apply { bottomMargin = dp(10) })
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        playIcon = TextView(this).apply { setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; text = "❚❚" }
+        playIcon = TextView(this).apply { setTextColor(Braun.ink); typeface = Typeface.DEFAULT_BOLD; text = "❚❚" }
         sp(playIcon, 15f)
-        timeView = TextView(this).apply { setTextColor(Color.WHITE); text = if (live) "LIVE" else "0:00 / 0:00" }
+        timeView = TextView(this).apply {
+            setTextColor(if (live) Braun.signal else Braun.ink)
+            letterSpacing = if (live) 0.3f else 0.06f
+            text = if (live) "LIVE" else "0:00 / 0:00"
+        }
         sp(timeView, 13f)
         val hint = TextView(this).apply {
-            setTextColor(Color.parseColor("#8a91a5"))
+            setTextColor(Braun.ink3)
+            letterSpacing = 0.08f
             text = if (live) "OK pause · ▼ subtitles · Back exit" else "OK play/pause · ◀ ▶ ±10s · ▼ subtitles · Back exit"
             gravity = Gravity.END
         }
@@ -647,11 +653,16 @@ class PlayerActivity : Activity() {
 
         // --- Skip Intro (web-matched pill; OK activates it while visible) ---
         skipIntroBtn = TextView(this).apply {
-            text = "Skip Intro ▸  (OK)"
-            setTextColor(Color.BLACK)
+            text = "SKIP INTRO ▸  (OK)"
+            setTextColor(Braun.ink)
             typeface = Typeface.DEFAULT_BOLD
-            setPadding(dp(18), dp(10), dp(18), dp(10))
-            background = GradientDrawable().apply { cornerRadius = dp(8).toFloat(); setColor(Color.WHITE) }
+            letterSpacing = 0.18f
+            setPadding(dp(20), dp(11), dp(20), dp(11))
+            background = GradientDrawable().apply {
+                cornerRadius = 0f
+                setColor(Color.argb(210, 20, 20, 22))
+                setStroke(dp(1), Braun.rule)
+            }
             visibility = View.GONE
         }
         sp(skipIntroBtn, 14f)
@@ -662,11 +673,16 @@ class PlayerActivity : Activity() {
         // --- Skip Credits (same pill, same corner: the two never show at once,
         // one being at the start of an episode and the other at the end) ---
         skipCreditsBtn = TextView(this).apply {
-            text = "Skip Credits ▸  (OK)"
-            setTextColor(Color.BLACK)
+            text = "SKIP CREDITS ▸  (OK)"
+            setTextColor(Braun.ink)
             typeface = Typeface.DEFAULT_BOLD
-            setPadding(dp(18), dp(10), dp(18), dp(10))
-            background = GradientDrawable().apply { cornerRadius = dp(8).toFloat(); setColor(Color.WHITE) }
+            letterSpacing = 0.18f
+            setPadding(dp(20), dp(11), dp(20), dp(11))
+            background = GradientDrawable().apply {
+                cornerRadius = 0f
+                setColor(Color.argb(210, 20, 20, 22))
+                setStroke(dp(1), Braun.rule)
+            }
             visibility = View.GONE
         }
         sp(skipCreditsBtn, 14f)
@@ -678,7 +694,7 @@ class PlayerActivity : Activity() {
         bufferOverlay = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            setBackgroundColor(Color.argb(158, 5, 6, 9))
+            setBackgroundColor(Color.argb(186, 14, 14, 22))
         }
         val brand = TextView(this).apply {
             text = "MARQUEE"
@@ -686,11 +702,8 @@ class PlayerActivity : Activity() {
             letterSpacing = 0.35f
         }
         sp(brand, 34f)
-        brand.post {
-            brand.paint.shader = LinearGradient(0f, 0f, brand.width.toFloat(), 0f, ACCENT, ACCENT2, Shader.TileMode.CLAMP)
-            brand.invalidate()
-        }
-        val loading = TextView(this).apply { setTextColor(Color.parseColor("#c9cfdf")); text = "LOADING…"; letterSpacing = 0.15f }
+        brand.setTextColor(Braun.ink)
+        val loading = TextView(this).apply { setTextColor(Braun.ink2); text = "LOADING…"; letterSpacing = 0.22f }
         sp(loading, 12f)
         bufferOverlay.addView(brand)
         bufferOverlay.addView(loading, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(14) })
@@ -699,7 +712,11 @@ class PlayerActivity : Activity() {
         // --- Subtitles menu (right-side dark panel, remote-driven) ---
         subsMenuList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(6), dp(10), dp(6), dp(10)) }
         subsMenu = ScrollView(this).apply {
-            background = GradientDrawable().apply { cornerRadius = dp(12).toFloat(); setColor(Color.argb(242, 17, 19, 28)) }
+            background = GradientDrawable().apply {
+                cornerRadius = 0f
+                setColor(Color.argb(246, 29, 29, 32))
+                setStroke(dp(1), Braun.rule)
+            }
             visibility = View.GONE
             addView(subsMenuList, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
@@ -714,15 +731,15 @@ class PlayerActivity : Activity() {
 
     private fun menuHeader(text: String): TextView = TextView(this).apply {
         this.text = text
-        setTextColor(Color.parseColor("#8a91a5"))
+        setTextColor(Braun.ink3)
         typeface = Typeface.DEFAULT_BOLD
-        letterSpacing = 0.1f
+        letterSpacing = 0.24f
         setPadding(dp(14), dp(8), dp(14), dp(8))
     }.also { sp(it, 11f) }
 
     private fun menuRow(text: String, selected: Boolean, onClick: () -> Unit): TextView = TextView(this).apply {
         this.text = if (selected) "✓ $text" else text
-        setTextColor(Color.parseColor("#c7ccda"))
+        setTextColor(Braun.ink2)
         setPadding(dp(14), dp(11), dp(14), dp(11))
         setOnClickListener { onClick() }
     }.also { sp(it, 14f) }
@@ -756,22 +773,32 @@ class PlayerActivity : Activity() {
     }
 }
 
-/** Minimal gradient scrubber: a rounded track with a gradient fill — the same
- *  visual language as the web player's --grad progress bar. */
-private class ScrubView(ctx: android.content.Context, accent: Int, accent2: Int) : View(ctx) {
+/** The app's palette, dark finish — the same values as the Apple TV app's
+ *  Theme.black. Player chrome is ALWAYS the dark finish whatever the app is set
+ *  to: it sits on top of a picture, and light chrome over a picture is
+ *  unreadable. Signal is state and never decoration. */
+private object Braun {
+    val paper = Color.parseColor("#141416")
+    val panel = Color.parseColor("#1D1D20")
+    val panel2 = Color.parseColor("#232327")
+    val sunk = Color.parseColor("#0E0E10")
+    val ink = Color.parseColor("#EFEEE9")
+    val ink2 = Color.parseColor("#8C8C86")
+    val ink3 = Color.parseColor("#65655F")
+    val rule = Color.parseColor("#33333A")
+    val signal = Color.parseColor("#F26A16")
+}
+
+/** A scale, not a tube: a square track with a flat signal-coloured fill. */
+private class ScrubView(ctx: android.content.Context, accent: Int, @Suppress("UNUSED_PARAMETER") accent2: Int) : View(ctx) {
     private var progress = 0f
-    private val trackPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(64, 255, 255, 255) }
-    private val fillPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
-    private val a1 = accent; private val a2 = accent2
+    private val trackPaint = android.graphics.Paint().apply { color = Color.argb(46, 255, 255, 255) }
+    private val fillPaint = android.graphics.Paint().apply { color = accent }
 
     fun setProgress(p: Float) { progress = p.coerceIn(0f, 1f); invalidate() }
 
-    override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
-        fillPaint.shader = LinearGradient(0f, 0f, w.toFloat(), 0f, a1, a2, Shader.TileMode.CLAMP)
-    }
     override fun onDraw(canvas: android.graphics.Canvas) {
-        val r = height / 2f
-        canvas.drawRoundRect(0f, 0f, width.toFloat(), height.toFloat(), r, r, trackPaint)
-        if (progress > 0f) canvas.drawRoundRect(0f, 0f, width * progress, height.toFloat(), r, r, fillPaint)
+        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), trackPaint)
+        if (progress > 0f) canvas.drawRect(0f, 0f, width * progress, height.toFloat(), fillPaint)
     }
 }

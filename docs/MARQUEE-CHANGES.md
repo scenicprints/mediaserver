@@ -321,3 +321,35 @@ sites keep reading sensibly while the look changes underneath them:
 
 The LIVE flag added earlier the same day is `pal.signal` accordingly — state,
 never decoration, which is what LIVE is.
+
+---
+
+## 2026-09-09 — The Android TV player joins too
+
+Exactly the same story as the tvOS player, down to the hex codes: `PlayerActivity`
+carried `ACCENT = #6c5cff` and `ACCENT2 = #37c2ff` — the web's pre-restyle tokens
+— and drew a gradient between them on the scrub bar and the MARQUEE wordmark. The
+skip pills were white rounded lozenges with black text; the greys were the old
+blue-tinted set (`#c7ccda`, `#8a91a5`, `#c9cfdf`).
+
+A `Braun` object now holds the dark-finish palette, the same values as the Apple
+TV app's `Theme.black`, so the two native players are literally the same colours:
+
+- **One accent.** `ACCENT` and `ACCENT2` both resolve to `Braun.signal`; the pair
+  only existed to feed `LinearGradient`. Both `LinearGradient` and `Shader` are
+  now unused and their imports are gone.
+- **The scrub bar is a scale, not a tube** — `drawRect` on a square track with a
+  flat signal fill, replacing the rounded gradient. Anti-aliasing dropped with
+  the curves.
+- **The skip pills match the Apple TV ones**: squared, near-unfilled, a hairline
+  rule, ink text, SMALL CAPS AND LETTERSPACED.
+- **LIVE is signal-coloured** and letterspaced, where it used to be plain white
+  text the same as a clock.
+- **The focused subtitle row** is a signal-coloured mark on a recessed panel
+  rather than a translucent purple wash.
+- The wordmark, the subtitles panel (squared, hairline edge), the hint line and
+  every grey move onto `ink` / `ink2` / `ink3` / `rule`.
+
+Worth noting while in there: the remote hint already reads "OK pause · ▼
+subtitles · Back exit" on a channel and only mentions ±10s off it — the player
+was telling the truth about not seeking live long before the code enforced it.
