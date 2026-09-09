@@ -80,6 +80,46 @@ const FREE_SPACE_FACTOR = 1.15;
 
 const TMP_SUFFIX = '.marquee-opt.tmp';
 
+// ---- Giving up, and not giving up too early ----------------------------
+//
+// A job that fails used to sit in 'failed' for ever and a file that failed to
+// probe was never read again, so both quietly dropped out of the program's
+// attention and only a person going looking would find them. That is the
+// program's job, not the owner's.
+//
+// The counterweight is that blind retrying is expensive here: one attempt on a
+// 75 GB remux is a full read and a full write of a tired USB disk. So retries
+// are bounded, spaced out, and only for failures that could plausibly go the
+// other way next time.
+const MAX_JOB_ATTEMPTS = 3;
+const RETRY_BACKOFF_MS = [10 * 60e3, 60 * 60e3, 6 * 3600e3]; // 10m, 1h, 6h
+const MAX_PROBE_ATTEMPTS = 3;
+
+// Would running this again plausibly produce a different answer?
+//
+// Transient things — a drive that hiccuped, a full disk, a timeout — yes.
+// Judgements are not transient: a rejected encode was measured and found
+// wanting, and re-running the identical encode reaches the identical verdict
+// while costing another hour. A file that has moved or changed is a different
+// question entirely and belongs to the scanner.
+export function isRetryableFailure(error) {
+  const e = String(error || '').toLowerCase();
+  if (!e) return false;
+  // Judged, and judged fairly. Includes the VMAF gate.
+  if (e.includes('verification failed')) return false;
+  if (e.includes('vmaf')) return false;
+  if (e.includes('no longer worth optimizing')) return false;
+  // The file underneath us is not what we planned against.
+  if (e.includes('file changed since')) return false;
+  if (e.includes('source file is gone')) return false;
+  if (e.includes('no longer in the library')) return false;
+  if (e.includes('cannot stat source')) return false;
+  if (e.includes(PROTECTED_REASON.toLowerCase())) return false;
+  // Everything else is the world being unreliable: I/O errors, a full disk, a
+  // timeout, a drive that dropped off the bus mid-write.
+  return true;
+}
+
 // ---- Pacing, so this cannot flatten the drives -------------------------
 //
 // These are USB disks. Two of them logged "the IO operation had to be retried"
@@ -271,6 +311,16 @@ export function ensureSchema(db) {
     );
   `);
   db.exec('CREATE INDEX IF NOT EXISTS idx_optjobs_state ON optimize_jobs(state);');
+
+  // Added after the fact, so existing databases get them without a rebuild.
+  // 'duplicate column name' is the expected outcome on every run but the first.
+  for (const [table, col, decl] of [
+    ['optimize_jobs', 'attempts', 'INTEGER DEFAULT 0'],
+    ['optimize_jobs', 'next_try_at', 'INTEGER'],
+    ['media_info', 'probe_attempts', 'INTEGER DEFAULT 0']
+  ]) {
+    try { db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${decl};`); } catch { /* already there */ }
+  }
 }
 
 // ---- Probing -----------------------------------------------------------
@@ -280,6 +330,23 @@ function run(cmd, args, timeout = 120000) {
     if (!cmd) return resolve(null);
     execFile(cmd, args, { windowsHide: true, maxBuffer: 16 * 1024 * 1024, timeout },
       (err, stdout) => resolve(err ? null : String(stdout)));
+  });
+}
+
+// The same thing, but it keeps the reason it failed. `run` throws stderr away,
+// which is why thirty unreadable files could only ever say "probe failed" —
+// true, useless, and indistinguishable between a corrupt file, a drive that had
+// dropped off the bus, and a path with a character ffprobe choked on.
+function runDetailed(cmd, args, timeout = 120000) {
+  return new Promise((resolve) => {
+    if (!cmd) return resolve({ stdout: null, why: 'no binary' });
+    execFile(cmd, args, { windowsHide: true, maxBuffer: 16 * 1024 * 1024, timeout },
+      (err, stdout, stderr) => {
+        if (!err) return resolve({ stdout: String(stdout), why: null });
+        const msg = String(stderr || '').trim().split('\n').filter(Boolean).pop()
+          || (err.killed ? `timed out after ${Math.round(timeout / 1000)}s` : err.message);
+        resolve({ stdout: null, why: msg.slice(0, 300) });
+      });
   });
 }
 
@@ -318,7 +385,7 @@ function isHdr(v) {
 async function probeOne(filePath) {
   const bin = ffprobeBin();
   if (!bin) return { error: 'ffprobe unavailable' };
-  const out = await run(bin, [
+  const { stdout: out, why } = await runDetailed(bin, [
     '-v', 'error', '-print_format', 'json',
     '-show_entries',
     'format=duration,bit_rate,format_name:stream=index,codec_type,codec_name,width,height,pix_fmt,channels,bit_rate,color_transfer,color_primaries:stream_tags=language,title',
@@ -326,7 +393,13 @@ async function probeOne(filePath) {
   ], 60000);
   let j = null;
   try { j = JSON.parse(out); } catch {}
-  if (!j || !j.streams) return { error: 'probe failed' };
+  if (!j || !j.streams) {
+    // Say WHY. A drive that was asleep and a file that is actually damaged need
+    // completely different responses from whoever reads this.
+    if (why) return { error: why };
+    if (!fs.existsSync(filePath)) return { error: 'file not found when probed' };
+    return { error: 'ffprobe returned nothing usable' };
+  }
 
   const streams = j.streams || [];
   const v = streams.find((s) => s.codec_type === 'video') || {};
@@ -401,7 +474,7 @@ export async function runProbeScan(db, { log = () => {}, limit = 0 } = {}) {
   if (scan.running) return 0;
   ensureSchema(db);
   const cached = new Map();
-  for (const r of db.prepare('SELECT file_kind, file_id, size, mtime FROM media_info').all()) {
+  for (const r of db.prepare('SELECT file_kind, file_id, size, mtime, probe_error, probe_attempts FROM media_info').all()) {
     cached.set(r.file_kind + ':' + r.file_id, r);
   }
   let todo = scannableFiles(db).filter((f) => {
@@ -409,7 +482,14 @@ export async function runProbeScan(db, { log = () => {}, limit = 0 } = {}) {
     if (!c) return true;
     let st = null;
     try { st = fs.statSync(f.path); } catch { return false; } // gone: leave the stale row, the scanner owns deletions
-    return c.size !== st.size || c.mtime !== Math.round(st.mtimeMs);
+    if (c.size !== st.size || c.mtime !== Math.round(st.mtimeMs)) return true;
+    // A file that failed to probe with its bytes unchanged used to be dropped
+    // for good, which is how four of them sat unread indefinitely. Read it
+    // again — a probe can fail because a drive was busy, not because the file
+    // is bad — but only a few times, so a genuinely unreadable file does not
+    // cost a re-read on every scan for ever.
+    if (c.probe_error && (Number(c.probe_attempts) || 0) < MAX_PROBE_ATTEMPTS) return true;
+    return false;
   });
   if (limit > 0) todo = todo.slice(0, limit);
   if (!todo.length) return 0;
@@ -425,6 +505,10 @@ export async function runProbeScan(db, { log = () => {}, limit = 0 } = {}) {
       pix_fmt=excluded.pix_fmt, hdr=excluded.hdr, vkbps=excluded.vkbps, acodec=excluded.acodec,
       achannels=excluded.achannels, akbps=excluded.akbps, audio_json=excluded.audio_json,
       probed_at=excluded.probed_at, probe_error=excluded.probe_error`);
+  const bumpProbe = db.prepare(
+    'UPDATE media_info SET probe_attempts = COALESCE(probe_attempts,0) + 1 WHERE file_kind=? AND file_id=?');
+  const clearProbe = db.prepare(
+    'UPDATE media_info SET probe_attempts = 0 WHERE file_kind=? AND file_id=?');
 
   try {
     for (const f of todo) {
@@ -433,10 +517,17 @@ export async function runProbeScan(db, { log = () => {}, limit = 0 } = {}) {
       if (info.error) {
         up.run(f.file_kind, f.file_id, f.path, Number(f.size) || 0, 0, null, null, null, 0, 0,
           null, 0, null, null, 0, null, null, now, info.error);
+        bumpProbe.run(f.file_kind, f.file_id);
+        const n = db.prepare('SELECT probe_attempts a FROM media_info WHERE file_kind=? AND file_id=?')
+          .get(f.file_kind, f.file_id)?.a || 0;
+        if (n >= MAX_PROBE_ATTEMPTS) {
+          log(`Optimizer: giving up reading ${path.basename(f.path)} after ${n} attempts — ${info.error}`);
+        }
       } else {
         up.run(f.file_kind, f.file_id, f.path, info.size, info.mtime, info.duration, info.container,
           info.vcodec, info.width, info.height, info.pix_fmt, info.hdr, info.vkbps, info.acodec,
           info.achannels, info.akbps, info.audio_json, now, null);
+        clearProbe.run(f.file_kind, f.file_id);
       }
       scan.done++;
       if (scan.done % 200 === 0) log(`Optimizer: probed ${scan.done}/${scan.total}`);
@@ -872,7 +963,15 @@ export async function runQueue(db, { log = () => {}, allow4kVideo = false, allow
         }
       }
 
-      const job = db.prepare("SELECT * FROM optimize_jobs WHERE state = 'queued' ORDER BY id LIMIT 1").get();
+      // Fresh work first, then anything whose retry has come due. Ordering by
+      // state before id keeps a stubborn retry from blocking new files behind
+      // it — it waits its turn at the back rather than the front.
+      const job = db.prepare(`
+        SELECT * FROM optimize_jobs
+        WHERE state = 'queued'
+           OR (state = 'retry' AND COALESCE(next_try_at, 0) <= ?)
+        ORDER BY CASE state WHEN 'queued' THEN 0 ELSE 1 END, id
+        LIMIT 1`).get(Date.now());
       if (!job) break;
 
       // Breathe between files. A drive that has just streamed 60 GB benefits
@@ -894,6 +993,24 @@ export async function runQueue(db, { log = () => {}, allow4kVideo = false, allow
 
 async function runJob(db, job, { log, allow4kVideo, allowHdrVideo }) {
   const setState = (state, fields = {}) => {
+    // A failure is not necessarily final. If it could plausibly go the other
+    // way — a drive hiccup, a full disk — the job goes to 'retry' with a
+    // backoff instead, until it runs out of attempts. Every 'failed' row that
+    // remains is therefore either a judgement or something we genuinely gave
+    // up on, and says which.
+    if (state === 'failed') {
+      const attempts = (Number(job.attempts) || 0) + 1;
+      fields = { ...fields, attempts };
+      if (isRetryableFailure(fields.error) && attempts < MAX_JOB_ATTEMPTS) {
+        const wait = RETRY_BACKOFF_MS[Math.min(attempts - 1, RETRY_BACKOFF_MS.length - 1)];
+        state = 'retry';
+        fields.next_try_at = Date.now() + wait;
+        fields.pct = 0;
+        note(`Will retry ${path.basename(String(job.path || info?.path || ''))} in ${Math.round(wait / 60e3)} min (attempt ${attempts} of ${MAX_JOB_ATTEMPTS})`);
+      } else if (attempts >= MAX_JOB_ATTEMPTS && isRetryableFailure(fields.error)) {
+        fields.error = `gave up after ${attempts} attempts: ${fields.error}`;
+      }
+    }
     const cols = Object.keys(fields);
     db.prepare(`UPDATE optimize_jobs SET state = ?${cols.map((c) => `, ${c} = ?`).join('')} WHERE id = ?`)
       .run(state, ...cols.map((c) => fields[c]), job.id);
@@ -1417,6 +1534,40 @@ export function stopAuto(log = () => {}) {
 }
 
 // ---- Status ------------------------------------------------------------
+
+// Everything the program has given up on, and everything waiting to be tried
+// again. A failure nobody can see is the same as a failure nobody fixed.
+export function stuck(db) {
+  ensureSchema(db);
+  const rows = db.prepare(`
+    SELECT id, file_kind, file_id, profile, state, path, error, attempts, next_try_at
+    FROM optimize_jobs WHERE state IN ('failed','retry') ORDER BY state, id`).all();
+  const probes = db.prepare(`
+    SELECT path, probe_error, COALESCE(probe_attempts,0) attempts
+    FROM media_info WHERE probe_error IS NOT NULL ORDER BY path`).all();
+  return { jobs: rows, probes };
+}
+
+// Put stuck work back in the queue. This is the owner overriding the program's
+// own judgement, so it is deliberate and explicit: nothing here happens on its
+// own, and a job that was rejected on QUALITY is only reconsidered when asked
+// for by id.
+export function retryStuck(db, { id = 0, includeJudged = false } = {}) {
+  ensureSchema(db);
+  const reset = (where, args) => db.prepare(
+    `UPDATE optimize_jobs SET state='queued', attempts=0, next_try_at=NULL, error=NULL, pct=0 ${where}`).run(...args).changes;
+
+  if (id) return { jobs: reset('WHERE id = ? AND state IN (\'failed\',\'retry\')', [id]), probes: 0 };
+
+  let jobs = 0;
+  for (const r of db.prepare("SELECT id, error FROM optimize_jobs WHERE state IN ('failed','retry')").all()) {
+    if (!includeJudged && !isRetryableFailure(String(r.error || '').replace(/^gave up after \d+ attempts: /, ''))) continue;
+    jobs += reset('WHERE id = ?', [r.id]);
+  }
+  // Let the scanner read the unreadable ones again too.
+  const probes = db.prepare('UPDATE media_info SET probe_attempts = 0 WHERE probe_error IS NOT NULL').run().changes;
+  return { jobs, probes };
+}
 
 export function status(db) {
   ensureSchema(db);

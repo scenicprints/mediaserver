@@ -18,6 +18,11 @@
 //   node optimizer/run.mjs watch       stay running; handle new content as it lands
 //   node optimizer/run.mjs duplicates  find real duplicates and recommend which
 //                                      copy to keep. Reports only, never deletes.
+//   node optimizer/run.mjs stuck       what it has given up on and why
+//   node optimizer/run.mjs retry [id]  put stuck work back in the queue. With no
+//                                      id, everything that failed for a reason
+//                                      that might not recur; --judged also
+//                                      reconsiders encodes rejected on quality.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -134,6 +139,12 @@ if (cmd === 'status') {
   log(`${s.probed} of ${s.scannable} files probed`);
   log(`jobs: ${JSON.stringify(s.jobs)}`);
   log(`reclaimed so far: ${GB(s.reclaimedBytes)}`);
+  const stk = engine.stuck(db);
+  if (stk.jobs.length || stk.probes.length) {
+    log(`stuck: ${stk.jobs.filter((j) => j.state === 'retry').length} awaiting retry, ` +
+        `${stk.jobs.filter((j) => j.state === 'failed').length} given up on, ` +
+        `${stk.probes.length} unreadable — see "stuck"`);
+  }
   const busy = await someoneWatching();
   log(`someone watching: ${busy === null ? 'unknown' : busy}`);
 } else if (cmd === 'scan') {
@@ -144,6 +155,41 @@ if (cmd === 'status') {
 } else if (cmd === 'work') {
   await doScan();
   await work(arg || 5);
+} else if (cmd === 'stuck') {
+  const { jobs, probes } = engine.stuck(db);
+  const waiting = jobs.filter((j) => j.state === 'retry');
+  const gaveUp = jobs.filter((j) => j.state === 'failed');
+
+  if (waiting.length) {
+    log(`${waiting.length} job(s) waiting to be tried again:`);
+    for (const j of waiting) {
+      const when = j.next_try_at ? new Date(j.next_try_at).toLocaleString() : 'next run';
+      console.log(`  #${j.id} ${path.basename(j.path || '')} — attempt ${j.attempts || 0}/3, due ${when}`);
+      console.log(`      ${String(j.error || '').split('\n')[0].slice(0, 160)}`);
+    }
+  }
+  if (gaveUp.length) {
+    log(`${gaveUp.length} job(s) it has given up on:`);
+    for (const j of gaveUp) {
+      console.log(`  #${j.id} ${path.basename(j.path || '')} (${j.profile})`);
+      console.log(`      ${String(j.error || '').split('\n')[0].slice(0, 200)}`);
+    }
+  }
+  if (probes.length) {
+    log(`${probes.length} file(s) it cannot read:`);
+    for (const p of probes) {
+      console.log(`  ${path.basename(p.path)} — ${p.attempts} attempt(s)`);
+      console.log(`      ${String(p.probe_error || '').split('\n')[0].slice(0, 200)}`);
+    }
+  }
+  if (!jobs.length && !probes.length) log('Nothing stuck.');
+  else log('Use "retry" to put these back in the queue.');
+} else if (cmd === 'retry') {
+  const judged = process.argv.includes('--judged');
+  const r = engine.retryStuck(db, { id: arg, includeJudged: judged });
+  log(`Requeued ${r.jobs} job(s)${r.probes ? ` and cleared ${r.probes} probe failure(s)` : ''}.`);
+  if (!arg && !judged) log('Encodes rejected on quality were left alone — "retry --judged" reconsiders those too.');
+  if (r.jobs) log('Run "work" to actually do them.');
 } else if (cmd === 'duplicates') {
   log('Metadata alone cannot tell a duplicate from two episodes that encode alike,');
   log('so every candidate is confirmed by reading the bytes. Nothing is deleted.');
@@ -180,6 +226,6 @@ if (cmd === 'status') {
     await new Promise((r) => setTimeout(r, 15 * 60 * 1000));
   }
 } else {
-  console.error(`unknown command "${cmd}" — try status, scan, plan, work, watch or duplicates`);
+  console.error(`unknown command "${cmd}" — try status, scan, plan, work, watch, duplicates, stuck or retry`);
   process.exit(1);
 }
