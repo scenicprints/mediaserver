@@ -23,6 +23,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFile, execFileSync } from 'node:child_process';
 import { ffmpegBin, ffprobeBin, nvencAvailable } from './ffmpeg.mjs';
+import { VMAF, vmafAvailable, measureVmaf, probeComplexity } from './vmaf.mjs';
 
 const yield_ = () => new Promise((r) => setImmediate(r));
 
@@ -36,6 +37,22 @@ const TIER_TARGET = { '4K': 16000, '1080p': 5000, '720p': 2500, 'SD': 1200 };
 // Only re-encode video when the source is meaningfully over its tier — a file
 // 10% over isn't worth an hour of GPU time and a generation of quality loss.
 const OVER_TIER = 1.5;
+
+// The quality knob for a video re-encode, per encoder. The tier bitrate is only
+// a CEILING (maxrate) — what the file actually lands at is decided by how
+// compressible its content is, which is the one thing a fixed ladder cannot
+// know. See probeComplexity() in vmaf.mjs.
+const VIDEO_CRF = { hevc_nvenc: 26, libx265: 22 };
+
+// When a file turns out to compress far below its tier, spend some of that
+// headroom on quality instead of banking all of it. It costs storage we were
+// never going to use and the encode only happens once.
+const CRF_HEADROOM = 0.6;   // projected bitrate under 60% of tier...
+const CRF_BONUS = 2;        // ...buys this many CRF points of extra quality
+
+// A full encode is an hour of the machine and a full read+write of the drive.
+// Don't start one for less than this, measured rather than guessed.
+const MIN_PROBE_SAVE = 300 * 2 ** 20;
 
 // Audio codecs that store far more than a TV can use. Lossless (truehd/mlp/
 // flac/pcm) and the DTS family are the whole list; ac3/eac3/aac/opus already
@@ -491,8 +508,13 @@ export function planFor(info, { allow4kVideo = false, allowHdrVideo = false } = 
   //   HDR — any re-encode drops Dolby Vision, at every resolution, so an HDR
   //         file is off-limits to the video profile whatever size it is.
   // Neither veto affects audio: a vetoed file still gets its TrueHD/DTS fixed.
+  //   PROOF — a re-encode is only sanctioned because the result can be shown
+  //         to be visually equivalent, and without libvmaf there is no showing
+  //         it. Fail closed: no proof, no re-encode. Audio conversion is
+  //         unaffected either way, since it never touches the picture.
   const veto = (tier === '4K' && !allow4kVideo) ? '4K'
     : (info.hdr && !allowHdrVideo) ? 'HDR'
+    : (VMAF.enabled && !vmafAvailable()) ? 'unprovable'
     : null;
   const videoAllowed = videoOver && !veto;
   const videoSaveBytes = videoAllowed ? Math.max(0, (videoKbps - target) * 1000 / 8 * dur) : 0;
@@ -505,14 +527,21 @@ export function planFor(info, { allow4kVideo = false, allowHdrVideo = false } = 
   else if (wantAudio) profile = 'audio';
   else if (wantVideo) profile = 'video';
 
+  // 'unprovable' is not a policy choice the way 4K and HDR are, so it says so
+  // plainly rather than hiding behind the same wording.
+  const vetoText = veto === 'unprovable'
+    ? 'video left alone — no libvmaf, so quality could not be proven'
+    : `${veto} video left alone by policy`;
   const reason = profile === 'none'
-    ? (veto && videoOver ? `${veto} video left alone by policy` : 'already efficient')
+    ? (veto && videoOver ? vetoText : 'already efficient')
     : [
         wantAudio ? `${bloated.map((a) => a.codec.toUpperCase()).join('+')} audio → E-AC-3` : null,
         wantVideo ? `${Math.round(videoKbps / 100) / 10} Mbps ${tier} video → HEVC ~${target / 1000} Mbps` : null,
         // Say out loud when big video is being deliberately left alone, so the
         // panel never looks like it just missed a 35 Mbps file.
-        !wantVideo && veto && videoOver ? `${veto} video kept as-is` : null
+        !wantVideo && veto && videoOver
+          ? (veto === 'unprovable' ? 'video kept as-is — no libvmaf to prove quality' : `${veto} video kept as-is`)
+          : null
       ].filter(Boolean).join(', ');
 
   // Is there already a compact, universally-playable track in this file? If so,
@@ -596,7 +625,7 @@ function freeSpaceOn(filePath) {
 // `audioMode` is 'convert' (re-encode the lossless tracks) or 'drop' (discard
 // them and keep the file's existing compatible track). 'drop' decodes no audio
 // at all, which is what makes it a reliable fallback.
-function buildArgs(info, plan, src, dst, { audioMode = 'convert' } = {}) {
+function buildArgs(info, plan, src, dst, { audioMode = 'convert', crf = null } = {}) {
   const args = ['-hide_banner', '-nostdin', '-y'];
   // Cap how fast ffmpeg reads the source when asked to. 1 = realtime, 4 = four
   // times realtime. Uncapped it will pull as hard as the drive allows, which is
@@ -615,12 +644,17 @@ function buildArgs(info, plan, src, dst, { audioMode = 'convert' } = {}) {
     // 10-bit sources stay 10-bit — dropping to 8-bit would band the gradients
     // this bitrate is trying to protect.
     const tenBit = /10le|10be|p010/.test(String(info.pix_fmt || ''));
+    // Quality-targeted with the tier as a ceiling, never a target to hit: a
+    // file that only needs 3 Mbps should be 3 Mbps, not padded up to 5. The CRF
+    // comes from the complexity probe when one ran, and falls back to the
+    // encoder's default otherwise.
     if (nvencAvailable()) {
-      args.push('-c:v', 'hevc_nvenc', '-preset', 'p5', '-rc', 'vbr', '-cq', '26',
-        '-b:v', `${target}k`, '-maxrate', `${Math.round(target * 1.5)}k`, '-bufsize', `${target * 3}k`);
+      const cq = crf ?? VIDEO_CRF.hevc_nvenc;
+      args.push('-c:v', 'hevc_nvenc', '-preset', 'p5', '-rc', 'vbr', '-cq', String(cq), '-b:v', '0',
+        '-maxrate', `${Math.round(target * 1.5)}k`, '-bufsize', `${target * 3}k`);
       if (tenBit) args.push('-pix_fmt', 'p010le');
     } else {
-      args.push('-c:v', 'libx265', '-preset', 'medium', '-crf', '22',
+      args.push('-c:v', 'libx265', '-preset', 'medium', '-crf', String(crf ?? VIDEO_CRF.libx265),
         '-maxrate', `${Math.round(target * 1.5)}k`, '-bufsize', `${target * 3}k`);
       if (tenBit) args.push('-pix_fmt', 'yuv420p10le');
     }
@@ -651,7 +685,9 @@ function buildArgs(info, plan, src, dst, { audioMode = 'convert' } = {}) {
 // The output has to prove itself before the source is allowed to die. Probing
 // alone isn't enough: a truncated file often probes fine, so we also force a
 // real decode at the start, middle, and end and require all three to be clean.
-async function verify(src, dst, info, plan) {
+// Exported so it can be tested directly against known-good and known-bad
+// encodes. It only reads and grades; nothing here deletes anything.
+export async function verify(src, dst, info, plan, { onVmafSample = () => {} } = {}) {
   let sStat, dStat;
   try { sStat = fs.statSync(src); dStat = fs.statSync(dst); }
   catch (e) { return 'output missing: ' + e.message; }
@@ -688,6 +724,29 @@ async function verify(src, dst, info, plan) {
       '-f', 'null', '-'], { timeout: 180000 });
     if (err) return `decode check failed at ${Math.floor(t)}s: ${err}`;
   }
+
+  // Everything above proves the file isn't BROKEN. None of it says how it
+  // looks, and a blocky, banded, smeared encode passes every one of those
+  // checks. So when the picture was actually re-encoded, it has to be graded
+  // against the source before the source is allowed to die.
+  //
+  // A copied video stream skips this: it is the same bitstream, and the shape
+  // check above already caught any accidental scaling.
+  if (plan.profile !== 'audio') {
+    const tenBit = /10le|10be|p010/.test(String(info.pix_fmt || ''));
+    const v = await measureVmaf(src, dst, {
+      duration: out.duration || srcDur,
+      tenBit,
+      readRate: throttle.readRate,
+      onSample: onVmafSample
+    });
+    // Not being able to MEASURE is not the same as passing, and treating it as
+    // a pass is exactly how an unverified encode would replace a good original.
+    if (v.error) return `could not grade the encode (${v.error})`;
+    if (!v.ok && !v.skipped) return v.reason;
+    if (!v.skipped) plan.vmaf = { mean: v.mean, min: v.min, samples: v.samples };
+  }
+
   return null; // clean
 }
 
@@ -902,7 +961,52 @@ async function runJob(db, job, { log, allow4kVideo, allowHdrVideo }) {
   log(`Optimizer: ${path.basename(src)} — ${plan.reason}`);
 
   const totalDur = Number(info.duration) || 0;
-  const encode = (audioMode) => runFfmpeg(buildArgs(info, plan, src, dst, { audioMode }), {
+  const tenBit = /10le|10be|p010/.test(String(info.pix_fmt || ''));
+
+  // ---- Ask this file what it will actually do, before spending an hour on it.
+  //
+  // A fixed bitrate ladder assumes every 1080p file wants the same bitrate.
+  // They don't: an animated film and a grainy 70mm transfer at the same
+  // resolution are wildly different problems. So encode a few real windows with
+  // the real encoder and measure. Two things come out of it — whether the job
+  // is worth starting, and how much headroom the encode has.
+  let crf = null;
+  if (plan.profile === 'video' || plan.profile === 'both') {
+    const encoder = nvencAvailable() ? 'hevc_nvenc' : 'libx265';
+    crf = VIDEO_CRF[encoder];
+    note(`Sampling ${path.basename(src)} to see how well it compresses`);
+    const probe = await probeComplexity(src, {
+      duration: totalDur, size: Number(info.size) || 0,
+      currentVideoKbps: plan.videoKbps, crf, encoder, tenBit,
+      readRate: throttle.readRate
+    });
+    if (worker.stop) return setState('queued', { error: null, pct: 0 });
+
+    if (probe.error) {
+      // Couldn't measure — carry on at the default CRF rather than refusing to
+      // work. The VMAF gate still has the final say on the result, so the worst
+      // case here is a wasted encode, not a damaged library.
+      note(`Could not sample ${path.basename(src)} (${probe.error}) — continuing at CRF ${crf}`);
+    } else {
+      const gb = (n) => (n / 2 ** 30).toFixed(2) + ' GB';
+      if (probe.saveBytes < MIN_PROBE_SAVE) {
+        const why = `measured: this content only compresses to ~${probe.kbps} kbps, saving ${gb(probe.saveBytes)} — not worth a full re-encode`;
+        note(`Skipped ${path.basename(src)} — ${why}`);
+        return setState('skipped', { error: why, ended_at: Date.now() });
+      }
+      // Compresses far below its tier? Spend some of that headroom on quality.
+      // The storage was never going to be used and the encode happens once.
+      const target = TIER_TARGET[plan.tier];
+      if (probe.kbps < target * CRF_HEADROOM) {
+        crf -= CRF_BONUS;
+        note(`${path.basename(src)} compresses to ~${probe.kbps} kbps, well under its ${target} kbps tier — encoding at CRF ${crf} for extra margin`);
+      }
+      note(`${path.basename(src)}: ~${probe.kbps} kbps projected, saving about ${gb(probe.saveBytes)}`);
+      setState('running', { reason: `${plan.reason} (measured ~${probe.kbps} kbps, CRF ${crf})` });
+    }
+  }
+
+  const encode = (audioMode) => runFfmpeg(buildArgs(info, plan, src, dst, { audioMode, crf }), {
     onLine: (line) => {
       const m = /time=(\d+):(\d+):(\d+\.?\d*)/.exec(line);
       if (m && totalDur > 0) {
@@ -942,7 +1046,9 @@ async function runJob(db, job, { log, allow4kVideo, allowHdrVideo }) {
 
   // ---- The gate. Nothing is deleted until this returns clean. ----
   setState('verifying', {});
-  const bad = await verify(src, dst, info, plan);
+  const bad = await verify(src, dst, info, plan, {
+    onVmafSample: (sm) => { if (worker.current) worker.current.vmaf = sm; }
+  });
   if (bad) {
     fs.rmSync(dst, { force: true });
     note(`REJECTED ${path.basename(src)}: ${bad} — original untouched.`);
