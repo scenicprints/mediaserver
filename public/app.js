@@ -3647,6 +3647,7 @@ async function loadOptOffline() {
 
 async function loadOptPlan() {
   loadOptOffline();
+  loadOptSurround();
   let p;
   try {
     const r = await fetch('/api/optimize/plan?limit=150' + (optProfile ? '&profile=' + optProfile : ''));
@@ -3774,3 +3775,84 @@ async function queueTop() {
     loadOptStatus();
   });
 })();
+
+// ---- Surround tracks (admin) ----
+// Films that carry only DTS or TrueHD force the server to re-encode audio for
+// the Apple TV, which cannot decode either. Adding an E-AC-3 track lets it copy
+// through untouched. This is the only operation allowed on a 4K HDR file: the
+// video is copied and the job proves the bitstream is unchanged before it
+// replaces anything.
+async function loadOptSurround() {
+  let s;
+  try { const r = await fetch('/api/optimize/surround?limit=40'); if (!r.ok) return; s = await r.json(); } catch (_e) { return; }
+  const box = document.getElementById('opt-surround');
+  if (!box) return;
+  if (!s.count) { box.innerHTML = ''; return; }
+
+  box.innerHTML =
+    '<div class="opt-surround-head">' +
+      '<strong>Add a surround track for the TVs</strong>' +
+      '<span class="muted">' + s.count + ' file' + (s.count === 1 ? '' : 's') +
+        (s.hdrCount ? ' &middot; ' + s.hdrCount + ' of them 4K HDR' : '') + '</span>' +
+    '</div>' +
+    '<p class="muted">These carry only DTS or TrueHD, which an Apple TV cannot decode &mdash; so the server ' +
+      're-encodes their audio every time you watch. Adding a Dolby Digital Plus 5.1 track lets it play ' +
+      'untouched instead. Nothing is removed and the picture is copied bit-for-bit: each job compares the ' +
+      'video hash before and after and is thrown away if it differs, so HDR cannot be lost.</p>' +
+    '<div class="opt-actions">' +
+      '<button class="btn" id="opt-sur-hdr">Add to the ' + (s.hdrCount || 0) + ' 4K HDR films</button>' +
+      '<button class="btn" id="opt-sur-10">Add to the top 10</button>' +
+    '</div>' +
+    '<div class="opt-list opt-surround-list">' +
+      s.items.slice(0, 12).map(function (i) {
+        return '<div class="opt-row">' +
+          '<div class="opt-row-main">' +
+            '<div class="opt-title">' + escapeHtml(i.title) +
+              (i.season != null ? ' <span class="muted">S' + i.season + 'E' + i.episode + '</span>' : '') + '</div>' +
+            '<div class="opt-why">' + escapeHtml(i.reason) + '</div>' +
+          '</div>' +
+          '<div class="opt-row-meta">' +
+            '<div class="opt-badges">' +
+              '<span class="opt-badge">' + i.tier + (i.hdr ? ' HDR' : '') + '</span>' +
+              '<span class="opt-badge">' + escapeHtml(i.from) + '</span>' +
+            '</div>' +
+            '<div class="opt-size">' + optGb(i.size) + '</div>' +
+            '<button class="btn opt-sur-one" data-kind="' + i.kind + '" data-id="' + i.fileId + '">Add track</button>' +
+          '</div>' +
+        '</div>';
+      }).join('') +
+    '</div>';
+
+  async function queue(body, label) {
+    if (!confirm(label + '\n\nThe picture is copied, not re-encoded, and each file is checked ' +
+      'afterwards — if the video changed at all, the result is discarded and your original kept.\n\n' +
+      'Files get roughly 600 MB bigger. Nothing is removed.')) return;
+    try {
+      await fetch('/api/optimize/surround', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+      });
+    } catch (_e) {}
+    loadOptStatus();
+  }
+
+  const hdrBtn = document.getElementById('opt-sur-hdr');
+  if (hdrBtn) hdrBtn.addEventListener('click', function () {
+    queue({ hdrOnly: true, limit: 500 }, 'Add a surround track to your ' + (s.hdrCount || 0) + ' 4K HDR films?');
+  });
+  const tenBtn = document.getElementById('opt-sur-10');
+  if (tenBtn) tenBtn.addEventListener('click', function () {
+    queue({ limit: 10 }, 'Add a surround track to the 10 largest?');
+  });
+  document.querySelectorAll('.opt-sur-one').forEach(function (b) {
+    b.addEventListener('click', async function () {
+      b.disabled = true; b.textContent = 'Queued';
+      try {
+        await fetch('/api/optimize/surround', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ kind: b.dataset.kind, fileId: +b.dataset.id })
+        });
+      } catch (_e) {}
+      loadOptStatus();
+    });
+  });
+}

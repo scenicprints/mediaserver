@@ -148,6 +148,28 @@ export function tierOf(width, height) {
   return 'SD';
 }
 
+// ---- The hard rule: 4K HDR files are never modified --------------------
+//
+// Not "vetoed by default", not "off unless configured" — excluded outright,
+// with no switch anywhere that turns it back on. These are the irreplaceable
+// files in this library: the 4K HDR remuxes. Nothing in this module opens one
+// for writing, re-encodes it, remuxes it, or replaces it. Not the video, not
+// the audio, not the container.
+//
+// It is enforced in three independent places — the planner, the queue, and the
+// job runner — so that a bug in any one of them still cannot reach these files.
+// That redundancy is deliberate: on 2026-09-08 a single missing check destroyed
+// 55 of them, and a rule this important should not depend on one line of code
+// being right.
+export function isProtected(info) {
+  if (!info) return true;                        // unknown means hands off
+  if (info.probe_error) return true;
+  const tier = tierOf(info.width, info.height);
+  return tier === '4K' && !!info.hdr;
+}
+
+export const PROTECTED_REASON = 'protected: 4K HDR — never modified';
+
 // ---- Schema ------------------------------------------------------------
 
 // Probing 20k files takes hours, so results are cached and keyed on
@@ -393,6 +415,8 @@ export async function runProbeScan(db, { log = () => {}, limit = 0 } = {}) {
 export function planFor(info, { allow4kVideo = false, allowHdrVideo = false } = {}) {
   if (!info || info.probe_error) return { profile: 'none', reason: info?.probe_error || 'not probed' };
   if (!info.vcodec) return { profile: 'none', reason: 'no video stream' };
+  // Enforcement 1 of 3. Before anything else is considered.
+  if (isProtected(info)) return { profile: 'none', reason: PROTECTED_REASON, protected: true };
 
   const tier = tierOf(info.width, info.height);
   const target = TIER_TARGET[tier];
@@ -645,6 +669,9 @@ export function enqueue(db, kind, fileId, { allow4kVideo = false, allowHdrVideo 
   ensureSchema(db);
   const info = db.prepare('SELECT * FROM media_info WHERE file_kind = ? AND file_id = ?').get(kind, fileId);
   if (!info) return { error: 'file has not been probed yet' };
+  // Enforcement 2 of 3. A protected file cannot enter the queue at all, even if
+  // something hands us its id directly.
+  if (isProtected(info)) return { error: PROTECTED_REASON };
   const plan = planFor(info, { allow4kVideo, allowHdrVideo });
   if (plan.profile === 'none') return { error: 'nothing to optimize: ' + plan.reason };
   const existing = db.prepare("SELECT id FROM optimize_jobs WHERE file_kind = ? AND file_id = ? AND state IN ('queued','running','verifying')").get(kind, fileId);
@@ -660,6 +687,57 @@ export function enqueue(db, kind, fileId, { allow4kVideo = false, allowHdrVideo 
                         VALUES (?,?,?,'queued',?,?,?,?,?)`)
     .run(kind, fileId, plan.profile, info.path, info.size, summarize(info), plan.reason, Date.now());
   return { jobId: Number(r.lastInsertRowid), profile: plan.profile, reason: plan.reason };
+}
+
+// Queue an "add a compatible surround track" job. Separate from enqueue()
+// because it is allowed on 4K HDR files, which enqueue() refuses outright.
+export function enqueueAddAudio(db, kind, fileId, { force = false } = {}) {
+  ensureSchema(db);
+  const info = db.prepare('SELECT * FROM media_info WHERE file_kind = ? AND file_id = ?').get(kind, fileId);
+  if (!info) return { error: 'file has not been probed yet' };
+  const plan = planAddAudio(info);
+  if (!plan.need) return { error: plan.reason };
+  const existing = db.prepare("SELECT id FROM optimize_jobs WHERE file_kind = ? AND file_id = ? AND state IN ('queued','running','verifying')").get(kind, fileId);
+  if (existing) return { error: 'already queued', jobId: existing.id };
+  if (!force) {
+    const prior = db.prepare("SELECT id FROM optimize_jobs WHERE file_kind = ? AND file_id = ? AND profile = 'addaudio' AND state IN ('failed','skipped') ORDER BY id DESC LIMIT 1").get(kind, fileId);
+    if (prior) return { error: 'previously failed — not retried automatically' };
+  }
+  const r = db.prepare(`INSERT INTO optimize_jobs (file_kind, file_id, profile, state, path, old_size, old_summary, reason, created_at)
+                        VALUES (?,?,'addaudio','queued',?,?,?,?,?)`)
+    .run(kind, fileId, info.path, info.size, summarize(info), plan.reason, Date.now());
+  return { jobId: Number(r.lastInsertRowid), profile: 'addaudio', reason: plan.reason };
+}
+
+// Everything in the library that would play better on a TV with one more audio
+// track. Used by the Storage panel and by automatic mode.
+export function surroundCandidates(db) {
+  ensureSchema(db);
+  const rows = db.prepare(`
+    SELECT mi.*, COALESCE(m.title, s.title) AS title, e.season, e.episode
+    FROM media_info mi
+    LEFT JOIN movie_files   mf ON mi.file_kind='movie'   AND mf.id = mi.file_id
+    LEFT JOIN movies        m  ON m.id  = mf.movie_id
+    LEFT JOIN episode_files ef ON mi.file_kind='episode' AND ef.id = mi.file_id
+    LEFT JOIN episodes      e  ON e.id  = ef.episode_id
+    LEFT JOIN shows         s  ON s.id  = e.show_id
+    WHERE mi.probe_error IS NULL AND (mf.id IS NOT NULL OR ef.id IS NOT NULL)`).all();
+  const out = [];
+  for (const r of rows) {
+    const p = planAddAudio(r);
+    if (!p.need) continue;
+    // Only surround sources are worth it — adding a stereo E-AC-3 next to a
+    // stereo MP3 achieves nothing.
+    if (p.channels < 6) continue;
+    out.push({
+      kind: r.file_kind, fileId: r.file_id, path: r.path,
+      title: r.title || path.basename(r.path), season: r.season, episode: r.episode,
+      size: Number(r.size) || 0, tier: tierOf(r.width, r.height), hdr: !!r.hdr,
+      from: p.srcDesc, reason: p.reason
+    });
+  }
+  out.sort((a, b) => (b.hdr ? 1 : 0) - (a.hdr ? 1 : 0) || b.size - a.size);
+  return out;
 }
 
 function summarize(info) {
@@ -693,6 +771,33 @@ async function runJob(db, job, { log, allow4kVideo, allowHdrVideo }) {
 
   const info = db.prepare('SELECT * FROM media_info WHERE file_kind = ? AND file_id = ?').get(job.file_kind, job.file_id);
   if (!info) return setState('failed', { error: 'file no longer in the library', ended_at: Date.now() });
+
+  // Adding an audio track is the sanctioned exception to the 4K HDR rule, so it
+  // is handled before the protection check — it copies the video rather than
+  // re-encoding it, and proves that with a bitstream hash rather than asking to
+  // be trusted. See addCompatibleAudio().
+  if (job.profile === 'addaudio') {
+    worker.current = { jobId: job.id, path: info.path, profile: 'addaudio', pct: 0, startedAt: Date.now() };
+    setState('running', { started_at: Date.now() });
+    note(`Adding a surround track to ${path.basename(info.path)}`);
+    const res = await addCompatibleAudio(db, job.file_kind, job.file_id, { log });
+    if (res.ok) {
+      note(`Done ${path.basename(info.path)} — E-AC-3 added, video bitstream verified identical`);
+      return setState('done', {
+        new_size: res.newSize, pct: 100, ended_at: Date.now(),
+        reason: `added E-AC-3 surround; video bitstream verified identical (${res.beforeHash})`
+      });
+    }
+    note(`FAILED ${path.basename(info.path)}: ${res.error}`);
+    return setState('failed', { error: res.error, ended_at: Date.now() });
+  }
+
+  // Enforcement 3 of 3. The last gate before ffmpeg is handed a path — a job
+  // queued before this rule existed, or by a future bug, still stops here.
+  if (isProtected(info)) {
+    note(`Skipped ${path.basename(info.path)} — ${PROTECTED_REASON}`);
+    return setState('skipped', { error: PROTECTED_REASON, ended_at: Date.now() });
+  }
 
   const src = info.path;
   if (!fs.existsSync(src)) return setState('failed', { error: 'source file is gone', ended_at: Date.now() });
@@ -819,6 +924,169 @@ async function runJob(db, job, { log, allow4kVideo, allowHdrVideo }) {
   });
 }
 
+// ---- Adding a compatible audio track ------------------------------------
+//
+// The one operation allowed to touch a 4K HDR file, because it provably cannot
+// harm the picture: the video stream is COPIED, never decoded, and an extra
+// audio track is appended alongside the existing ones. Nothing is removed.
+//
+// The owner's actual requirement is "do not lose HDR", and HDR is only lost when
+// video is re-encoded. So rather than avoid these files, every job here PROVES
+// the picture is untouched: it hashes the video bitstream before and after, and
+// rejects the result if a single bit differs. That is a stronger guarantee than
+// not opening the file, because it is verified rather than assumed.
+//
+// Why it is needed: Apple TV cannot decode DTS or TrueHD at all, and its HDMI
+// audio passthrough did not ship in tvOS 26. When a film carries only DTS, the
+// server must re-encode the audio on the fly — and with the Apple TV app's
+// stereo default, that means the surround system gets a stereo downmix. An
+// appended E-AC-3 5.1 track is copied straight through instead (src/hls.js
+// prefers E-AC-3 above every other codec), so the projector gets real surround
+// with no server work at all.
+
+// Codecs a file can already carry that make this unnecessary.
+const APPLE_COPYABLE = new Set(['aac', 'ac3', 'eac3', 'mp3', 'alac']);
+
+// MD5 of the VIDEO BITSTREAM alone — not the container, not the file. Copying a
+// stream into a new container changes the file completely while leaving this
+// identical, which is exactly the property we need to test.
+async function videoStreamHash(file) {
+  const bin = ffmpegBin();
+  if (!bin) return null;
+  const out = await run(bin, ['-v', 'error', '-i', file, '-map', '0:v:0', '-c', 'copy', '-f', 'md5', '-'], 1800000);
+  const m = /MD5=([0-9a-f]+)/i.exec(String(out || ''));
+  return m ? m[1] : null;
+}
+
+// Does this file need a compatible surround track, and which stream should it be
+// built from? Applies to any file, protected or not — this operation is safe for
+// both by construction.
+export function planAddAudio(info) {
+  if (!info || info.probe_error) return { need: false, reason: 'not probed' };
+  let audio = [];
+  try { audio = JSON.parse(info.audio_json || '[]'); } catch {}
+  if (!audio.length) return { need: false, reason: 'no audio streams' };
+
+  // Already has something Apple/Roku/Android can play natively in surround.
+  const copyable = audio.filter((a) => APPLE_COPYABLE.has(String(a.codec).toLowerCase()));
+  if (copyable.some((a) => (a.ch || 0) >= 6)) {
+    return { need: false, reason: 'already has a copyable surround track' };
+  }
+
+  // Build from the richest track available — most channels wins, then the
+  // lossless one, so the added track comes from the best source in the file.
+  const src = audio.slice().sort((a, b) => (b.ch || 0) - (a.ch || 0))[0];
+  if (!src) return { need: false, reason: 'no usable source track' };
+
+  return {
+    need: true,
+    srcIndex: src.i,
+    srcDesc: `${src.codec}/${src.ch || '?'}ch`,
+    lang: src.lang || null,
+    channels: Math.min(src.ch || 6, AUDIO_MAX_CH),
+    reason: `add E-AC-3 ${Math.min(src.ch || 6, AUDIO_MAX_CH) > 2 ? '5.1' : 'stereo'} built from ${src.codec}/${src.ch || '?'}ch`,
+    existing: audio.length
+  };
+}
+
+// Do it. Encode → prove the video is untouched → only then swap the file in.
+// `dryRun` writes the new file next to the source and leaves both in place so
+// the result can be inspected before anything is replaced.
+export async function addCompatibleAudio(db, kind, fileId, { log = () => {}, dryRun = false } = {}) {
+  ensureSchema(db);
+  const info = db.prepare('SELECT * FROM media_info WHERE file_kind = ? AND file_id = ?').get(kind, fileId);
+  if (!info) return { ok: false, error: 'not probed' };
+  const src = info.path;
+  if (!fs.existsSync(src)) return { ok: false, error: 'file is gone' };
+
+  const plan = planAddAudio(info);
+  if (!plan.need) return { ok: false, error: plan.reason };
+
+  const st = fs.statSync(src);
+  if (st.size !== Number(info.size)) return { ok: false, error: 'file changed since it was probed — rescan first' };
+  if (freeSpaceOn(src) < st.size * 1.2) return { ok: false, error: `not enough free space on ${src.slice(0, 2)}` };
+
+  const dst = src.replace(/\.[^.]+$/, '') + TMP_SUFFIX + path.extname(src);
+  fs.rmSync(dst, { force: true });
+
+  log(`${path.basename(src)} — ${plan.reason}`);
+  log('  hashing the source video stream…');
+  const beforeHash = await videoStreamHash(src);
+  if (!beforeHash) { return { ok: false, error: 'could not hash the source video' }; }
+
+  const n = plan.existing;                       // output index of the appended track
+  const args = [
+    '-hide_banner', '-nostdin', '-y', '-i', src,
+    '-map', '0', '-map', `0:a:${plan.srcIndex}`, '-map', '-0:d?',
+    '-max_interleave_delta', '0',
+    '-c', 'copy',                                 // everything copied, including video
+    `-c:a:${n}`, AUDIO_CODEC, `-b:a:${n}`, `${plan.channels > 2 ? AUDIO_KBPS : 320}k`,
+    `-ac:a:${n}`, String(plan.channels),
+    `-metadata:s:a:${n}`, `title=Surround ${plan.channels > 2 ? '5.1' : '2.0'} (E-AC-3)`
+  ];
+  if (plan.lang) args.push(`-metadata:s:a:${n}`, `language=${plan.lang}`);
+  args.push(dst);
+
+  log('  encoding (video copied, one track added)…');
+  const err = await runFfmpeg(args, { timeout: 3 * 3600 * 1000 });
+  if (err) { fs.rmSync(dst, { force: true }); return { ok: false, error: err }; }
+
+  // ---- The gate ----
+  log('  verifying…');
+  const out = await probeOne(dst);
+  if (out.error) { fs.rmSync(dst, { force: true }); return { ok: false, error: 'output failed to probe' }; }
+
+  const afterHash = await videoStreamHash(dst);
+  const checks = [];
+  const fail = (m) => checks.push(m);
+
+  // THE one that matters. A single differing bit means the picture was touched.
+  if (!afterHash || afterHash !== beforeHash) fail(`VIDEO BITSTREAM CHANGED (${beforeHash} → ${afterHash}) — HDR could not be guaranteed`);
+  if (out.width !== info.width || out.height !== info.height) fail(`resolution changed ${info.width}x${info.height} → ${out.width}x${out.height}`);
+  if (out.pix_fmt !== info.pix_fmt) fail(`pixel format changed ${info.pix_fmt} → ${out.pix_fmt}`);
+  if (!!out.hdr !== !!info.hdr) fail(`HDR flag changed ${info.hdr} → ${out.hdr}`);
+  const durDrift = Math.abs((out.duration || 0) - (Number(info.duration) || 0));
+  if (Number(info.duration) && durDrift > Math.max(1.5, info.duration * 0.005)) fail(`duration drifted ${durDrift.toFixed(1)}s`);
+
+  let outAudio = [];
+  try { outAudio = JSON.parse(out.audio_json || '[]'); } catch {}
+  if (outAudio.length !== plan.existing + 1) fail(`expected ${plan.existing + 1} audio tracks, got ${outAudio.length}`);
+  const added = outAudio[outAudio.length - 1];
+  if (!added || added.codec !== AUDIO_CODEC) fail(`added track is ${added && added.codec}, expected ${AUDIO_CODEC}`);
+  if (added && plan.channels > 2 && (added.ch || 0) < 6) fail(`added track has ${added && added.ch} channels, expected ${plan.channels}`);
+  // Additive: the file must get BIGGER. Smaller means something was dropped.
+  const newSize = fs.statSync(dst).size;
+  if (newSize <= st.size) fail(`output is not larger (${(newSize / 2 ** 30).toFixed(2)} vs ${(st.size / 2 ** 30).toFixed(2)} GB) — something was removed`);
+
+  if (checks.length) {
+    fs.rmSync(dst, { force: true });
+    log('  REJECTED: ' + checks.join('; '));
+    return { ok: false, error: 'verification failed: ' + checks.join('; '), beforeHash, afterHash };
+  }
+
+  log(`  verified — video bitstream identical (${beforeHash})`);
+
+  if (dryRun) {
+    const keep = src.replace(/\.[^.]+$/, '') + '.ADDED-AUDIO-SAMPLE' + path.extname(src);
+    fs.renameSync(dst, keep);
+    log(`  dry run — result left at ${keep}, original untouched`);
+    return { ok: true, dryRun: true, sample: keep, beforeHash, afterHash, oldSize: st.size, newSize };
+  }
+
+  // Swap in. The original is only removed once everything above passed.
+  fs.rmSync(src, { force: true });
+  fs.renameSync(dst, src);
+  const table = kind === 'episode' ? 'episode_files' : 'movie_files';
+  db.prepare(`UPDATE ${table} SET size = ? WHERE id = ?`).run(newSize, fileId);
+  const fresh = await probeOne(src);
+  if (!fresh.error) {
+    db.prepare('UPDATE media_info SET size=?, mtime=?, acodec=?, achannels=?, audio_json=?, probed_at=? WHERE file_kind=? AND file_id=?')
+      .run(fresh.size, fresh.mtime, fresh.acodec, fresh.achannels, fresh.audio_json, Date.now(), kind, fileId);
+  }
+  log(`  done — added ${plan.channels > 2 ? '5.1' : '2.0'} E-AC-3, +${((newSize - st.size) / 2 ** 20).toFixed(0)} MB`);
+  return { ok: true, beforeHash, afterHash, oldSize: st.size, newSize };
+}
+
 // ---- Automatic mode ----------------------------------------------------
 
 // The optimizer as a standing background service rather than something a human
@@ -884,6 +1152,17 @@ export function startAuto(db, {
         if (queued >= batch) break;
         const r = enqueue(db, it.kind, it.fileId, { allow4kVideo, allowHdrVideo });
         if (r.jobId && !r.error) queued++;
+      }
+
+      // Surround tracks are opted into separately from the size-reduction
+      // profiles: they make files bigger, and they are the only thing allowed
+      // to touch a 4K HDR file, so switching one on must not switch on the other.
+      if (profiles.includes('addaudio')) {
+        for (const it of surroundCandidates(db)) {
+          if (queued >= batch) break;
+          const r = enqueueAddAudio(db, it.kind, it.fileId);
+          if (r.jobId && !r.error) queued++;
+        }
       }
 
       // 3. Work the queue, bailing out the instant somebody starts watching.

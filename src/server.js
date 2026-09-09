@@ -980,6 +980,43 @@ app.delete('/api/optimize/jobs', async (req, reply) => {
   return { ok: true };
 });
 
+// Files that would play better on a TV with one more audio track — typically a
+// DTS-only film, which Apple TV cannot decode at all, forcing the server to
+// re-encode the audio live. Adding an E-AC-3 track lets it copy through instead.
+app.get('/api/optimize/surround', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const items = optimize.surroundCandidates(db);
+  const limit = Math.min(Number(req.query.limit) || 200, 2000);
+  return {
+    count: items.length,
+    hdrCount: items.filter((i) => i.hdr).length,
+    addedBytes: items.length * 600 * 1024 * 1024, // rough: ~600 MB per film
+    items: items.slice(0, limit)
+  };
+});
+
+// Queue one file, or the top N, for an added surround track. This is the one
+// operation permitted on a 4K HDR file: it copies the video and proves the
+// bitstream is unchanged before replacing anything.
+app.post('/api/optimize/surround', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const b = req.body || {};
+  if (b.kind && b.fileId != null) {
+    const r = optimize.enqueueAddAudio(db, b.kind === 'episode' ? 'episode' : 'movie', Number(b.fileId), { force: b.force === true });
+    if (r.error && !r.jobId) return reply.code(400).send(r);
+    return r;
+  }
+  const items = optimize.surroundCandidates(db);
+  const pool = b.hdrOnly ? items.filter((i) => i.hdr) : items;
+  const n = Math.min(Number(b.limit) || 10, 500);
+  let queued = 0;
+  for (const it of pool.slice(0, n)) {
+    const r = optimize.enqueueAddAudio(db, it.kind, it.fileId);
+    if (r.jobId && !r.error) queued++;
+  }
+  return { ok: true, queued };
+});
+
 // Turn automatic mode on or off at runtime, and persist the choice so it
 // survives a restart. This is the switch that makes the optimizer a standing
 // service instead of something someone has to remember to run.
