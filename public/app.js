@@ -3609,6 +3609,23 @@ async function loadOptStatus() {
     (s.nvenc ? '' : ' · no GPU encoder — video re-encodes will be slow') + '</div>');
   document.getElementById('opt-progress').innerHTML = bits.join('');
 
+  // Automatic mode: reflect what the server is actually doing, not what the
+  // checkbox was last clicked to.
+  const autoBox = document.getElementById('opt-auto');
+  const autoState = document.getElementById('opt-auto-state');
+  if (autoBox && s.auto) {
+    if (document.activeElement !== autoBox) autoBox.checked = !!s.auto.enabled;
+    const phase = {
+      idle: 'on — waiting for the next pass',
+      probing: 'on — looking at newly added media',
+      working: 'on — optimizing now',
+      paused: 'on — paused, someone is watching'
+    }[s.auto.phase] || (s.auto.enabled ? 'on' : 'off');
+    const last = s.auto.lastRun ? ' · last pass ' + new Date(s.auto.lastRun).toLocaleTimeString() : '';
+    autoState.textContent = (s.auto.enabled ? phase : 'off — nothing runs unless you press a button') + last +
+      (s.auto.lastError ? ' · last error: ' + s.auto.lastError : '');
+  }
+
   document.getElementById('opt-log').innerHTML = (s.log || []).slice(-12).reverse()
     .map(function (l) { return '<div class="opt-log-line">' + escapeHtml(l.msg) + '</div>'; }).join('');
 }
@@ -3733,6 +3750,27 @@ async function queueTop() {
   });
   on('opt-stop', async function () {
     try { await fetch('/api/optimize/stop', { method: 'POST' }); } catch (_e) {}
+    loadOptStatus();
+  });
+
+  const autoBox = document.getElementById('opt-auto');
+  if (autoBox) autoBox.addEventListener('change', async function () {
+    const want = autoBox.checked;
+    if (want && !confirm('Turn on automatic optimizing?\n\n' +
+      'The server will keep working through the library on its own, and treat new media the same way as you add it. ' +
+      'It pauses whenever anyone is watching, and it only ever replaces a file after the new one passes verification.\n\n' +
+      '4K and HDR video are never re-encoded.')) {
+      autoBox.checked = false;
+      return;
+    }
+    autoBox.disabled = true;
+    try {
+      await fetch('/api/optimize/auto', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: want })
+      });
+    } catch (_e) {}
+    autoBox.disabled = false;
     loadOptStatus();
   });
 })();

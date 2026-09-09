@@ -980,6 +980,48 @@ app.delete('/api/optimize/jobs', async (req, reply) => {
   return { ok: true };
 });
 
+// Turn automatic mode on or off at runtime, and persist the choice so it
+// survives a restart. This is the switch that makes the optimizer a standing
+// service instead of something someone has to remember to run.
+app.post('/api/optimize/auto', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const on = (req.body || {}).enabled === true;
+  const profiles = Array.isArray((req.body || {}).profiles) ? req.body.profiles : null;
+
+  config.optimizeAuto = on;
+  if (profiles) config.optimizeAutoProfiles = profiles;
+  try {
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + '\n', 'utf8');
+  } catch (e) {
+    return reply.code(500).send({ error: 'could not save config: ' + e.message });
+  }
+
+  if (on) {
+    optimize.startAuto(db, {
+      log: (x) => console.log(x),
+      isBusy: () => { pruneSessions(); return sessions.size > 0; },
+      ...optPolicy(),
+      profiles: config.optimizeAutoProfiles || ['audio'],
+      batch: Number(config.optimizeAutoBatch) || 5
+    });
+  } else {
+    optimize.stopAuto((x) => console.log(x));
+  }
+  return { ok: true, enabled: on, profiles: config.optimizeAutoProfiles || ['audio'] };
+});
+
+// Retry a file the optimizer previously gave up on (failures aren't retried
+// automatically, so this is how a one-off glitch gets another go).
+app.post('/api/optimize/retry', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const b = req.body || {};
+  if (!b.kind || b.fileId == null) return reply.code(400).send({ error: 'kind and fileId required' });
+  const r = optimize.enqueue(db, b.kind === 'episode' ? 'episode' : 'movie', Number(b.fileId),
+    { ...optPolicy(), force: true });
+  if (r.error && !r.jobId) return reply.code(400).send(r);
+  return r;
+});
+
 // Libraries whose drive isn't mounted right now. Surfaced so a disconnected
 // disk reads as "unplugged", not as thousands of missing files — and so the
 // optimizer's totals can say plainly what they're not counting.
@@ -2068,6 +2110,27 @@ async function start() {
       await new Promise((r) => setTimeout(r, 45000)); // let boot/scan settle before the heavy job
       await runIntroJob();
     })();
+  }
+
+  // Storage optimizer, automatic mode. Off unless `"optimizeAuto": true` is set
+  // in config.json — it rewrites media files, so it must be opted into once,
+  // deliberately, rather than switched on by an update landing.
+  //
+  // Once on it needs no attention: it probes whatever the scanner has newly
+  // imported and works the queue, so media added later gets the same treatment
+  // as media added today. It stands down whenever anyone is watching — a live
+  // session is enough to pause it, and the job in flight goes back in the queue.
+  if (config.optimizeAuto === true) {
+    optimize.startAuto(db, {
+      log: (x) => console.log(x),
+      isBusy: () => { pruneSessions(); return sessions.size > 0; },
+      ...optPolicy(),
+      // Only the audio profile runs unattended by default: it stream-copies
+      // video, so it can't degrade a picture, and it's minutes per file rather
+      // than hours. Video re-encoding is opt-in via config.
+      profiles: Array.isArray(config.optimizeAutoProfiles) ? config.optimizeAutoProfiles : ['audio'],
+      batch: Number(config.optimizeAutoBatch) || 5
+    });
   }
 }
 

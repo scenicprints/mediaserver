@@ -42,6 +42,13 @@ const OVER_TIER = 1.5;
 // sit at sane bitrates and are copied through untouched.
 const BLOAT_AUDIO = new Set(['truehd', 'mlp', 'dts', 'flac', 'pcm_s16le', 'pcm_s24le', 'pcm_bluray', 'pcm_dvd']);
 
+// Codecs that are already compact AND playable everywhere. If a file carries one
+// of these alongside its lossless track, we have a safe fallback: drop the
+// lossless track instead of decoding it. That matters because ffmpeg's TrueHD
+// decoder crashes on some streams ("quant_step_size larger than huff_lsbs"), and
+// most Blu-ray remuxes ship a compatibility AC-3 track for exactly this reason.
+const COMPAT_AUDIO = new Set(['ac3', 'eac3', 'aac']);
+
 // What a converted audio track becomes. E-AC-3 is the sweet spot: every TV,
 // Apple TV, and Android TV decodes it, Apple can *copy* it (so the server never
 // has to transcode audio for the HLS path), and 640 kbps 5.1 is transparent
@@ -66,11 +73,22 @@ const TMP_SUFFIX = '.marquee-opt.tmp';
 // aspect ratios; height is only the fallback for the odd file with no width.
 export function tierOf(width, height) {
   const w = Number(width) || 0;
-  if (w >= 3000) return '4K';
-  if (w >= 1700) return '1080p';
-  if (w >= 1100) return '720p';
-  if (w > 0) return 'SD';
   const h = Number(height) || 0;
+  const mp = (w * h) / 1e6; // megapixels
+
+  // Width catches widescreen; pixel count catches everything else. A film is
+  // promoted if EITHER test says so, which keeps the rule strictly protective:
+  // a title can only ever move UP a tier, never down.
+  //
+  //   3840x2160 DCI-ish  8.29 MP   3840x1606 scope 4K  6.17 MP
+  //   2872x2156 IMAX     6.19 MP <- width says 1080p, pixels say 4K. Pixels win.
+  //   1920x1080          2.07 MP   1920x800 scope      1.54 MP
+  //   1620x1080 pillar   1.75 MP <- width says 720p, pixels say 1080p.
+  if (w >= 3000 || mp >= 5.0) return '4K';
+  if (w >= 1700 || mp >= 1.3) return '1080p';
+  if (w >= 1100 || mp >= 0.6) return '720p';
+  if (w > 0) return 'SD';
+
   if (h >= 1500) return '4K';
   if (h >= 900) return '1080p';
   if (h >= 600) return '720p';
@@ -390,10 +408,21 @@ export function planFor(info, { allow4kVideo = false, allowHdrVideo = false } = 
         !wantVideo && veto && videoOver ? `${veto} video kept as-is` : null
       ].filter(Boolean).join(', ');
 
+  // Is there already a compact, universally-playable track in this file? If so,
+  // dropping the lossless tracks is a viable fallback when re-encoding them
+  // fails — and it needs no audio decoding at all, so a broken TrueHD stream
+  // can't defeat it. Prefer a surround track; settle for any compatible one.
+  const compat = audio.filter((a) => COMPAT_AUDIO.has(String(a.codec).toLowerCase()));
+  const keeper = compat.find((a) => (a.ch || 0) >= 6) || compat[0] || null;
+
   return {
     profile, reason, tier, hdr: !!info.hdr, veto,
     totalKbps, videoKbps: Math.round(videoKbps),
     bloatedAudio: bloated,
+    // Everything needed to retry as a pure stream-copy that discards the
+    // lossless tracks rather than converting them.
+    canDropAudio: !!keeper && bloated.length > 0,
+    keepAudio: keeper,
     saveBytes: Math.round((wantAudio ? audioSaveBytes : 0) + (wantVideo ? videoSaveBytes : 0))
   };
 }
@@ -457,10 +486,17 @@ function freeSpaceOn(filePath) {
 // Audio profile: `-map 0 -c copy` keeps every stream — video, subtitles, chapters,
 // attachments — byte-identical, and only the bloated audio tracks are re-encoded
 // in place. That's why it's fast and lossless where it matters.
-function buildArgs(info, plan, src, dst) {
+// `audioMode` is 'convert' (re-encode the lossless tracks) or 'drop' (discard
+// them and keep the file's existing compatible track). 'drop' decodes no audio
+// at all, which is what makes it a reliable fallback.
+function buildArgs(info, plan, src, dst, { audioMode = 'convert' } = {}) {
   const args = ['-hide_banner', '-nostdin', '-y', '-i', src, '-map', '0', '-map', '-0:d?', '-max_interleave_delta', '0'];
   const doVideo = plan.profile === 'video' || plan.profile === 'both';
   const doAudio = plan.profile === 'audio' || plan.profile === 'both';
+  if (doAudio && audioMode === 'drop') {
+    // Deselect each bloated audio track; everything else still passes through.
+    for (const a of plan.bloatedAudio) args.push('-map', `-0:a:${a.i}`);
+  }
 
   if (doVideo) {
     const target = TIER_TARGET[plan.tier];
@@ -487,7 +523,7 @@ function buildArgs(info, plan, src, dst) {
   }
 
   args.push('-c:a', 'copy', '-c:s', 'copy', '-c:t', 'copy');
-  if (doAudio) {
+  if (doAudio && audioMode === 'convert') {
     for (const a of plan.bloatedAudio) {
       const ch = Math.min(a.ch || 2, AUDIO_MAX_CH); // E-AC-3 tops out at 5.1
       args.push(`-c:a:${a.i}`, AUDIO_CODEC, `-b:a:${a.i}`, `${ch > 2 ? AUDIO_KBPS : 320}k`);
@@ -552,14 +588,21 @@ function note(msg) {
   if (worker.log.length > 300) worker.log.splice(0, worker.log.length - 300);
 }
 
-export function enqueue(db, kind, fileId, { allow4kVideo = false, allowHdrVideo = false } = {}) {
+export function enqueue(db, kind, fileId, { allow4kVideo = false, allowHdrVideo = false, force = false } = {}) {
   ensureSchema(db);
   const info = db.prepare('SELECT * FROM media_info WHERE file_kind = ? AND file_id = ?').get(kind, fileId);
   if (!info) return { error: 'file has not been probed yet' };
   const plan = planFor(info, { allow4kVideo, allowHdrVideo });
   if (plan.profile === 'none') return { error: 'nothing to optimize: ' + plan.reason };
-  const existing = db.prepare("SELECT id FROM optimize_jobs WHERE file_kind = ? AND file_id = ? AND state IN ('queued','running')").get(kind, fileId);
+  const existing = db.prepare("SELECT id FROM optimize_jobs WHERE file_kind = ? AND file_id = ? AND state IN ('queued','running','verifying')").get(kind, fileId);
   if (existing) return { error: 'already queued', jobId: existing.id };
+  // A file that already failed is not retried automatically. Without this the
+  // unattended loop would spend forever re-encoding the same broken file, and a
+  // 75 GB retry loop is expensive. `force` is how the owner asks for a retry.
+  if (!force) {
+    const prior = db.prepare("SELECT id, error FROM optimize_jobs WHERE file_kind = ? AND file_id = ? AND state IN ('failed','skipped') ORDER BY id DESC LIMIT 1").get(kind, fileId);
+    if (prior) return { error: 'previously failed — not retried automatically' };
+  }
   const r = db.prepare(`INSERT INTO optimize_jobs (file_kind, file_id, profile, state, path, old_size, old_summary, reason, created_at)
                         VALUES (?,?,?,'queued',?,?,?,?,?)`)
     .run(kind, fileId, plan.profile, info.path, info.size, summarize(info), plan.reason, Date.now());
@@ -630,8 +673,7 @@ async function runJob(db, job, { log, allow4kVideo, allowHdrVideo }) {
   log(`Optimizer: ${path.basename(src)} — ${plan.reason}`);
 
   const totalDur = Number(info.duration) || 0;
-  const args = buildArgs(info, plan, src, dst);
-  const err = await runFfmpeg(args, {
+  const encode = (audioMode) => runFfmpeg(buildArgs(info, plan, src, dst, { audioMode }), {
     onLine: (line) => {
       const m = /time=(\d+):(\d+):(\d+\.?\d*)/.exec(line);
       if (m && totalDur > 0) {
@@ -642,6 +684,22 @@ async function runJob(db, job, { log, allow4kVideo, allowHdrVideo }) {
       }
     }
   });
+
+  let audioMode = 'convert';
+  let err = await encode(audioMode);
+
+  // Some TrueHD streams kill ffmpeg's decoder partway through
+  // ("quant_step_size larger than huff_lsbs"). When the file already carries a
+  // compatible track, retry by DROPPING the lossless tracks instead of decoding
+  // them — no audio decode, so the broken stream can't be hit, and it saves more
+  // space than converting would have.
+  if (err && !worker.stop && plan.canDropAudio && (plan.profile === 'audio' || plan.profile === 'both')) {
+    fs.rmSync(dst, { force: true });
+    const keep = plan.keepAudio;
+    note(`Retrying ${path.basename(src)} without decoding audio — keeping its ${String(keep.codec).toUpperCase()} ${keep.ch}ch track`);
+    audioMode = 'drop';
+    err = await encode(audioMode);
+  }
 
   if (worker.stop) {
     fs.rmSync(dst, { force: true });
@@ -699,8 +757,122 @@ async function runJob(db, job, { log, allow4kVideo, allowHdrVideo }) {
   log(`Optimizer: ${path.basename(finalPath)} saved ${(saved / 2 ** 30).toFixed(2)} GB`);
   setState('done', {
     new_size: newSize, path: finalPath, pct: 100, ended_at: Date.now(),
+    // Say which route actually worked, so "dropped the lossless track" is never
+    // a silent outcome the owner discovers later.
+    reason: audioMode === 'drop'
+      ? `${plan.reason} (kept the existing ${String(plan.keepAudio.codec).toUpperCase()} ${plan.keepAudio.ch}ch track, dropped the lossless)`
+      : plan.reason,
     new_summary: fresh.error ? null : summarize({ ...fresh, size: newSize })
   });
+}
+
+// ---- Automatic mode ----------------------------------------------------
+
+// The optimizer as a standing background service rather than something a human
+// drives. It wakes on a timer, probes whatever the scanner has newly imported,
+// queues what's worth doing, and works the queue — so media added next month
+// gets the same treatment as media added today, with nobody watching it happen.
+//
+// Three rules keep it a good citizen on a box whose day job is serving video:
+//   1. It never encodes while somebody is watching. Playback always wins.
+//   2. One job at a time, and it stops the moment a viewer appears.
+//   3. It never retries a file that already failed (see enqueue).
+export const auto = {
+  enabled: false,
+  running: false,
+  phase: 'idle',      // idle | probing | working | paused
+  lastRun: 0,
+  lastError: null,
+  probed: 0,
+  completed: 0,
+  reclaimedBytes: 0,
+  timer: null
+};
+
+const AUTO_TICK_MS = 10 * 60 * 1000;   // how often to look for new work
+const AUTO_SETTLE_MS = 3 * 60 * 1000;  // quiet time required after the last viewer leaves
+
+// `isBusy()` is supplied by the server and reports whether anyone is streaming.
+export function startAuto(db, {
+  log = () => {},
+  isBusy = () => false,
+  allow4kVideo = false,
+  allowHdrVideo = false,
+  profiles = ['audio'],       // which profiles run unattended
+  batch = 5                   // jobs per wake-up, so it never runs away
+} = {}) {
+  if (auto.timer) return;
+  ensureSchema(db);
+  auto.enabled = true;
+  log('Optimizer: automatic mode on (' + profiles.join(', ') + ').');
+
+  const tick = async () => {
+    if (auto.running) return;
+    auto.running = true;
+    try {
+      // Playback beats housekeeping, always.
+      if (isBusy()) { auto.phase = 'paused'; return; }
+
+      // 1. Probe anything the scanner has imported since last time. Cheap, and
+      //    it's what makes new media get picked up without anyone asking.
+      auto.phase = 'probing';
+      const n = await runProbeScan(db, { log });
+      auto.probed += n;
+      if (n) log(`Optimizer: probed ${n} newly added file(s).`);
+
+      if (isBusy()) { auto.phase = 'paused'; return; }
+
+      // 2. Queue a small batch of the biggest wins in the allowed profiles.
+      auto.phase = 'working';
+      const { items } = analyze(db, { allow4kVideo, allowHdrVideo });
+      const pool = items.filter((i) => profiles.includes(i.profile));
+      let queued = 0;
+      for (const it of pool) {
+        if (queued >= batch) break;
+        const r = enqueue(db, it.kind, it.fileId, { allow4kVideo, allowHdrVideo });
+        if (r.jobId && !r.error) queued++;
+      }
+
+      // 3. Work the queue, bailing out the instant somebody starts watching.
+      //    The in-flight job is returned to the queue, not lost.
+      const before = db.prepare("SELECT COALESCE(SUM(old_size - new_size),0) b FROM optimize_jobs WHERE state='done'").get().b;
+      worker.stop = false;
+      const watcher = setInterval(() => { if (isBusy()) worker.stop = true; }, 15000);
+      try {
+        await runQueue(db, { log, allow4kVideo, allowHdrVideo });
+      } finally {
+        clearInterval(watcher);
+      }
+      const after = db.prepare("SELECT COALESCE(SUM(old_size - new_size),0) b FROM optimize_jobs WHERE state='done'").get().b;
+      const gained = Number(after) - Number(before);
+      if (gained > 0) {
+        auto.reclaimedBytes = Number(after);
+        auto.completed = db.prepare("SELECT COUNT(*) n FROM optimize_jobs WHERE state='done'").get().n;
+        log(`Optimizer: reclaimed ${(gained / 2 ** 30).toFixed(2)} GB this pass.`);
+      }
+      auto.lastRun = Date.now();
+      auto.lastError = null;
+    } catch (e) {
+      auto.lastError = e.message;
+      log('Optimizer auto error: ' + e.message);
+    } finally {
+      auto.phase = 'idle';
+      auto.running = false;
+    }
+  };
+
+  // Wait for boot, the first scan, and any first-load playback to settle before
+  // touching a disk in anger.
+  auto.timer = setInterval(tick, AUTO_TICK_MS);
+  setTimeout(tick, AUTO_SETTLE_MS);
+}
+
+export function stopAuto(log = () => {}) {
+  if (auto.timer) { clearInterval(auto.timer); auto.timer = null; }
+  auto.enabled = false;
+  worker.stop = true;   // put any in-flight job back in the queue
+  auto.phase = 'idle';
+  log('Optimizer: automatic mode off.');
 }
 
 // ---- Status ------------------------------------------------------------
@@ -713,6 +885,7 @@ export function status(db) {
   const probed = db.prepare('SELECT COUNT(*) n FROM media_info WHERE probe_error IS NULL').get().n;
   return {
     scan: { running: scan.running, done: scan.done, total: scan.total, error: scan.error },
+    auto: { enabled: auto.enabled, phase: auto.phase, lastRun: auto.lastRun, lastError: auto.lastError },
     worker: { running: worker.running, current: worker.current },
     jobs: counts,
     reclaimedBytes: Number(reclaimed) || 0,

@@ -1478,3 +1478,11 @@ body.tv-nav .card:not(.tv-focus) { opacity: 1; }
   .opt-row-meta { align-items: flex-start; width: 100%; }
   .opt-badges { justify-content: flex-start; }
 }
+
+/* Automatic mode toggle in Settings ▸ Storage. */
+.opt-auto { background: var(--panel-2); border: 1px solid var(--line); padding: 10px 12px; margin-bottom: 12px; }
+.opt-auto-row { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; }
+.opt-auto-row input { margin-top: 2px; flex: 0 0 auto; }
+.opt-auto-row strong { display: block; font-size: 13px; }
+.opt-auto-row .muted { display: block; font-size: 11.5px; margin-top: 2px; }
+#opt-auto-state { font-size: 11.5px; margin-top: 6px; }
