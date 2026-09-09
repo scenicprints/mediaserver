@@ -65,7 +65,7 @@ private enum VP {
 
 enum PlayerFocus: Hashable {
     case catcher, skipBack, play, skipFwd, scrubber, cc, gear
-    case skipIntro, upNext, upNextDismiss
+    case skipIntro, skipCredits, upNext, upNextDismiss
     case endNext, endBack, endReplay
     case menuRow(Int)
 }
@@ -115,7 +115,7 @@ struct PlayerView: View {
             // no-op style so there's NO tvOS focus highlight (no white flash).
             Button(action: { m.togglePlay(); m.flashControls() }) { Color.clear }
                 .buttonStyle(InvisibleButtonStyle())
-                .disabled(chromeUp || m.showSkipIntro || m.showUpNext || m.showEndCard)
+                .disabled(chromeUp || m.showSkipIntro || m.showSkipCredits || m.showUpNext || m.showEndCard)
                 .focused($focus, equals: .catcher)
                 .onMoveCommand { _ in m.flashControls() }
                 .onPlayPauseCommand { m.togglePlay(); m.flashControls() }
@@ -151,11 +151,12 @@ struct PlayerView: View {
             else if menu == .osSearch { focus = .menuRow(0) }
         }
         .onChange(of: m.showSkipIntro) { on in if on { focus = .skipIntro } else if focus == .skipIntro { focus = m.controlsVisible ? .play : .catcher } }
+        .onChange(of: m.showSkipCredits) { on in if on { focus = .skipCredits } else if focus == .skipCredits { focus = m.controlsVisible ? .play : .catcher } }
         .onChange(of: m.showUpNext) { on in if on { focus = .upNext } else if focus == .upNext || focus == .upNextDismiss { focus = m.controlsVisible ? .play : .catcher } }
         .onChange(of: m.finishedPlayback) { done in if done { m.teardown(); dismiss() } }
     }
 
-    private var menuOrPrompt: Bool { m.menu != .none || m.showSkipIntro || m.showUpNext || m.showEndCard }
+    private var menuOrPrompt: Bool { m.menu != .none || m.showSkipIntro || m.showSkipCredits || m.showUpNext || m.showEndCard }
 
     // MARK: Top bar — Back + title (web .vp-top)
 
@@ -253,19 +254,37 @@ struct PlayerView: View {
                     .focused($focus, equals: .skipIntro)
                     .focusRing(focus == .skipIntro)
                 }
-                if m.showUpNext, let n = m.upNextItem {
-                    Button { m.playNext() } label: { upNextCard(n) }
-                        .buttonStyle(.plain)
-                        .focused($focus, equals: .upNext)
-                        .focusRing(focus == .upNext)
-                    Button { m.dismissUpNext() } label: {
-                        Text("Dismiss").font(.callout.weight(.semibold))
-                            .padding(.horizontal, 20).padding(.vertical, 10)
-                            .background(VP.panel2.opacity(0.96), in: Capsule())
+                if m.showSkipCredits {
+                    Button { m.skipCredits() } label: {
+                        Label("Skip Credits", systemImage: "forward.end.fill").font(.system(size: 26, weight: .bold))
+                            .padding(.horizontal, 26).padding(.vertical, 16)
+                            .background(Color(hex: 0x14161e).opacity(0.9), in: RoundedRectangle(cornerRadius: 10))
+                            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.white.opacity(0.35), lineWidth: 1))
                     }
-                    .buttonStyle(.plain)
-                    .focused($focus, equals: .upNextDismiss)
-                    .focusRing(focus == .upNextDismiss)
+                    .buttonStyle(.plain).foregroundStyle(.white)
+                    .focused($focus, equals: .skipCredits)
+                    .focusRing(focus == .skipCredits)
+                }
+                if m.showUpNext, let n = m.upNextItem {
+                    // Dismiss sits UNDER the card, right-aligned with it — the web
+                    // keeps its actions inside the card, which tvOS can't do (a
+                    // Button's label cannot hold another Button and stay focusable).
+                    // Beside it, the capsule read as unrelated to the card.
+                    VStack(alignment: .trailing, spacing: 12) {
+                        Button { m.playNext() } label: { upNextCard(n) }
+                            .buttonStyle(.plain)
+                            .focused($focus, equals: .upNext)
+                            .focusRing(focus == .upNext)
+                        Button { m.dismissUpNext() } label: {
+                            Text("Dismiss").font(.callout.weight(.semibold))
+                                .padding(.horizontal, 20).padding(.vertical, 10)
+                                .background(VP.panel2.opacity(0.96), in: Capsule())
+                                .overlay(Capsule().strokeBorder(.white.opacity(0.22), lineWidth: 1))
+                        }
+                        .buttonStyle(.plain).foregroundStyle(.white)
+                        .focused($focus, equals: .upNextDismiss)
+                        .focusRing(focus == .upNextDismiss)
+                    }
                 }
             }
             .padding(.trailing, 80).padding(.bottom, 150)
@@ -533,6 +552,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     @Published var controlsVisible = false   // HUD starts hidden; shown on interaction
     @Published var menu: Menu = .none
     @Published var showSkipIntro = false
+    @Published var showSkipCredits = false
     @Published var showUpNext = false
     // Dismissed by hand: the card goes away AND the chain stops, so a binge you
     // stepped out of does not keep rolling. Cleared on the next file.
@@ -914,6 +934,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
             if duration > 0, end.isFinite { buffered = min(1, end / duration) }
         }
         if let r = introRange { showSkipIntro = position >= r.start && position <= r.end }
+        updateSkipCredits()
         if !upNext.isEmpty, !upNextDismissed, duration > 0 { showUpNext = position >= duration - upNextLead && position < duration }
         report(position: position)
     }
@@ -972,7 +993,11 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     private func loadMeta() async {
         guard let store, let fileId else { return }
         // Skip the server round-trip when playing a downloaded copy.
-        if kind == "episode", !offline, let pm = await store.playMeta(kind: kind, fileId: fileId) { introRange = pm.intro }
+        // Never on a live feed: there is nothing to skip forward into on a
+        // channel, and an intro range borrowed from the episode's own file would
+        // put a Skip Intro button over a programme already in progress.
+        if kind == "episode", !live, !offline,
+           let pm = await store.playMeta(kind: kind, fileId: fileId) { introRange = pm.intro }
         // AV builds its subtitle list from the HLS media-selection groups
         // (refreshAVTracks); the VLC path pulls the server track list.
         if !useAV { await reloadSubtitles() }
@@ -1018,11 +1043,29 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
             if self.menu == PlayerModel.Menu.none { self.controlsVisible = false }
         }
     }
+    // Matches the web: a named credits chapter is authoritative there, and
+    // without one it shows for the last 45 seconds of an episode that has a next
+    // one. Never on a live channel, and never while the Up Next card is already
+    // up — two controls doing the same job is worse than one.
+    private func updateSkipCredits() {
+        guard !live, !upNext.isEmpty, !upNextDismissed, !showUpNext, duration > 0 else {
+            if showSkipCredits { showSkipCredits = false }
+            return
+        }
+        showSkipCredits = position >= duration - 45 && position < duration - 1
+    }
     func skipIntro() {
         guard let end = introRange?.end else { return }
         if useAV { avSeek(end) }
         else { player.time = VLCTime(int: Int32(end * 1000)) }
         showSkipIntro = false
+    }
+    // Skip Credits goes to the NEXT EPISODE rather than seeking to the end —
+    // which is what the web button does, and what people actually mean by it.
+    func skipCredits() {
+        guard !upNext.isEmpty else { return }
+        showSkipCredits = false
+        playNext()
     }
     func closeMenu() { menu = .none }
     // Cancels the roll-on for THIS episode only; the queue is left intact so a
@@ -1287,6 +1330,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         if duration <= 0 { duration = Double(player.media?.length.intValue ?? 0) / 1000.0 }
         buffered = min(1, progress + 0.06)
         if let r = introRange { showSkipIntro = position >= r.start && position <= r.end }
+        updateSkipCredits()
         if !upNext.isEmpty, !upNextDismissed, duration > 0 { showUpNext = position >= duration - upNextLead && position < duration }
         report(position: position)
     }

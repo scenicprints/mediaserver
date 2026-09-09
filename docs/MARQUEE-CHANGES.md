@@ -182,3 +182,66 @@ receiver, so it starts on Surround. A stored choice always wins.
    film asked `/api/stream/episode/<movie file id>` and got nothing. It now
    picks the endpoint — and the `kind` that progress reporting and audio probing
    use — from what is actually being played.
+
+---
+
+## 2026-09-09 — Skip Credits everywhere, and neither skip card on Live TV
+
+### The gap
+
+Skip Intro shipped on all three clients. Its other half did not: **Skip Credits
+existed only in the web player.** The Apple TV app and the Android TV native
+player each had the intro pill and nothing at the end of an episode, which reads
+as a broken pair rather than a missing feature — a viewer who sees Skip Intro
+work reasonably expects the other one.
+
+The Android side was the most clearly unfinished: the WebView shell has been
+sending `hasUpNext: !!ctx.onEnded` in the handoff spec all along
+(`tryNativeHandoff`), and `PlayerActivity` never read it. The wiring was there;
+only the button was missing.
+
+### What it does
+
+Same rule as the web, on every client: a **named credits chapter** where the file
+has one, otherwise the **last 45 seconds of an episode that has a next one**.
+Bounded at both ends, so it cannot linger. It goes to the next episode — it does
+not seek to the end of this one. That is what the web button has always done and
+what people mean by it.
+
+- **Apple TV** — a twin of its Skip Intro button (same size, fill, corner radius
+  and stroke), hidden while the Up Next card is up: two controls doing the same
+  job is worse than one.
+- **Android TV** — a twin of its Skip Intro pill, same corner, same "▸ (OK)"
+  suffix. The two never coexist, one being at the start of an episode and the
+  other at the end. It reports the same outcome a natural ending does, so the web
+  shell's Up Next chain runs unchanged rather than the player seeking to the end
+  and making the viewer watch a black frame first.
+
+**Each button matches the app it lives in, not the other apps.** The web player
+is on the Braun language — square corners, uppercase, letterspaced; Apple TV's is
+a rounded filled pill; Android's is a white rounded pill. Importing one client's
+styling into another would have made the new button the odd one out on its own
+screen.
+
+### Neither card appears on Live TV
+
+There is no intro to skip past on a channel and no credits to skip out of — the
+next programme arrives on its own. This was already true on the web (`.vp-live
+.vp-skipbtn` is `display:none`, and `updateSkipButtons` returns early, which now
+also hides them rather than leaving them as they were) and on Android (`!live`).
+
+**It was NOT true on Apple TV**, which loaded an intro range for any episode
+including one tuned from a channel — so a Live TV programme could show a Skip
+Intro button positioned from the episode file's own fingerprint, over a
+programme already in progress. `loadMeta()` now skips the lookup when `live`.
+
+This is about the two SKIP cards only. Live TV still offers the next programme
+as an Up Next card and still rolls on by itself; that is channel continuity, not
+skipping, and it stays.
+
+### Also
+
+The Apple TV Up Next card's **Dismiss** now sits under the card, right-aligned
+with it, instead of floating beside it. The web keeps its actions inside the
+card, which tvOS cannot do — a Button's label cannot contain another focusable
+Button — and beside it the capsule read as unrelated to the card.

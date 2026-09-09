@@ -88,6 +88,13 @@ class PlayerActivity : Activity() {
     private var introEnd = -1.0
     private var introSkipped = false
 
+    // ---- credits skip / next episode ----
+    // The web shell already tells us whether a next episode exists; it has been
+    // arriving in the spec and being ignored, which is why this player had a
+    // Skip Intro pill and nothing at the other end.
+    private var hasUpNext = false
+    private var creditsTaken = false
+
     // ---- HUD ----
     private lateinit var hud: FrameLayout
     private lateinit var titleView: TextView
@@ -96,6 +103,7 @@ class PlayerActivity : Activity() {
     private lateinit var playIcon: TextView
     private lateinit var scrub: ScrubView
     private lateinit var skipIntroBtn: TextView
+    private lateinit var skipCreditsBtn: TextView
     private lateinit var bufferOverlay: LinearLayout
     private lateinit var subsMenu: ScrollView
     private lateinit var subsMenuList: LinearLayout
@@ -127,6 +135,7 @@ class PlayerActivity : Activity() {
             base = intent.getStringExtra("base") ?: throw IllegalStateException("no base")
             spec = JSONObject(intent.getStringExtra("spec") ?: "{}")
             live = spec.optBoolean("live", false)
+            hasUpNext = spec.optBoolean("hasUpNext", false)
             startAt = spec.optDouble("startAt", 0.0)
             progressPath = spec.optString("progressPath").takeIf { it.isNotEmpty() && it != "null" }
             token = extractToken()
@@ -309,6 +318,12 @@ class PlayerActivity : Activity() {
         // Skip Intro window (fingerprint-detected range from the server).
         val inIntro = !live && !introSkipped && introEnd > 0 && positionSec >= introStart && positionSec < introEnd
         skipIntroBtn.visibility = if (inIntro) View.VISIBLE else View.GONE
+        // Skip Credits: the last 45 seconds of an episode that has a next one,
+        // matching the web player's window. Never on a live channel — there is
+        // nothing to skip into, the next programme arrives on its own.
+        val inCredits = !live && hasUpNext && !creditsTaken && durationSec > 0 &&
+            positionSec >= durationSec - 45 && positionSec < durationSec - 1
+        skipCreditsBtn.visibility = if (inCredits) View.VISIBLE else View.GONE
     }
 
     // Reporting tick is a real timer: TimeChanged stops while PAUSED, and a
@@ -319,6 +334,18 @@ class PlayerActivity : Activity() {
             if (mainStarted && !inPreroll) { postProgress(); heartbeat(); flushTele() }
             ui.postDelayed(this, 10000)
         }
+    }
+
+    /** Go straight to the next episode. The web shell owns the Up Next chain,
+     *  so this reports the same outcome a natural ending does and lets it run —
+     *  rather than seeking to the end and waiting for EndReached, which would
+     *  make the viewer sit through a black frame first. */
+    private fun skipCreditsNow() {
+        if (creditsTaken || live || !hasUpNext) return
+        creditsTaken = true
+        skipCreditsBtn.visibility = View.GONE
+        postProgress(watched = true)
+        finishWithResult(ended = true)
     }
 
     private fun skipIntroNow() {
@@ -515,7 +542,9 @@ class PlayerActivity : Activity() {
         }
         when (event.keyCode) {
             KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER ->
-                if (skipIntroBtn.visibility == View.VISIBLE) skipIntroNow() else togglePause()
+                if (skipIntroBtn.visibility == View.VISIBLE) skipIntroNow()
+                else if (skipCreditsBtn.visibility == View.VISIBLE) skipCreditsNow()
+                else togglePause()
             KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_MEDIA_PLAY, KeyEvent.KEYCODE_MEDIA_PAUSE -> togglePause()
             KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_MEDIA_REWIND -> seekBy(-10)
             KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> seekBy(10)
@@ -627,6 +656,21 @@ class PlayerActivity : Activity() {
             rightMargin = dp(40); bottomMargin = dp(90)
         })
 
+        // --- Skip Credits (same pill, same corner: the two never show at once,
+        // one being at the start of an episode and the other at the end) ---
+        skipCreditsBtn = TextView(this).apply {
+            text = "Skip Credits ▸  (OK)"
+            setTextColor(Color.BLACK)
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(dp(18), dp(10), dp(18), dp(10))
+            background = GradientDrawable().apply { cornerRadius = dp(8).toFloat(); setColor(Color.WHITE) }
+            visibility = View.GONE
+        }
+        sp(skipCreditsBtn, 14f)
+        root.addView(skipCreditsBtn, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM or Gravity.END).apply {
+            rightMargin = dp(40); bottomMargin = dp(90)
+        })
+
         // --- Buffering splash (web-matched: MARQUEE gradient wordmark) ---
         bufferOverlay = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -661,6 +705,7 @@ class PlayerActivity : Activity() {
         })
 
         skipIntroBtn.setOnClickListener { skipIntroNow() }
+        skipCreditsBtn.setOnClickListener { skipCreditsNow() }
         setContentView(root)
     }
 

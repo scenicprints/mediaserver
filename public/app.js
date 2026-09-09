@@ -2403,7 +2403,9 @@ function openPlayer(ctx) {
   // back to a heuristic — but only for TV episodes, since movies have no intro.
   function updateSkipButtons() {
     if (!SKIP_BUTTONS_ENABLED) { skipIntro.classList.add('hidden'); skipCredits.classList.add('hidden'); return; }
-    if (live) return; // no skipping on a live feed
+    // Never on a live feed: there is no intro to skip past and no credits to
+    // skip out of — the channel rolls on to the next programme by itself.
+    if (live) { skipIntro.classList.add('hidden'); skipCredits.classList.add('hidden'); return; }
     const t = cur(), d = dur();
     let showIntro = false, showCredits = false;
     // Intro: ONLY a named chapter or a fingerprint-detected range (introCh is set
