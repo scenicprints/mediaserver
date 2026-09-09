@@ -1833,6 +1833,10 @@ function openPlayer(ctx) {
     else video.addEventListener('canplay', go);
   }
   async function seekTo(t) {
+    // A channel has nowhere to seek to. The scrub bar and transport are hidden
+    // on a live feed and the Media Session handlers are never registered, so
+    // nothing should reach here — this is the chokepoint that keeps it that way.
+    if (live) return;
     t = Math.max(0, dur() ? Math.min(t, dur() - 0.3) : t);
     if (play.mode === 'transcode') {
       const gen = ++seekGen;

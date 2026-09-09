@@ -353,3 +353,54 @@ TV app's `Theme.black`, so the two native players are literally the same colours
 Worth noting while in there: the remote hint already reads "OK pause · ▼
 subtitles · Back exit" on a channel and only mentions ±10s off it — the player
 was telling the truth about not seeking live long before the code enforced it.
+
+---
+
+## 2026-09-09 — Live TV cannot be paused either, and a check so this stops happening
+
+### Pause
+
+The rule is that a channel has no control that changes where you are in the
+stream. Seeking was fixed earlier today; **pausing was not**, and it is the same
+rule. The web had it right already (`togglePlay()` returns when live, `pauseNow()`
+refuses, and the Media Session handlers are never registered on a live feed).
+Both native players allowed it.
+
+- **Apple TV** — `togglePlay()` refuses when live, guarded at the function rather
+  than only at the button, because the remote's PLAY/PAUSE key and the
+  full-screen click catcher both reach playback without going near the button.
+  The play button is **not rendered** on a channel: an inert pause button still
+  reads as a promise the player cannot keep. With no button to rest on, the focus
+  ring rests on the settings gear instead (`restFocus`).
+- **Android TV** — `togglePause()` refuses when live, which covers both the OK
+  key and the dedicated media keys. The ❚❚ / ▶ indicator is hidden, since there
+  is no state left for it to indicate, and the remote hint no longer advertises
+  a key that does nothing.
+
+`seekTo()` on the web also got a `live` guard. Nothing should reach it — the
+scrub bar is hidden and the media handlers are unregistered — but it is the
+chokepoint every seek funnels through, matching `jump()` on tvOS and `seekBy()`
+on Android.
+
+### The check
+
+Every one of these was found by someone watching television. So there is now
+`test/live-tv-rules.test.mjs`, run by `npm test` and by the **Client rules**
+workflow on every push and pull request:
+
+- no seeking, no pausing, no Skip Intro, no Skip Credits on a live channel — for
+  each of the three clients, asserted at the **guard** and at the **control**,
+  because a hidden button with a live action is still a bug waiting for a
+  keyboard shortcut;
+- and that all three clients still have **both** skip controls, which is the
+  thing that started this: Skip Intro shipped everywhere, Skip Credits only on
+  the web, and the pair read as broken rather than absent.
+
+It greps three languages at the source, which is blunt. The alternative is
+building and driving three apps to assert something that is really a statement
+about the code, and a blunt check that runs on every push beats a precise one
+nobody writes. It was verified to fail by deleting a guard.
+
+`npm test` is the client rules only — fast, no ffmpeg. The optimizer's
+quality-gate suite needs ffmpeg with libvmaf and stays local as
+`npm run test:optimizer`.

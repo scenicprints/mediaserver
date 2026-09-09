@@ -122,6 +122,8 @@ struct PlayerView: View {
             // Invisible catcher owns the remote when nothing else is up. It's a
             // Button (so the CENTER/select click pauses + shows the HUD) with a
             // no-op style so there's NO tvOS focus highlight (no white flash).
+            // On a channel togglePlay() is a no-op, so a centre press just wakes
+            // the HUD — which is the only thing left to do with it.
             Button(action: { m.togglePlay(); m.flashControls() }) { Color.clear }
                 .buttonStyle(InvisibleButtonStyle())
                 .disabled(chromeUp || m.showSkipIntro || m.showSkipCredits || m.showUpNext || m.showEndCard)
@@ -151,7 +153,7 @@ struct PlayerView: View {
         }
         .onDisappear { m.teardown() }
         .onChange(of: m.controlsVisible) { vis in
-            if vis { if !menuOrPrompt { focus = .play } }
+            if vis { if !menuOrPrompt { focus = restFocus } }
             else if !menuOrPrompt { focus = .catcher }
         }
         .onChange(of: m.menu) { menu in
@@ -159,12 +161,15 @@ struct PlayerView: View {
             else if menu == .aiPicker { focus = .menuRow(0) }
             else if menu == .osSearch { focus = .menuRow(0) }
         }
-        .onChange(of: m.showSkipIntro) { on in if on { focus = .skipIntro } else if focus == .skipIntro { focus = m.controlsVisible ? .play : .catcher } }
-        .onChange(of: m.showSkipCredits) { on in if on { focus = .skipCredits } else if focus == .skipCredits { focus = m.controlsVisible ? .play : .catcher } }
-        .onChange(of: m.showUpNext) { on in if on { focus = .upNext } else if focus == .upNext || focus == .upNextDismiss { focus = m.controlsVisible ? .play : .catcher } }
+        .onChange(of: m.showSkipIntro) { on in if on { focus = .skipIntro } else if focus == .skipIntro { focus = m.controlsVisible ? restFocus : .catcher } }
+        .onChange(of: m.showSkipCredits) { on in if on { focus = .skipCredits } else if focus == .skipCredits { focus = m.controlsVisible ? restFocus : .catcher } }
+        .onChange(of: m.showUpNext) { on in if on { focus = .upNext } else if focus == .upNext || focus == .upNextDismiss { focus = m.controlsVisible ? restFocus : .catcher } }
         .onChange(of: m.finishedPlayback) { done in if done { m.teardown(); dismiss() } }
     }
 
+    // Where the focus ring rests when the HUD is up. A channel has no play
+    // button to rest on, so it rests on the settings gear instead.
+    private var restFocus: PlayerFocus { live ? .gear : .play }
     private var menuOrPrompt: Bool { m.menu != .none || m.showSkipIntro || m.showSkipCredits || m.showUpNext || m.showEndCard }
 
     // MARK: Top bar — Back + title (web .vp-top)
@@ -193,7 +198,11 @@ struct PlayerView: View {
             Spacer()
             // Center transport — a single round glass play/pause (the ±10s side
             // buttons were redundant: D-pad left/right already jumps ±10s).
-            glassButton(m.isPlaying ? "pause.fill" : "play.fill", 140, .play) { m.togglePlay(); m.flashControls() }
+            // Absent entirely on a channel: an inert pause button still reads as
+            // a promise the player cannot keep.
+            if !live {
+                glassButton(m.isPlaying ? "pause.fill" : "play.fill", 140, .play) { m.togglePlay(); m.flashControls() }
+            }
             Spacer()
             // Bottom: scrubber + utility row over a scrim.
             VStack(spacing: 14) {
@@ -1051,6 +1060,10 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
 
     // MARK: Transport
     func togglePlay() {
+        // A channel does not pause. Guarded here rather than only at the button,
+        // because the remote's PLAY/PAUSE key and the full-screen click catcher
+        // both reach playback without going near it.
+        guard !live else { return }
         if useAV { if av?.timeControlStatus == .paused { av?.play() } else { av?.pause() }; return }
         if player.isPlaying { player.pause() } else { player.play() }
     }

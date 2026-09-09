@@ -1,0 +1,29 @@
+name: Client rules
+
+# Rules that must hold in EVERY client at once — the web player, the Apple TV
+# app and the Android TV app. They are checked at the source rather than by
+# driving three apps, because the thing being asserted really is a statement
+# about the code, and because a blunt check that runs on every push beats a
+# precise one nobody writes.
+#
+# This exists because "Live TV cannot be skipped or paused" was true on the web
+# and quietly false on both native players for months. It was found by someone
+# watching television.
+#
+# Runs on every push and every PR, and on anything that touches a client — which
+# is to say, it gates the Apple TV and Android TV builds that ship from here.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  rules:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Live TV rules, and both skip controls, in all three clients
+        run: npm test

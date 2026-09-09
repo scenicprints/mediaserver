@@ -288,6 +288,9 @@ class PlayerActivity : Activity() {
     }
 
     private fun togglePause() {
+        // A channel does not pause — the OK key and the remote's dedicated
+        // media keys both land here, so this is the one place that has to know.
+        if (live) return
         if (inPreroll) return
         val p = player ?: return
         try { if (p.isPlaying) p.pause() else p.play() } catch (_: Exception) {}
@@ -627,7 +630,11 @@ class PlayerActivity : Activity() {
         scrub = ScrubView(this, ACCENT, ACCENT2)
         bottom.addView(scrub, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(4)).apply { bottomMargin = dp(10) })
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        playIcon = TextView(this).apply { setTextColor(Braun.ink); typeface = Typeface.DEFAULT_BOLD; text = "❚❚" }
+        playIcon = TextView(this).apply {
+            setTextColor(Braun.ink); typeface = Typeface.DEFAULT_BOLD; text = "❚❚"
+            // Nothing to indicate on a channel: the state cannot change.
+            visibility = if (live) View.GONE else View.VISIBLE
+        }
         sp(playIcon, 15f)
         timeView = TextView(this).apply {
             setTextColor(if (live) Braun.signal else Braun.ink)
@@ -638,7 +645,7 @@ class PlayerActivity : Activity() {
         val hint = TextView(this).apply {
             setTextColor(Braun.ink3)
             letterSpacing = 0.08f
-            text = if (live) "OK pause · ▼ subtitles · Back exit" else "OK play/pause · ◀ ▶ ±10s · ▼ subtitles · Back exit"
+            text = if (live) "▼ subtitles · Back exit" else "OK play/pause · ◀ ▶ ±10s · ▼ subtitles · Back exit"
             gravity = Gravity.END
         }
         sp(hint, 12f)
