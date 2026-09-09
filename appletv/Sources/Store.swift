@@ -316,7 +316,10 @@ struct Trailer: Decodable, Hashable { let key: String; let name: String? }
 // The TMDB franchise this film belongs to, with each part marked with the local
 // library id when we own it — that is what makes "the next one" offerable at the
 // end of a film instead of stopping on a frozen frame.
-struct CollectionPart: Decodable, Hashable { let title: String; let localId: Int? }
+// title is optional on purpose: a single missing field on one part would
+// otherwise fail the whole MovieExtra decode and silently empty the cast,
+// tagline and recommendations too. We take the title from the library anyway.
+struct CollectionPart: Decodable, Hashable { let title: String?; let localId: Int? }
 struct MovieCollectionInfo: Decodable { let name: String?; let parts: [CollectionPart]? }
 
 struct MovieExtra: Decodable {
