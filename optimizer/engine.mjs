@@ -22,7 +22,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
-import { ffmpegBin, ffprobeBin, nvencAvailable } from './ffmpeg.js';
+import { ffmpegBin, ffprobeBin, nvencAvailable } from './ffmpeg.mjs';
 
 const yield_ = () => new Promise((r) => setImmediate(r));
 

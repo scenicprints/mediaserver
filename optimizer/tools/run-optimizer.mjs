@@ -2,7 +2,7 @@
 //
 // This exists so the work can run while the live server keeps serving. It talks
 // to the same library.db (SQLite WAL handles the concurrent access) and uses the
-// same src/optimize.js the Settings > Storage tab does, so there is one
+// same optimizer/engine.mjs the scheduled runs do, so there is one
 // implementation and one safety gate, not two.
 //
 //   node tools/run-optimizer.mjs scan              full probe pass (read-only)
@@ -17,8 +17,8 @@ import { DatabaseSync } from 'node:sqlite';
 
 const ROOT = 'C:\\mediaserver';
 const imp = (f) => import(pathToFileURL(path.join(ROOT, 'src', f)).href);
-const { detectFfmpeg } = await imp('ffmpeg.js');
-const opt = await imp('optimize.js');
+const { detect: detectFfmpeg } = await imp('ffmpeg.mjs');
+const opt = await imp('engine.mjs');
 
 const GB = (b) => (Number(b) / 2 ** 30).toFixed(1) + ' GB';
 const TB = (b) => (Number(b) / 2 ** 40).toFixed(2) + ' TB';

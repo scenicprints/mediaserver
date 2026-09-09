@@ -23,7 +23,7 @@ import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 
-const { tierOf, isProtected } = await import(pathToFileURL('C:\\mediaserver\\src\\optimize.js').href);
+const { tierOf, isProtected } = await import(pathToFileURL('C:\\mediaserver\\optimizer\\engine.mjs').href);
 const B = String.fromCharCode(92);
 const OUT = 'C:' + B + 'mediaserver' + B + 'tools' + B + 'shrink-options.txt';
 

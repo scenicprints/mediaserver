@@ -55,7 +55,6 @@
         <button class="tab" data-tab="streaming">Streaming</button>
         <button class="tab" data-tab="requests">Requests</button>
         <button class="tab admin-only" data-tab="sessions">Now Playing</button>
-        <button class="tab admin-only" data-tab="storage">Storage</button>
         <button class="tab admin-only" data-tab="diag">Diagnostics</button>
       </div>
 
@@ -211,44 +210,6 @@
           </div>
           <p class="muted">Live playback sessions across all users — what they're watching, whether it's direct-playing or transcoding, and health details for troubleshooting. Refreshes automatically.</p>
           <div id="sessions-list" class="sessions-list"></div>
-        </div>
-      </div>
-
-      <div class="tab-panel" data-panel="storage">
-        <div class="sub-account" style="border-top:none;margin-top:4px;padding-top:0">
-          <div class="sess-head">
-            <h3 style="margin:0">Storage optimizer</h3>
-            <span class="muted" id="opt-count">…</span>
-          </div>
-          <p class="muted">Finds files carrying more bits than they need and rewrites them smaller. It works one <em>file</em> at a time and never compares versions of a title — multiple cuts and qualities of the same film are left completely alone. Nothing is deleted until the new file passes a verification check.</p>
-
-          <div id="opt-offline" class="opt-offline hidden"></div>
-          <div id="opt-drives" class="opt-drives"></div>
-
-          <div class="opt-auto">
-            <label class="opt-auto-row">
-              <input type="checkbox" id="opt-auto" />
-              <span>
-                <strong>Optimize automatically</strong>
-                <span class="muted">Keep working through the library on its own, and treat anything new the same way as it arrives. Pauses whenever someone is watching.</span>
-              </span>
-            </label>
-            <div class="muted" id="opt-auto-state"></div>
-          </div>
-
-          <div class="opt-actions">
-            <button class="btn" id="opt-scan">Scan library</button>
-            <button class="btn" id="opt-start">Start optimizing</button>
-            <button class="btn" id="opt-stop">Stop</button>
-          </div>
-          <div id="opt-progress" class="opt-progress"></div>
-
-          <div id="opt-surround" class="opt-surround"></div>
-
-          <div class="opt-filters" id="opt-filters"></div>
-          <div id="opt-summary" class="diag-stats"></div>
-          <div id="opt-list" class="opt-list"></div>
-          <div id="opt-log" class="opt-log"></div>
         </div>
       </div>
 

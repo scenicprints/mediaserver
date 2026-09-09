@@ -15,7 +15,6 @@ const WIN_TAR = 'C:\\Windows\\System32\\tar.exe'; // bsdtar — extracts zips on
 let ffmpegPath = null;
 let ffprobePath = null;
 let hasNvenc = false;
-let hasHevcNvenc = false;
 let maxTranscodeHeight = 0; // config cap on re-encoded video height (0 = auto/off)
 // Remote ceiling: a viewer coming in over the internet (behind Caddy) can't carry
 // a full-bitrate 4K stream, so remote sessions are capped to this height/bitrate and
@@ -81,21 +80,10 @@ export async function detectFfmpeg(root, config = {}) {
     hasNvenc = (await tryRun(ffmpegPath, ['-hide_banner', '-loglevel', 'error',
       '-f', 'lavfi', '-i', 'nullsrc=s=256x256', '-frames:v', '1', '-c:v', 'h264_nvenc', '-f', 'null', '-'])) !== null;
   }
-  // HEVC NVENC is a separate capability from H.264 NVENC (older cards list it
-  // and still fail), and the storage optimizer encodes HEVC — prove it too.
-  hasHevcNvenc = false;
-  if (encoders.includes('hevc_nvenc')) {
-    hasHevcNvenc = (await tryRun(ffmpegPath, ['-hide_banner', '-loglevel', 'error',
-      '-f', 'lavfi', '-i', 'nullsrc=s=256x256', '-frames:v', '1', '-c:v', 'hevc_nvenc', '-f', 'null', '-'])) !== null;
-  }
   return status();
 }
 
 export const ffmpegBin = () => ffmpegPath;
-export const ffprobeBin = () => ffprobePath;
-// Can this box hardware-encode HEVC? (The storage optimizer falls back to
-// libx265 when it can't — correct either way, just far slower.)
-export const nvencAvailable = () => hasHevcNvenc;
 
 export function status() {
   return {

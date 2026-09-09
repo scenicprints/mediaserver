@@ -31,7 +31,7 @@ import { pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 
 const { tierOf, moveNoClobber, copyNoClobber, findCollisions } =
-  await import(pathToFileURL('C:\\mediaserver\\src\\optimize.js').href);
+  await import(pathToFileURL('C:\\mediaserver\\optimizer\\engine.mjs').href);
 
 const GO = process.argv.includes('--go');
 // Folder fixes only: same-drive renames, no cross-drive copying. This is the

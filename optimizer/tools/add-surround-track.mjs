@@ -13,9 +13,9 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 
-const imp = (f) => import(pathToFileURL(path.join('C:\\mediaserver\\src', f)).href);
-const { detectFfmpeg } = await imp('ffmpeg.js');
-const opt = await imp('optimize.js');
+const imp = (f) => import(pathToFileURL(path.join('C:\\mediaserver\\optimizer', f)).href);
+const { detect: detectFfmpeg } = await imp('ffmpeg.mjs');
+const opt = await imp('engine.mjs');
 
 const B = String.fromCharCode(92);
 const TEST = process.argv.includes('--test');
