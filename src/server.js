@@ -995,11 +995,16 @@ function fileRow(kind, fileId) {
 // center/dialogue channel, so folding on the server (correctly) is the default.
 function audioOpts(req) {
   const q = req.query || {};
+  // `atrack` is the 0-based index among the file's AUDIO streams, chosen by the
+  // player. Without it ffmpeg takes the first audio stream, which on a DTS-first
+  // remux is exactly the one an Apple TV cannot decode.
+  const at = q.atrack != null && q.atrack !== '' ? parseInt(q.atrack, 10) : null;
   return {
     forceStereo: q.audio !== 'surround',
     dboost: q.dboost === 'off' || q.dboost === 'strong' ? q.dboost : 'normal',
     night: q.night === '1',
-    norm: q.norm === '1'
+    norm: q.norm === '1',
+    atrack: Number.isInteger(at) && at >= 0 ? at : null
   };
 }
 
@@ -1066,6 +1071,56 @@ app.get('/api/play/:kind/:fileId', async (req, reply) => {
 // custom player must do this itself, AVPlayer did it for free — and (b) drive a
 // live "what's actually playing" overlay. Probe-backed, so it's exact, not the
 // filename-derived `quality` string.
+// ---- Audio tracks: what's in the file, and who can play it ----
+// The player needs the real stream list (the browser's video.audioTracks only
+// knows about what it decoded itself, which is nothing when we transcode).
+//
+// `playable` is per DEVICE TYPE, and the table is an intersection, not a guess:
+//   Apple TV 4K       aac ac3 eac3 mp3 alac  — no DTS, no TrueHD, no Opus. Its
+//                     HDMI audio passthrough did NOT ship in tvOS 26.
+//   Roku              aac ac3 eac3 mp3       — no TrueHD; DTS passthrough only
+//   Android/Google TV aac ac3 eac3 mp3 opus vorbis flac
+//   VAVA 4K           aac ac3 eac3           — has DTS-HD but a lip-sync bug
+//   Browser           aac mp3 opus vorbis flac — no AC-3 or E-AC-3 at all
+const DEVICE_AUDIO = {
+  appletv:   new Set(['aac', 'ac3', 'eac3', 'mp3', 'alac']),
+  roku:      new Set(['aac', 'ac3', 'eac3', 'mp3']),
+  androidtv: new Set(['aac', 'ac3', 'eac3', 'mp3', 'opus', 'vorbis', 'flac']),
+  vava:      new Set(['aac', 'ac3', 'eac3']),
+  browser:   new Set(['aac', 'mp3', 'opus', 'vorbis', 'flac'])
+};
+
+function audioLayout(ch) {
+  return ch >= 8 ? '7.1' : ch >= 6 ? '5.1' : ch === 2 ? 'Stereo' : ch === 1 ? 'Mono' : `${ch}ch`;
+}
+
+app.get('/api/audio/list/:kind/:fileId', async (req, reply) => {
+  const { kind, fileId } = req.params;
+  const row = fileRow(kind, fileId);
+  if (!row) return reply.code(404).send({ error: 'not found' });
+  const p = await probe(row.path);
+  const audio = ((p && p.streams) || []).filter((s) => s.codec_type === 'audio');
+  const tracks = audio.map((s, i) => {
+    const codec = String(s.codec_name || '').toLowerCase();
+    const ch = +s.channels || 0;
+    const playable = {};
+    for (const [dev, set] of Object.entries(DEVICE_AUDIO)) playable[dev] = set.has(codec);
+    return {
+      index: i,                                   // the "a:N" specifier
+      codec, channels: ch, layout: audioLayout(ch),
+      language: (s.tags && (s.tags.language || s.tags.LANGUAGE)) || null,
+      title: (s.tags && (s.tags.title || s.tags.TITLE)) || null,
+      bitrateKbps: s.bit_rate ? Math.round(+s.bit_rate / 1000) : null,
+      default: !!(s.disposition && s.disposition.default),
+      // A commentary track should never be auto-selected over the feature mix.
+      commentary: /comment/i.test((s.tags && (s.tags.title || '')) || '') ||
+        !!(s.disposition && s.disposition.comment),
+      playable
+    };
+  });
+  return { tracks };
+});
+
 app.get('/api/mediainfo/:kind/:fileId', async (req, reply) => {
   const { kind, fileId } = req.params;
   const row = fileRow(kind, fileId);
@@ -1147,7 +1202,7 @@ app.get('/api/transcode/:kind/:fileId', async (req, reply) => {
   if (start > 0 && info.vcopy && req.query.snapped !== '1') start = await keyframeBefore(row.path, start);
   const proc = transcodeStream(row.path, {
     start, vcopy: info.vcopy, acopy: info.acopy, downmix: info.downmix, scaleH: info.scaleH, maxKbps: info.maxKbps || 0,
-    forceStereo: opts.forceStereo, dboost: opts.dboost, night: opts.night, norm: opts.norm
+    forceStereo: opts.forceStereo, dboost: opts.dboost, night: opts.night, norm: opts.norm, atrack: opts.atrack
   });
   const statKey = `${req.user.id}:${kind}:${fileId}`;
   proc.stderr.on('data', (d) => {
@@ -1184,7 +1239,7 @@ app.get('/api/diagnose/:kind/:fileId', async (req, reply) => {
       await new Promise((res, rej) => {
         const proc = transcodeStream(row.path, {
           start, vcopy: info.vcopy, acopy: info.acopy, downmix: info.downmix, scaleH: info.scaleH,
-          forceStereo: opts.forceStereo, dboost: opts.dboost, night: opts.night, norm: opts.norm, duration: 3
+          forceStereo: opts.forceStereo, dboost: opts.dboost, night: opts.night, norm: opts.norm, atrack: opts.atrack, duration: 3
         });
         const out = fs.createWriteStream(tmp);
         proc.on('error', rej);
@@ -1847,7 +1902,16 @@ app.get('/api/settings', async (req) => {
   const os = userOS(req.user.id);
   const out = {
     user: { username: req.user.username, role: req.user.role },
-    openSubtitles: { configured: osEnabled(os), username: os.username || '' }
+    openSubtitles: { configured: osEnabled(os), username: os.username || '' },
+    // Is this viewer coming in over the internet? The player uses it to prefer
+    // the smaller version of a title, which streams without the server having to
+    // re-encode anything. Alongside it, the ceiling that decides what "small
+    // enough" means, so the client isn't guessing at the server's policy.
+    remote: isRemote(req),
+    remoteCap: {
+      height: config.remoteMaxHeight != null ? Number(config.remoteMaxHeight) : 1080,
+      kbps: config.remoteMaxBitrateKbps != null ? Number(config.remoteMaxBitrateKbps) : 6000
+    }
   };
   if (req.user.role === 'admin') {
     out.tmdb = { configured: !!config.tmdbApiKey };

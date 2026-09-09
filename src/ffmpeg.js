@@ -255,7 +255,7 @@ function chaptersOf(p) {
 // channel); `night` compresses dynamic range; `norm` normalizes loudness. Any of
 // these needs the audio re-encoded, so the file can no longer direct-play or
 // audio-copy — that's what `needAudio` reflects.
-export async function playInfo(filePath, { forceStereo = false, night = false, norm = false, remote = false } = {}) {
+export async function playInfo(filePath, { forceStereo = false, night = false, norm = false, remote = false, atrack = null } = {}) {
   const ext = path.extname(filePath).toLowerCase();
   if (!ffmpegPath || !ffprobePath) {
     return { mode: 'direct', duration: null, reason: 'no-ffmpeg', chapters: [] };
@@ -263,7 +263,11 @@ export async function playInfo(filePath, { forceStereo = false, night = false, n
   const p = await probe(filePath);
   if (!p || !p.streams) return { mode: 'direct', duration: null, reason: 'probe-failed', chapters: [] };
   const v = p.streams.find((s) => s.codec_type === 'video');
-  const a = p.streams.find((s) => s.codec_type === 'audio');
+  // Which audio stream are we actually serving? The player can name one with
+  // ?atrack=N (0-based among audio streams). Without that we take the first,
+  // which on a DTS-first remux is the stream an Apple TV cannot decode.
+  const audioStreams = p.streams.filter((s) => s.codec_type === 'audio');
+  const a = (atrack != null && audioStreams[atrack]) || audioStreams[0];
   const duration = parseFloat(p.format && p.format.duration) || null;
   const chapters = chaptersOf(p);
   const vOK = !!v && VIDEO_OK.has(v.codec_name);
@@ -372,7 +376,7 @@ function downmixFilter(level) {
 const NIGHT_FILTER = 'acompressor=threshold=-24dB:ratio=4:attack=20:release=250,alimiter=limit=0.95';
 const NORM_FILTER = 'loudnorm=I=-16:TP=-1.5:LRA=11';
 
-export function transcodeStream(filePath, { start = 0, vcopy = false, acopy = false, downmix = false, forceStereo = false, dboost = 'normal', night = false, norm = false, scaleH = 0, maxKbps = 0, duration = 0 } = {}) {
+export function transcodeStream(filePath, { start = 0, vcopy = false, acopy = false, downmix = false, forceStereo = false, dboost = 'normal', night = false, norm = false, scaleH = 0, maxKbps = 0, duration = 0, atrack = null } = {}) {
   if (maxKbps > 0) vcopy = false; // can't cap a copied stream's bitrate — must re-encode
   // First line of defense against A/V drift (applied regardless of resolution):
   // `+genpts` regenerates missing timestamps up front, and `aresample=async=1`
@@ -404,7 +408,8 @@ export function transcodeStream(filePath, { start = 0, vcopy = false, acopy = fa
     args.push('-ss', String(start));
     if (vcopy) args.push('-noaccurate_seek');
   }
-  args.push('-i', filePath, '-map', '0:v:0', '-map', '0:a:0?', '-sn', '-dn');
+  // Serve the audio stream the player asked for, not always the first.
+  args.push('-i', filePath, '-map', '0:v:0', '-map', `0:a:${atrack != null ? atrack : 0}?`, '-sn', '-dn');
   if (duration > 0) args.push('-t', String(duration)); // used by the admin diagnostics sample
   if (vcopy) {
     args.push('-c:v', 'copy');

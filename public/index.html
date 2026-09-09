@@ -150,6 +150,20 @@
           </div>
         </div>
 
+        <div class="sub-account" style="border-top:none;margin-top:0;padding-top:0">
+          <h3>What are you watching on?</h3>
+          <p class="muted">Different devices understand different audio formats — an Apple TV can't decode DTS at all, a Roku can't decode TrueHD. Tell Marquee what this is and it will pick a soundtrack the device can actually play, instead of making the server convert one on the fly.</p>
+          <div class="add-row seg" id="devtype-row">
+            <button class="btn" data-devtype="auto">Detect</button>
+            <button class="btn" data-devtype="appletv">Apple TV</button>
+            <button class="btn" data-devtype="androidtv">Android / Google TV</button>
+            <button class="btn" data-devtype="roku">Roku</button>
+            <button class="btn" data-devtype="vava">VAVA projector</button>
+            <button class="btn" data-devtype="browser">Browser</button>
+          </div>
+          <p class="muted" id="devtype-note" style="margin-bottom:0"></p>
+        </div>
+
         <div class="sub-account">
           <h3>Audio output</h3>
           <p class="muted">If dialogue sometimes goes silent while music and effects keep playing, choose <b>Stereo</b> — TVs have two speakers, so the server folds surround (5.1) down to stereo correctly and keeps dialogue out front. <b>Surround</b> sends the original track untouched, for a real surround system.</p>
@@ -157,6 +171,7 @@
             <button class="btn" data-audio="stereo">🔉 Stereo (recommended)</button>
             <button class="btn" data-audio="surround">🔊 Surround (original)</button>
           </div>
+          <p class="muted" style="margin-bottom:0">This is about your <b>speakers</b>, not the device — a projector with a receiver attached wants Surround even though its own speakers are stereo.</p>
         </div>
 
         <div class="sub-account">

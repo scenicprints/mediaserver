@@ -893,13 +893,39 @@ function drawEpg() {
   if (sel) sel.scrollIntoView({ block: 'nearest' });
 }
 
-async function tuneIn() {
-  const chan = ltState.channels[ltState.sel];
+// A real channel keeps going when a programme finishes. This works out what the
+// guide says is on next and hands the player an Up Next card for it, so the
+// countdown machinery rolls the channel over instead of the picture stopping
+// dead — which is what it used to do, because Live TV passed onEnded: null.
+//
+// The channel index is captured rather than read from ltState at the time, so a
+// programme ending never tunes whatever the user has since highlighted.
+function liveContinuation(chanIdx) {
+  const chan = ltState.channels[chanIdx];
+  if (!chan) return {};
+  const up = upcoming(chan, Math.floor(Date.now() / 1000), 1)[0];
+  const go = () => tuneIn(chanIdx);
+  return {
+    upNext: up ? {
+      label: 'Next on ' + (chan.name || 'this channel'),
+      still: up.item.ref.still || up.item.ref.backdrop || up.item.ref.poster || '',
+      title: up.item.ref.title + (up.item.ref.epTitle ? ' · ' + up.item.ref.epTitle : ''),
+      play: go
+    } : null,
+    onEnded: go
+  };
+}
+
+async function tuneIn(chanIdx) {
+  const idx = chanIdx != null ? chanIdx : ltState.sel;
+  const chan = ltState.channels[idx];
+  if (!chan) return;
   const on = nowOn(chan, Math.floor(Date.now() / 1000));
   const offset = Math.floor(on.offset); // drop in at the live position, not the start
+  const cont = liveContinuation(idx);
   // Live TV is ephemeral: pass no progressUrl, so nothing tuned here is written
   // to watch-state / Continue Watching.
-  if (on.item.kind === 'episode') { tuneEpisode(on.item.ref, offset); return; }
+  if (on.item.kind === 'episode') { tuneEpisode(on.item.ref, offset, cont); return; }
   const m = await (await fetch('/api/movies/' + on.item.ref.id)).json();
   const files = m.files || [];
   if (!files.length) { openDetail(m.id, false); return; }
@@ -907,13 +933,13 @@ async function tuneIn() {
   openPlayer({
     title: m.title, files, startFileId: f.id, verKey: 'm' + m.id,
     streamBase: '/api/stream/', subtitleBase: '/api/subtitle/', searchKind: 'movie',
-    startAt: offset, progressUrl: null, upNext: null, onEnded: null, live: true // live feed
+    startAt: offset, progressUrl: null, live: true, autoAdvance: true, ...cont
   });
 }
 
 // Tune into the exact episode that's "airing" now, at the live offset. Fetch the
 // show so we have the episode's files (with subtitle tracks) to play.
-async function tuneEpisode(epRef, offset) {
+async function tuneEpisode(epRef, offset, cont = {}) {
   let show;
   try { show = await (await fetch('/api/shows/' + epRef.show_id)).json(); } catch (_e) { return; }
   let ep = null;
@@ -925,7 +951,7 @@ async function tuneEpisode(epRef, offset) {
   openPlayer({
     title: show.title, subtitle: episodeSub(ep), files, startFileId: f.id, verKey: 'e' + ep.id,
     streamBase: '/api/stream/episode/', subtitleBase: '/api/subtitle/episode/', searchKind: 'episode',
-    startAt: offset, progressUrl: null, upNext: null, onEnded: null, live: true // live feed, at the live point
+    startAt: offset, progressUrl: null, live: true, autoAdvance: true, ...cont
   });
 }
 
@@ -1174,14 +1200,35 @@ function versionLabel(f, i) {
 // Version memory (server-backed): this title's last-played version first
 // (verid:m12 / verid:e34 → file id), then the last quality picked anywhere
 // (pq), then the first file.
+// Which version of a title to play.
+//
+// An explicit choice always wins. Otherwise, a viewer coming in over the
+// internet gets the SMALLEST version rather than the largest — which is the
+// point of keeping a 1080p copy alongside a 4K one. Serving the 4K remux to a
+// remote viewer makes the server re-encode it down to fit the cap, so they wait
+// for a transcode to watch something that looks worse than the 1080p file would
+// have. Nothing used to act on this, which is what most of the transcoding in
+// the telemetry actually was.
 function preferredFile(files, key) {
   if (key) {
     const f = files.find((x) => x.id === +getPref('verid:' + key));
-    if (f) return f;
+    if (f) return f;                                  // explicit choice, always wins
+  }
+  if (isRemoteViewer && files.length > 1) {
+    const ranked = files.slice().sort((a, b) => (a.size || 0) - (b.size || 0));
+    const cap = remoteCap.height || 1080;
+    // Smallest version that is still at or under the ceiling; if every copy is
+    // over it, the smallest is still the least bad.
+    const fit = ranked.find((f) => !f.height || f.height <= cap) || ranked[0];
+    if (fit) { lastAutoVersion = fit.id; return fit; }
   }
   const pq = getPref('pq');
   return (pq && files.find((f) => f.quality === pq)) || files[0] || null;
 }
+// Set by /api/settings; see loadSettings.
+let isRemoteViewer = false;
+let remoteCap = { height: 1080, kbps: 6000 };
+let lastAutoVersion = null;   // so the player can say why it picked this one
 function rememberVersion(key, f) {
   if (!f) return;
   if (key) setPref('verid:' + key, f.id);
@@ -1269,11 +1316,26 @@ async function openDetail(id, autoplay = true) {
   const delBtn = document.getElementById('del-file');
   if (delBtn) delBtn.addEventListener('click', () => deleteFileFromServer('movie', current, closeDetail));
 
+  // The next film in this franchise, if it's in the library. Offered on the end
+  // card so finishing Iron Man leads somewhere instead of stopping on a frozen
+  // frame. Parts arrive in release order; take the first one after this that has
+  // a local id, so a gap in the collection is skipped rather than blocking.
+  function nextInCollection() {
+    const parts = (extra && extra.collection && extra.collection.parts) || [];
+    const here = parts.findIndex((p) => p.localId && +p.localId === +m.id);
+    if (here < 0) return null;
+    const nxt = parts.slice(here + 1).find((p) => p.localId);
+    return nxt ? { label: nxt.title, play: () => openDetail(+nxt.localId, true) } : null;
+  }
+
   function play(at) {
     openPlayer({
       title: m.title, files, startFileId: current.id, verKey: 'm' + m.id,
       streamBase: '/api/stream/', subtitleBase: '/api/subtitle/', searchKind: 'movie',
-      startAt: at, progressUrl: `/api/movies/${m.id}/progress`, upNext: null, onEnded: null
+      startAt: at, progressUrl: `/api/movies/${m.id}/progress`, upNext: null,
+      // No onEnded — a film has nothing to roll into, so the player shows its end
+      // card and comes back here instead of sitting on the last frame.
+      onEnded: null, nextInCollection: nextInCollection()
     });
   }
   // Re-render the play button(s) so "Resume / From beginning" appears only when
@@ -1367,11 +1429,14 @@ function playEpisodeAt(show, flat, i, opts = {}) {
     streamBase: '/api/stream/episode/', subtitleBase: '/api/subtitle/episode/', searchKind: 'episode',
     startAt: opts.startAt != null ? opts.startAt : (ep.resume_position > 5 ? ep.resume_position : 0),
     progressUrl: `/api/episodes/${ep.id}/progress`,
-    upNext: next ? { label: 'Up Next', still: next.ep.still || show.backdrop || show.poster || '', title: episodeSub(next.ep), play: () => playEpisodeAt(show, flat, i + 1),
+    upNext: next ? { label: 'Up Next', still: next.ep.still || show.backdrop || show.poster || '', title: episodeSub(next.ep), play: () => playEpisodeAt(show, flat, i + 1, { autoAdvance: true }),
       // For the idle-bandwidth prefetch: the next episode's chosen file id (same
       // streamBase as the current episode). Null if that episode has no file yet.
       prefetch: (next.ep.files && next.ep.files.length) ? { kind: 'episode', fileId: preferredFile(next.ep.files, 'e' + next.ep.id).id } : null } : null,
-    onEnded: next ? () => playEpisodeAt(show, flat, i + 1) : null
+    // Marks this play as part of a chain, so the soundtrack chooser stays out
+    // of the way and the previous choice carries forward.
+    autoAdvance: !!opts.autoAdvance,
+    onEnded: next ? () => playEpisodeAt(show, flat, i + 1, { autoAdvance: true }) : null
   });
 }
 
@@ -1741,7 +1806,7 @@ function openPlayer(ctx) {
   async function resolveStart(t) {
     if (!(t > 0)) return 0;
     try {
-      const r = await (await fetch(`/api/seekpoint/${ctx.searchKind}/${current.id}?start=${t.toFixed(2)}&${audioQuery()}`)).json();
+      const r = await (await fetch(`/api/seekpoint/${ctx.searchKind}/${current.id}?start=${t.toFixed(2)}&${audioQuery(current.id)}`)).json();
       if (r && typeof r.start === 'number' && r.start >= 0 && r.start <= t) return r.start;
     } catch (_e) {}
     return t;
@@ -1775,7 +1840,7 @@ function openPlayer(ctx) {
       if (gen !== seekGen) return; // a newer seek superseded this one
       base = s;
       resetPipeline();
-      video.src = withToken(play.url + '?start=' + s.toFixed(2) + '&snapped=1&' + audioQuery());
+      video.src = withToken(play.url + '?start=' + s.toFixed(2) + '&snapped=1&' + audioQuery(current.id));
       playWhenReady(() => video.play());
     } else video.currentTime = t;
   }
@@ -1816,6 +1881,8 @@ function openPlayer(ctx) {
     <button class="vp-skipbtn vp-skipcredits hidden" data-pf>Skip Credits ${ICONS.skipnext}</button>
     <div class="vp-menu hidden"></div>
     <div class="vp-upnext hidden"></div>
+    <div class="vp-atrack hidden"></div>
+    <div class="vp-endcard hidden"></div>
     <div class="vp-buffering hidden">
       <div class="vp-buf-brand">MARQUEE</div>
       <div class="vp-buf-bar"><i></i></div>
@@ -1853,7 +1920,7 @@ function openPlayer(ctx) {
     let target = introCh.end;
     if (play.mode === 'transcode') {
       try {
-        const r = await (await fetch(`/api/seekpoint/${ctx.searchKind}/${current.id}?start=${introCh.end.toFixed(2)}&after=1&${audioQuery()}`)).json();
+        const r = await (await fetch(`/api/seekpoint/${ctx.searchKind}/${current.id}?start=${introCh.end.toFixed(2)}&after=1&${audioQuery(current.id)}`)).json();
         if (r && typeof r.start === 'number' && r.start >= introCh.end - 0.2) target = r.start;
       } catch (_e) {}
     }
@@ -2054,7 +2121,7 @@ function openPlayer(ctx) {
     if (!gated() || bufAheadSec() < HEAD_START - 3) return; // only when we have idle headroom to spare
     prefetchStarted = true;
     try {
-      const info = await (await fetch(`/api/play/${pf.kind}/${pf.fileId}?${audioQuery()}`)).json();
+      const info = await (await fetch(`/api/play/${pf.kind}/${pf.fileId}?${audioQuery(pf.fileId)}`)).json();
       if (!info || info.mode !== 'direct') return; // can't meaningfully pre-warm a live transcode pipe
       prefetchAbort = new AbortController();
       const res = await fetch(withToken(ctx.streamBase + pf.fileId), {
@@ -2139,7 +2206,7 @@ function openPlayer(ctx) {
     // Ask the server how to play this file (direct vs ffmpeg transcode) and
     // for its real duration. Falls back to direct if the endpoint fails.
     let info = null;
-    try { info = await (await fetch(`/api/play/${ctx.searchKind}/${f.id}?${audioQuery()}`)).json(); } catch (_e) {}
+    try { info = await (await fetch(`/api/play/${ctx.searchKind}/${f.id}?${audioQuery(f.id)}`)).json(); } catch (_e) {}
     play = info && info.mode === 'transcode'
       ? { mode: 'transcode', duration: info.duration || null, url: info.url, reason: null }
       : { mode: 'direct', duration: (info && info.duration) || null, url: ctx.streamBase + f.id, reason: (info && info.reason) || null, size: (info && info.size) || null };
@@ -2158,7 +2225,7 @@ function openPlayer(ctx) {
     if (play.mode === 'transcode') {
       base = await resolveStart(at || 0); // resume lands on the true keyframe start
       if (video.src) resetPipeline();     // version switch mid-playback = src swap
-      video.src = withToken(play.url + '?start=' + base.toFixed(2) + '&snapped=1&' + audioQuery());
+      video.src = withToken(play.url + '?start=' + base.toFixed(2) + '&snapped=1&' + audioQuery(f.id));
       // canplay, NOT loadedmetadata — see playWhenReady (starting on bare
       // metadata is what made from-beginning/resume playback lag).
       playWhenReady(() => attemptPlay());
@@ -2184,10 +2251,17 @@ function openPlayer(ctx) {
   // starts the movie. Plays on a separate overlay <video> so it never touches the
   // main player's state/handlers.
   function startMain() { loadFile(current, ctx.startAt || 0); }
-  // `prerollInfo` is prefetched (see refreshPreroll), so we can start it
-  // synchronously inside the click's user-activation → autoplay with sound.
-  if (ctx.searchKind === 'movie' && !(ctx.startAt > 0) && prerollInfo) playPrerollThen(startMain);
-  else startMain();
+  function afterTrackChoice() {
+    // `prerollInfo` is prefetched (see refreshPreroll), so we can start it
+    // synchronously inside the click's user-activation → autoplay with sound.
+    if (ctx.searchKind === 'movie' && !(ctx.startAt > 0) && prerollInfo) playPrerollThen(startMain);
+    else startMain();
+  }
+  // The soundtrack is chosen BEFORE the pre-roll — the pre-roll is theatre and
+  // should not be followed by a dialog. `ctx.autoAdvance` is set when this play
+  // came from an Up Next chain and suppresses the chooser entirely: a binge must
+  // never turn into a quiz.
+  chooseAudioTrackThen(vp, current.id, ctx.searchKind, !!ctx.autoAdvance, afterTrackChoice);
 
   function playPrerollThen(done) {
     const pv = vp.querySelector('.vp-preroll-vid');
@@ -2517,21 +2591,52 @@ function openPlayer(ctx) {
     const btns = [...upnext.querySelectorAll('button')];
     btns.forEach((b, i) => b.classList.toggle('un-focus', vp.classList.contains('vp-keys') && i === unFocus));
   }
-  function hideUpNext() { upnext.classList.add('hidden'); paintUpNext(); }
+  // The countdown is what makes a binge a binge. Without it this card waited
+  // forever for a click, which is why episodes stopped advancing on their own.
+  let unTimer = null;
+  let unCancelled = false;
+  function hideUpNext() {
+    upnext.classList.add('hidden');
+    clearInterval(unTimer); unTimer = null;
+    unCancelled = true;                 // dismissed on purpose: don't re-offer
+    paintUpNext();
+  }
   function maybeUpNext() {
-    if (!ctx.upNext || upnextShown || !dur()) return;
+    if (!ctx.upNext || upnextShown || unCancelled || !dur()) return;
     if (dur() - cur() <= 22) {
       upnextShown = true;
-      upnext.innerHTML = `
-        <div class="un-still" style="background-image:url('${ctx.upNext.still || ''}')"></div>
+      let left = Math.max(3, Math.ceil(dur() - cur()));
+      const render = () =>
+        `<div class="un-still" style="background-image:url('${ctx.upNext.still || ''}')"></div>
         <div class="un-body"><div class="un-label">${escapeHtml(ctx.upNext.label)}</div>
           <div class="un-title">${escapeHtml(ctx.upNext.title)}</div>
-          <div class="un-actions"><button class="btn btn-play sm" id="un-play">▶ Play Now</button><button class="btn sm" id="un-dismiss">Dismiss</button></div></div>`;
+          <div class="un-actions"><button class="btn btn-play sm" id="un-play">▶ Play Now<span class="un-count"> · ${left}s</span></button><button class="btn sm" id="un-dismiss">Dismiss</button></div></div>`;
+      upnext.innerHTML = render();
       upnext.classList.remove('hidden');
-      upnext.querySelector('#un-play').addEventListener('click', () => ctx.upNext.play());
-      upnext.querySelector('#un-dismiss').addEventListener('click', hideUpNext);
+      const wire = () => {
+        upnext.querySelector('#un-play').addEventListener('click', goNext);
+        upnext.querySelector('#un-dismiss').addEventListener('click', hideUpNext);
+      };
+      wire();
       unFocus = 0; vp.classList.add('vp-keys'); showUI(); paintUpNext(); // pre-seat remote focus on Play Now
+
+      // Tick down and roll on. Dismiss, Back, or the video ending on its own all
+      // stop it — whichever happens first wins, and it can only fire once.
+      unTimer = setInterval(() => {
+        left -= 1;
+        const c = upnext.querySelector('.un-count');
+        if (c) c.textContent = ' · ' + Math.max(0, left) + 's';
+        if (left <= 0) goNext();
+      }, 1000);
     }
+  }
+  let advanced = false;
+  function goNext() {
+    if (advanced) return;
+    advanced = true;
+    clearInterval(unTimer); unTimer = null;
+    upnext.classList.add('hidden');
+    ctx.upNext.play();
   }
 
   // progress saving
@@ -2545,10 +2650,49 @@ function openPlayer(ctx) {
   video.addEventListener('pause', save);
   video.addEventListener('ended', () => {
     save();
-    // A transcode stream ending mid-film is a hiccup, not the credits.
-    if (play.mode === 'transcode' && dur() && cur() < dur() - 8) return;
+    // A transcode stream ending mid-film is a hiccup, not the credits — but the
+    // old 8-second window was far too tight. Transcoded MKVs routinely report a
+    // duration that disagrees with the real stream by more than that, so genuine
+    // endings were being swallowed and the Up Next chain died silently. That is
+    // the "sometimes it just doesn't go to the next one" fault. Treat it as a
+    // real ending if we are near the end by ANY reasonable measure.
+    if (play.mode === 'transcode' && dur()) {
+      const nearEnd = (dur() - cur()) <= 60 || cur() / dur() >= 0.97;
+      if (!nearEnd) return;
+    }
     if (ctx.onEnded) ctx.onEnded();
+    else showEndCard();
   });
+
+  // Nothing follows this title. Rather than sit on a frozen last frame, say so
+  // and offer the way back — "when a movie ends it should go back to the screen
+  // where you selected it".
+  function showEndCard() {
+    const box = vp.querySelector('.vp-endcard');
+    if (!box) return;
+    const next = ctx.nextInCollection || null;
+    box.innerHTML =
+      '<div class="ec-card">' +
+        '<div class="ec-title">' + escapeHtml(ctx.title || '') + '</div>' +
+        '<div class="ec-sub">Finished</div>' +
+        '<div class="ec-actions">' +
+          (next ? '<button class="btn btn-play sm" id="ec-next">▶ ' + escapeHtml(next.label) + '</button>' : '') +
+          '<button class="btn sm" id="ec-back">Back</button>' +
+          '<button class="btn sm" id="ec-replay">Watch again</button>' +
+        '</div>' +
+      '</div>';
+    box.classList.remove('hidden');
+    vp.classList.add('vp-keys'); showUI();
+    const dismiss = () => { box.classList.add('hidden'); box.innerHTML = ''; };
+    const goBack = () => { dismiss(); close(); };
+    const nx = box.querySelector('#ec-next');
+    if (nx) nx.addEventListener('click', () => { dismiss(); next.play(); });
+    box.querySelector('#ec-back').addEventListener('click', goBack);
+    box.querySelector('#ec-replay').addEventListener('click', () => { dismiss(); video.currentTime = 0; video.play(); });
+    // Return on its own eventually — for when you fell asleep and nobody is
+    // going to press anything.
+    setTimeout(() => { if (!box.classList.contains('hidden')) goBack(); }, 90000);
+  }
 
   // auto-hide chrome
   let hideTimer;
@@ -2912,12 +3056,17 @@ async function loadSources() {
 // normal|strong), night (0|1), norm (0|1).
 const AUDIO_DEFAULTS = { audioMode: 'stereo', dboost: 'normal', night: '0', norm: '0' };
 const audioGet = (k) => localStorage.getItem(k) || AUDIO_DEFAULTS[k];
-function audioQuery() {
+function audioQuery(fileId) {
   const p = new URLSearchParams();
   p.set('audio', audioGet('audioMode') === 'surround' ? 'surround' : 'stereo');
   if (audioGet('dboost') !== 'normal') p.set('dboost', audioGet('dboost'));
   if (audioGet('night') === '1') p.set('night', '1');
   if (audioGet('norm') === '1') p.set('norm', '1');
+  // Which audio stream to serve. Only sent when a track was chosen for THIS
+  // file, so a stale index from a previous title can never leak into a stream.
+  if (sessionTrack && fileId != null && sessionTrack.fileId === fileId) {
+    p.set('atrack', String(sessionTrack.index));
+  }
   return p.toString();
 }
 // Segmented controls: [localStorage key, data-* attribute] per group. Clicking a
@@ -3408,6 +3557,11 @@ async function loadSettings() {
     }
     if (s.openSubtitles.configured) { osStatus.textContent = '✓ Subtitle search is on' + (s.openSubtitles.username ? ' (' + s.openSubtitles.username + ')' : '') + '.'; osUser.value = s.openSubtitles.username || ''; }
     else osStatus.textContent = 'Add your free OpenSubtitles account to enable subtitle search.';
+    // Off-network viewers get the smaller version of a title by default; see
+    // preferredFile. The server decides "remote", not the client.
+    if (typeof s.remote === 'boolean') isRemoteViewer = s.remote;
+    if (s.remoteCap) remoteCap = s.remoteCap;
+    paintDeviceType();
   } catch (_e) { osStatus.textContent = ''; }
   if (currentUser && currentUser.role === 'admin') loadUsers();
 }
@@ -3561,3 +3715,191 @@ document.addEventListener('click', (e) => {
   localStorage.setItem('finish', v);
   applyFinish(v);
 });
+
+// ---- What device is this, and what can it play? ----------------------------
+//
+// Deliberately stored per DEVICE, in localStorage, not in the per-account prefs
+// table. A device's audio support is a fact about the hardware, not a taste: an
+// Apple TV cannot decode DTS whoever is signed in. Storing it per account would
+// mean setting it on the projector and having a phone inherit "no DTS".
+//
+// (The rule elsewhere in this app — never use localStorage for playback prefs —
+// is about things that should follow the VIEWER between devices, like resume
+// position. This is the opposite kind of setting.)
+//
+// The capability table is an intersection of what each device can decode. Two
+// entries are counter-intuitive and cost real playback when guessed at:
+//   * Apple TV cannot decode DTS or TrueHD, and its HDMI audio passthrough did
+//     NOT ship in tvOS 26. It decodes to multichannel LPCM instead.
+//   * Roku cannot decode TrueHD at all, and only passes DTS through.
+//   * Opus plays on Android TV but NOT on an Apple TV or a Roku — the mistake
+//     that made an earlier pass miss 271 files.
+const DEVICE_AUDIO_SUPPORT = {
+  appletv:   ['aac', 'ac3', 'eac3', 'mp3', 'alac'],
+  androidtv: ['aac', 'ac3', 'eac3', 'mp3', 'opus', 'vorbis', 'flac'],
+  roku:      ['aac', 'ac3', 'eac3', 'mp3'],
+  vava:      ['aac', 'ac3', 'eac3'],
+  browser:   ['aac', 'mp3', 'opus', 'vorbis', 'flac']
+};
+const DEVICE_LABEL = {
+  appletv: 'Apple TV', androidtv: 'Android / Google TV', roku: 'Roku',
+  vava: 'VAVA projector', browser: 'Browser'
+};
+
+// Best guess when set to Detect. The TV apps announce themselves in the user
+// agent; everything else is a browser.
+function detectDeviceType() {
+  const ua = String(navigator.userAgent || '').toLowerCase();
+  if (window.MarqueeTV || /android tv|googletv|aft|bravia/.test(ua)) return 'androidtv';
+  if (/apple ?tv|tvos/.test(ua)) return 'appletv';
+  if (/roku/.test(ua)) return 'roku';
+  if (/vava/.test(ua)) return 'vava';
+  return 'browser';
+}
+
+function deviceType() {
+  const t = localStorage.getItem('devtype') || 'auto';
+  return t === 'auto' ? detectDeviceType() : t;
+}
+function deviceCodecs() { return DEVICE_AUDIO_SUPPORT[deviceType()] || DEVICE_AUDIO_SUPPORT.browser; }
+// Speakers, not hardware — a projector with a receiver wants surround even
+// though its own drivers are stereo. Reuses the existing Audio output setting.
+function deviceWantsSurround() { return audioGet('audioMode') === 'surround'; }
+
+function paintDeviceType() {
+  const stored = localStorage.getItem('devtype') || 'auto';
+  document.querySelectorAll('[data-devtype]').forEach((b) =>
+    b.classList.toggle('primary', b.dataset.devtype === stored));
+  const note = document.getElementById('devtype-note');
+  if (note) {
+    const t = deviceType();
+    note.textContent = `Treating this as ${DEVICE_LABEL[t] || t}` +
+      (stored === 'auto' ? ' (detected)' : '') +
+      `. It can play: ${deviceCodecs().map((c) => c.toUpperCase()).join(', ')}.`;
+  }
+}
+
+// ---- Choosing a track ------------------------------------------------------
+// Session-only. Nothing is remembered between visits, by design: a stored track
+// index goes stale the moment a file changes, and a remembered wrong choice is
+// worse than asking again. `bingeTrack` carries a choice down an Up Next chain
+// so a binge is never interrupted by the same question.
+let sessionTrack = null;   // { fileId, index } for the file being played
+let bingeTrack = null;     // { codec, channels, language } carried along a chain
+
+function trackLabel(t) {
+  const bits = [t.codec.toUpperCase(), t.layout];
+  if (t.language) bits.push(t.language.toUpperCase());
+  if (t.title) bits.push(t.title);
+  return bits.join(' · ');
+}
+
+function playableTracks(tracks) {
+  const codecs = deviceCodecs();
+  return tracks.filter((t) => codecs.includes(t.codec));
+}
+
+// Best track for this device: prefer the channel count the speakers want, then
+// more channels, then a higher bitrate. Commentary never wins automatically.
+function autoPickTrack(tracks) {
+  const usable = playableTracks(tracks).filter((t) => !t.commentary);
+  if (!usable.length) return null;
+  const wantSurround = deviceWantsSurround();
+  const score = (t) => {
+    let s = 0;
+    if (wantSurround) s += Math.min(t.channels, 8) * 10;
+    else s += t.channels === 2 ? 50 : Math.max(0, 20 - t.channels);
+    if (bingeTrack) {
+      if (t.codec === bingeTrack.codec) s += 30;         // keep a binge consistent
+      if (t.language === bingeTrack.language) s += 15;
+    }
+    s += Math.min((t.bitrateKbps || 0) / 100, 10);
+    if (t.default) s += 5;
+    return s;
+  };
+  return usable.slice().sort((a, b) => score(b) - score(a))[0];
+}
+
+// Runs BEFORE the pre-roll. Shows a chooser only when there is a real decision
+// to make; otherwise picks and gets out of the way. `auto` is true when this is
+// an Up Next advance — those must never be interrupted.
+async function chooseAudioTrackThen(vp, fileId, kind, auto, done) {
+  sessionTrack = null;
+  let tracks = [];
+  try {
+    const r = await fetch(`/api/audio/list/${kind === 'episode' ? 'episode' : 'movie'}/${fileId}`);
+    if (r.ok) tracks = (await r.json()).tracks || [];
+  } catch (_e) { /* fall through — playback must never depend on this */ }
+
+  if (tracks.length <= 1) { done(); return; }
+  const usable = playableTracks(tracks);
+
+  // Nothing this device can play: let the server transcode as it always has.
+  if (!usable.length) { done(); return; }
+
+  const pick = autoPickTrack(tracks);
+  if (pick) sessionTrack = { fileId, index: pick.index };
+
+  // One real option, or an auto-advance: don't ask.
+  if (usable.length === 1 || auto) { done(); return; }
+
+  const box = vp.querySelector('.vp-atrack');
+  if (!box) { done(); return; }
+
+  box.innerHTML =
+    '<div class="at-card">' +
+      '<div class="at-title">Choose a soundtrack</div>' +
+      '<div class="at-sub">' + usable.length + ' available on ' + (DEVICE_LABEL[deviceType()] || 'this device') + '</div>' +
+      '<div class="at-list">' +
+        usable.map((t, i) =>
+          '<button class="at-opt' + (pick && t.index === pick.index ? ' at-best' : '') + '" data-i="' + t.index + '">' +
+            '<span class="at-opt-label">' + escapeHtml(trackLabel(t)) + '</span>' +
+            (pick && t.index === pick.index ? '<span class="at-tag">best for this device</span>' : '') +
+            (t.commentary ? '<span class="at-tag">commentary</span>' : '') +
+          '</button>').join('') +
+      '</div>' +
+      '<div class="at-foot muted">Just for this session — nothing is remembered.</div>' +
+    '</div>';
+  box.classList.remove('hidden');
+
+  let settled = false;
+  const finish = (idx) => {
+    if (settled) return;
+    settled = true;
+    if (idx != null) {
+      sessionTrack = { fileId, index: idx };
+      const t = tracks.find((x) => x.index === idx);
+      if (t) bingeTrack = { codec: t.codec, channels: t.channels, language: t.language };
+    }
+    box.classList.add('hidden');
+    box.innerHTML = '';
+    document.removeEventListener('keydown', onKey, true);
+    done();
+  };
+
+  // Remote-friendly: arrows move, Enter picks, Back/Escape takes the default.
+  let focus = Math.max(0, usable.findIndex((t) => pick && t.index === pick.index));
+  const opts = () => [...box.querySelectorAll('.at-opt')];
+  const paint = () => opts().forEach((b, i) => b.classList.toggle('at-focus', i === focus));
+  paint();
+  function onKey(e) {
+    if (settled) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowRight') { focus = Math.min(focus + 1, opts().length - 1); paint(); }
+    else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') { focus = Math.max(focus - 1, 0); paint(); }
+    else if (e.key === 'Enter') { finish(+opts()[focus].dataset.i); }
+    else if (e.key === 'Escape' || e.key === 'Backspace' || e.key === 'GoBack') { finish(null); }
+    else return;
+    e.preventDefault(); e.stopPropagation();
+  }
+  document.addEventListener('keydown', onKey, true);
+  opts().forEach((b) => b.addEventListener('click', () => finish(+b.dataset.i)));
+}
+
+// Device type buttons in Settings ▸ Audio. Stored per device, in localStorage —
+// see the note on DEVICE_AUDIO_SUPPORT for why this one is not a per-account
+// preference like the rest.
+document.querySelectorAll('[data-devtype]').forEach((b) => b.addEventListener('click', () => {
+  localStorage.setItem('devtype', b.dataset.devtype);
+  paintDeviceType();
+}));
+paintDeviceType();
