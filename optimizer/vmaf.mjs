@@ -54,6 +54,14 @@ export const VMAF = {
 
 export function setVmaf(opts = {}) { Object.assign(VMAF, opts); }
 
+// How far below the pass mark a SAMPLE has to fall before an encode is called
+// off before it starts. Samples are short clips encoded with no preceding
+// frames to reference, so they score a little lower than the same seconds will
+// inside a full encode. This margin is the allowance for that difference: the
+// sample must fail clearly, not narrowly, or the check would refuse films that
+// would have passed.
+export const SAMPLE_MARGIN = 3;
+
 // ---- Capability --------------------------------------------------------
 
 let _has = null;
@@ -180,25 +188,41 @@ export async function measureVmaf(ref, dis, {
 
 // ---- Before the encode -------------------------------------------------
 
-// Encode a few sample windows for real and see what they cost.
+// Encode a few sample windows for real, see what they cost AND how they look.
 //
 // This is the per-title idea, shrunk to fit one box: instead of assuming every
-// 1080p file should land at the tier bitrate, ask THIS file. The answer decides
-// two things — whether the job is worth starting at all (an already-efficient
-// grain-heavy transfer will barely shrink, and finding that out in a minute
-// beats finding it out in an hour), and how much headroom the encode has.
+// 1080p file should land at the tier bitrate, ask THIS file.
 //
-// Returns { ok, kbps, projectedBytes, saveBytes, ratio } where kbps is the
-// measured video bitrate the encoder produces on this content at this CRF.
+// It used to ask only about size, and the reasoning was that "an already-
+// efficient grain-heavy transfer will barely shrink, so finding that out in a
+// minute beats finding it out in an hour". That reasoning was exactly backwards
+// and the library proved it: grain-heavy transfers shrink enormously — Temple
+// of Doom goes from 42 Mbps to 4.5 — because what the encoder discards IS the
+// grain. The size test waved every one of them through, and the quality gate
+// then threw away the result an hour later. Twenty-one films in one night, all
+// of them the film-stock catalogue titles: Raiders, the Godfather, In the Mood
+// for Love. The ones most worth not wrecking.
+//
+// So the samples are now GRADED as well as measured. A file that cannot hold
+// its quality is refused here, in minutes, on evidence — instead of being
+// re-encoded for an hour and refused at the end on the same evidence.
+//
+// Returns { ok, kbps, projectedBytes, saveBytes, ratio, vmafMean, vmafMin }.
+// `kbps` is the bitrate this encoder produces on this content at this CRF;
+// vmafMean/vmafMin are how the samples scored against the source, or null if
+// grading was unavailable.
 export async function probeComplexity(src, {
   duration = 0, size = 0, currentVideoKbps = 0, crf = 22, encoder = 'libx265',
-  preset = 'veryfast', tenBit = false, readRate = 0, tmpDir = null, samples = 3, window = 6
+  preset = 'veryfast', tenBit = false, readRate = 0, tmpDir = null, samples = 3, window = 6,
+  grade = true
 } = {}) {
   const points = samplePoints(duration, samples, window);
   if (!points.length) return { error: 'file too short to sample' };
 
   const dir = tmpDir || path.dirname(src);
   let bytes = 0, secs = 0;
+  const scores = [];
+  const canGrade = grade && VMAF.enabled && vmafAvailable();
 
   for (const t of points) {
     const out = path.join(dir, `.probe-${process.pid}-${t}.mkv`);
@@ -224,10 +248,36 @@ export async function probeComplexity(src, {
     const { err } = await ffmpeg(a, { timeout: 900000 });
     let st = null;
     try { st = fs.statSync(out); } catch {}
-    fs.rmSync(out, { force: true });
-    if (err || !st || st.size < 1024) return { error: `sample encode failed at ${t}s${err ? ': ' + err : ''}` };
+    if (err || !st || st.size < 1024) {
+      fs.rmSync(out, { force: true });
+      return { error: `sample encode failed at ${t}s${err ? ': ' + err : ''}` };
+    }
     bytes += st.size;
     secs += window;
+
+    // Grade this window before deleting it. The sample clip starts at zero
+    // while the source window starts at t, so the two inputs are seeked
+    // differently — pairArgs assumes both are the same timeline and cannot be
+    // reused here.
+    if (canGrade) {
+      const fmt = tenBit ? 'yuv420p10le' : 'yuv420p';
+      const g = ['-hide_banner', '-nostdin'];
+      if (readRate > 0) g.push('-readrate', String(readRate));
+      g.push('-i', out);                                     // distorted, from 0
+      if (readRate > 0) g.push('-readrate', String(readRate));
+      g.push('-ss', String(t), '-t', String(window), '-i', src);   // reference, at t
+      // [distorted][reference] in that order — reversing them does not error,
+      // it silently reports a different and wrong number.
+      g.push('-lavfi',
+        `[0:v]setpts=PTS-STARTPTS,format=${fmt}[d];[1:v]setpts=PTS-STARTPTS,format=${fmt}[r];` +
+        `[d][r]libvmaf=n_threads=${VMAF.threads}`,
+        '-f', 'null', '-');
+      const { stderr } = await ffmpeg(g, { timeout: 600000 });
+      const m = /VMAF score:\s*([\d.]+)/.exec(stderr || '');
+      if (m && Number.isFinite(Number(m[1]))) scores.push(Number(m[1]));
+    }
+
+    fs.rmSync(out, { force: true });
   }
 
   if (!secs) return { error: 'no samples encoded' };
@@ -241,6 +291,32 @@ export async function probeComplexity(src, {
   return {
     ok: true, kbps, projectedBytes,
     saveBytes: Math.max(0, currentVideoBytes - projectedBytes),
-    ratio: currentVideoKbps > 0 ? kbps / currentVideoKbps : null
+    ratio: currentVideoKbps > 0 ? kbps / currentVideoKbps : null,
+    vmafMean: scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : null,
+    vmafMin: scores.length ? Math.min(...scores) : null,
+    vmafSamples: scores.length
   };
+}
+
+// Would a full encode of this file survive the gate?
+//
+// Judged on the graded samples, with a margin. A 6-second clip encoded on its
+// own is not identical to the same seconds inside a two-hour encode — it has no
+// preceding frames to reference — so it scores a little LOWER than the real
+// thing will. Refusing right at the pass mark would therefore throw away films
+// that would in fact have passed, so the sample has to fail clearly, not
+// narrowly, before an hour of work is called off.
+//
+// Returns null when it should go ahead, or a sentence saying why not.
+export function sampleVerdict(probe, { margin = SAMPLE_MARGIN } = {}) {
+  if (!probe || probe.vmafMean == null) return null;   // ungraded: not evidence
+  if (probe.vmafMean < VMAF.min - margin) {
+    return `sampled at VMAF ${probe.vmafMean.toFixed(1)}, well below the ${VMAF.min} pass mark — ` +
+           `this looks like film grain or fine detail that would be destroyed, so it is left alone`;
+  }
+  if (probe.vmafMin != null && probe.vmafMin < VMAF.floor - margin) {
+    return `worst sampled scene scored VMAF ${probe.vmafMin.toFixed(1)}, well below the ${VMAF.floor} floor ` +
+           `(mean was ${probe.vmafMean.toFixed(1)}) — left alone`;
+  }
+  return null;
 }

@@ -23,7 +23,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFile, execFileSync } from 'node:child_process';
 import { ffmpegBin, ffprobeBin, nvencAvailable } from './ffmpeg.mjs';
-import { VMAF, vmafAvailable, measureVmaf, probeComplexity } from './vmaf.mjs';
+import { VMAF, vmafAvailable, measureVmaf, probeComplexity, sampleVerdict } from './vmaf.mjs';
 
 const yield_ = () => new Promise((r) => setImmediate(r));
 
@@ -379,6 +379,11 @@ export function ensureSchema(db) {
   for (const [table, col, decl] of [
     ['optimize_jobs', 'attempts', 'INTEGER DEFAULT 0'],
     ['optimize_jobs', 'next_try_at', 'INTEGER'],
+    // The grade the kept encode earned. Recorded because the original is gone
+    // by the time anyone thinks to ask, and a pass at 95.1 is not the same
+    // event as a pass at 99.2.
+    ['optimize_jobs', 'vmaf_mean', 'REAL'],
+    ['optimize_jobs', 'vmaf_min', 'REAL'],
     ['media_info', 'probe_attempts', 'INTEGER DEFAULT 0']
   ]) {
     try { db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${decl};`); } catch { /* already there */ }
@@ -1183,6 +1188,26 @@ async function runJob(db, job, { log, allow4kVideo, allowHdrVideo }) {
       note(`Could not sample ${path.basename(src)} (${probe.error}) — continuing at CRF ${crf}`);
     } else {
       const gb = (n) => (n / 2 ** 30).toFixed(2) + ' GB';
+
+      // Quality first, before the size question is even asked.
+      //
+      // A file that cannot survive the encode is not a cheaper file, it is a
+      // ruined one, and the saving it promises is the measure of how much
+      // picture is about to be thrown away — the more grain a transfer has, the
+      // better the "saving" looks and the worse the result. Refusing on the
+      // samples costs minutes. Refusing at the gate costs an hour and reaches
+      // the same conclusion.
+      const verdict = sampleVerdict(probe);
+      if (verdict) {
+        note(`Left ${path.basename(src)} alone — ${verdict}`);
+        log(`Optimizer left ${path.basename(src)} alone — ${verdict}`);
+        return setState('skipped', { error: verdict, ended_at: Date.now(),
+          vmaf_mean: probe.vmafMean, vmaf_min: probe.vmafMin });
+      }
+      if (probe.vmafMean != null) {
+        note(`${path.basename(src)} samples at VMAF ${probe.vmafMean.toFixed(1)} — going ahead`);
+      }
+
       if (probe.saveBytes < MIN_PROBE_SAVE) {
         const why = `measured: this content only compresses to ~${probe.kbps} kbps, saving ${gb(probe.saveBytes)} — not worth a full re-encode`;
         note(`Skipped ${path.basename(src)} — ${why}`);
@@ -1282,10 +1307,21 @@ async function runJob(db, job, { log, allow4kVideo, allowHdrVideo }) {
   }
 
   const saved = Number(info.size) - newSize;
-  note(`Done ${path.basename(finalPath)} — saved ${(saved / 2 ** 30).toFixed(2)} GB`);
-  log(`Optimizer: ${path.basename(finalPath)} saved ${(saved / 2 ** 30).toFixed(2)} GB`);
+
+  // Say how good the kept encode actually is, not just how much it saved.
+  //
+  // Only rejections were ever recorded, so the log could prove why a film was
+  // refused but not how close the ten that shipped had come — and by then the
+  // original is deleted, which is precisely when the number stops being
+  // recoverable. A pass at 95.1 and a pass at 99.2 are different events and the
+  // owner is entitled to tell them apart afterwards.
+  const q = plan.vmaf ? ` at VMAF ${plan.vmaf.mean.toFixed(1)} (worst scene ${plan.vmaf.min.toFixed(1)})` : '';
+  note(`Done ${path.basename(finalPath)} — saved ${(saved / 2 ** 30).toFixed(2)} GB${q}`);
+  log(`Optimizer: ${path.basename(finalPath)} saved ${(saved / 2 ** 30).toFixed(2)} GB${q}`);
   setState('done', {
     new_size: newSize, path: finalPath, pct: 100, ended_at: Date.now(),
+    vmaf_mean: plan.vmaf ? plan.vmaf.mean : null,
+    vmaf_min: plan.vmaf ? plan.vmaf.min : null,
     // Say which route actually worked, so "dropped the lossless track" is never
     // a silent outcome the owner discovers later.
     reason: audioMode === 'drop'
