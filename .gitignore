@@ -7,6 +7,9 @@ config.json
 # TMDB key, the OpenSubtitles password, the Radarr/Sonarr keys and the invite
 # code, so a stray config.json.bak must never be committable.
 config.json.*
+# Build output. MarqueeOptimizer.exe is 88 MB of bundled Node — a build
+# artifact, not source. Rebuild it with: node optimizer/build-exe.mjs
+dist/
 sample-media/
 sample-tv/
 *.zip

@@ -80,6 +80,40 @@ const FREE_SPACE_FACTOR = 1.15;
 
 const TMP_SUFFIX = '.marquee-opt.tmp';
 
+// A temp file from an interrupted run can still be held open by something long
+// after the process that made it has gone — Windows releases a handle when it
+// feels like it, and an orphan from a killed encode can sit locked for hours.
+// Reusing one fixed name meant that one stuck file blocked its job for ever,
+// and because the failure was thrown rather than handled it stalled the whole
+// loop for fifteen minutes at a time.
+//
+// So every attempt gets its own name. A leftover is then merely litter — swept
+// below — instead of an obstruction.
+function tempNameFor(src, ext) {
+  const stem = src.replace(/.[^.]+$/, '');
+  return `${stem}${TMP_SUFFIX}.${process.pid}.${Date.now().toString(36)}${ext}`;
+}
+
+// Clear temp files left by runs that are no longer alive. Best-effort by
+// design: one that is still locked is skipped and tried again next time, which
+// is exactly right — it costs nothing and it cannot block the work.
+export function sweepTempFiles(dir, { log = () => {} } = {}) {
+  let names = [];
+  try { names = fs.readdirSync(dir); } catch { return 0; }
+  let freed = 0;
+  for (const n of names) {
+    if (!n.includes(TMP_SUFFIX)) continue;
+    const p = path.join(dir, n);
+    try {
+      const size = fs.statSync(p).size;
+      fs.rmSync(p, { force: true });
+      freed += size;
+      log(`Cleared leftover temp file ${n} (${(size / 2 ** 30).toFixed(2)} GiB)`);
+    } catch { /* still held: leave it, we will try again next time */ }
+  }
+  return freed;
+}
+
 // ---- Giving up, and not giving up too early ----------------------------
 //
 // A job that fails used to sit in 'failed' for ever and a file that failed to
@@ -1079,8 +1113,10 @@ async function runJob(db, job, { log, allow4kVideo, allowHdrVideo }) {
   // Same directory as the source so the final move is a rename on one volume,
   // never a multi-gigabyte cross-drive copy.
   const ext = plan.profile === 'audio' ? path.extname(src) : '.mkv';
-  const dst = src.replace(/\.[^.]+$/, '') + TMP_SUFFIX + ext;
-  fs.rmSync(dst, { force: true });
+  // Sweep anything an earlier run left in this folder, then take a name of our
+  // own. A locked orphan is skipped rather than fatal.
+  sweepTempFiles(path.dirname(src), { log: note });
+  const dst = tempNameFor(src, ext);
 
   worker.current = { jobId: job.id, path: src, profile: plan.profile, pct: 0, startedAt: Date.now() };
   setState('running', { started_at: Date.now(), profile: plan.profile, reason: plan.reason });
@@ -1340,7 +1376,7 @@ export async function addCompatibleAudio(db, kind, fileId, { log = () => {}, dry
   if (st.size !== Number(info.size)) return { ok: false, error: 'file changed since it was probed — rescan first' };
   if (freeSpaceOn(src) < st.size * 1.2) return { ok: false, error: `not enough free space on ${src.slice(0, 2)}` };
 
-  const dst = src.replace(/\.[^.]+$/, '') + TMP_SUFFIX + path.extname(src);
+  const dst = tempNameFor(src, path.extname(src));
   fs.rmSync(dst, { force: true });
 
   log(`${path.basename(src)} — ${plan.reason}`);
