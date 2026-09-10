@@ -142,6 +142,10 @@ export async function startEngine({ root, port = 8097 } = {}) {
 
   const profiles = Array.isArray(config.optimizeAutoProfiles) ? config.optimizeAutoProfiles : ['audio'];
   const workWindow = { ...DEFAULT_WINDOW, ...(config.optimizeWindow || {}) };
+  // Healthiest drive first. See setDriveOrder in engine.mjs for why this is a
+  // stated judgement rather than a measurement.
+  engine.setDriveOrder(config.optimizeDriveOrder || []);
+  if (config.optimizeDriveOrder) log(`Working drives in this order: ${config.optimizeDriveOrder.join(' -> ')}`);
 
   // Is anyone watching?
   //

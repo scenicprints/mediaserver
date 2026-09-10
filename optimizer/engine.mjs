@@ -80,6 +80,34 @@ const FREE_SPACE_FACTOR = 1.15;
 
 const TMP_SUFFIX = '.marquee-opt.tmp';
 
+// ---- Which drive to work on first ------------------------------------------
+//
+// Optimizing a file is the heaviest thing that happens to a disk here: a full
+// read and a full write of something that can be sixty gigabytes. Doing that to
+// a drive with 552 already-reallocated sectors, first, is asking for the
+// failure you are trying to get ahead of.
+//
+// So the plan is ordered by drive health, best first. The healthy drives get
+// their savings banked while they are healthy, and the worn one is touched last
+// — by which time it may have been replaced and the question is moot.
+//
+// The order is stated in config rather than measured, because reading SMART
+// needs Administrator and this runs unprivileged. It is a judgement about
+// hardware, made once, by someone looking at a report.
+let driveOrder = [];
+export function setDriveOrder(order) {
+  driveOrder = (Array.isArray(order) ? order : [])
+    .map((d) => String(d).slice(0, 2).toUpperCase())
+    .filter((d) => /^[A-Z]:$/.test(d));
+}
+export function driveRank(filePath) {
+  const d = String(filePath || '').slice(0, 2).toUpperCase();
+  const i = driveOrder.indexOf(d);
+  // Anything not listed sorts between the named drives and nothing: unknown is
+  // not the same as unhealthy, but it should not jump the queue either.
+  return i === -1 ? driveOrder.length : i;
+}
+
 // A temp file from an interrupted run can still be held open by something long
 // after the process that made it has gone — Windows releases a handle when it
 // feels like it, and an orphan from a killed encode can sit locked for hours.
@@ -729,7 +757,10 @@ export function analyze(db, { allow4kVideo = false, allowHdrVideo = false } = {}
       profile: plan.profile, reason: plan.reason, saveBytes: plan.saveBytes
     });
   }
-  items.sort((a, b) => b.saveBytes - a.saveBytes);
+  // Healthiest drive first, then biggest saving within each drive. Ordering by
+  // saving alone would send it straight at the worst disk, since the oldest
+  // drive holds the oldest and least efficient files.
+  items.sort((a, b) => (driveRank(a.path) - driveRank(b.path)) || (b.saveBytes - a.saveBytes));
   return { items, totals };
 }
 
