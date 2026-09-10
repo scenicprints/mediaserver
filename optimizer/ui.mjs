@@ -20,10 +20,20 @@ import path from 'node:path';
 import * as engine from './engine.mjs';
 import { findDuplicates, confirmDropSafe } from './duplicates.mjs';
 import { badFiles } from './badfiles.mjs';
+import { planMigration, writePlan, journalPlan, preflight, runMigration, migrationStatus } from './migrate.mjs';
 
 // Duplicate scanning reads real bytes across the library and takes minutes, so
 // it runs in the background and the page polls it. One at a time.
 const dupes = { running: false, done: 0, total: 0, groups: [], error: null, ranAt: 0 };
+
+// The pool migration, likewise: planning reads bytes and moving is hours. Both
+// are background jobs the page watches rather than requests it waits on.
+const migration = {
+  planning: false, running: false, stop: false,
+  done: 0, total: 0, error: null,
+  report: null, summary: null, overwrites: null, collisions: [],
+  stats: null
+};
 
 const GB = (b) => (Number(b) / 2 ** 30).toFixed(2) + ' GB';
 
@@ -105,6 +115,63 @@ export function startUI(db, {
 
       if (p === '/api/duplicates' && req.method === 'GET') {
         return json(res, 200, { ...dupes, groups: dupes.groups });
+      }
+
+      // ---- Pool migration ------------------------------------------------
+      // Planning reads bytes across the library and moving is hours of work,
+      // so both run in the background and the page polls. Neither is ever
+      // started implicitly: this moves twenty thousand files and it happens
+      // when someone presses the button, not when the program feels ready.
+      if (p === '/api/migrate' && req.method === 'GET') {
+        const st = migrationStatus(db);
+        let ready = null;
+        try { ready = preflight(db, { poolRoot: policy.poolRoot || 'P:\\' }); } catch (e) { ready = { ok: false, problems: [e.message] }; }
+        return json(res, 200, { ...migration, status: st, preflight: ready, poolRoot: policy.poolRoot || 'P:\\' });
+      }
+
+      if (p === '/api/migrate/plan' && req.method === 'POST') {
+        if (migration.planning || migration.running) return json(res, 409, { error: 'already busy' });
+        migration.planning = true; migration.error = null; migration.done = 0; migration.total = 0;
+        (async () => {
+          try {
+            const plan = await planMigration(db, {
+              log: (m) => log('migrate: ' + m),
+              onProgress: (d, n) => { migration.done = d; migration.total = n; }
+            });
+            migration.report = writePlan(plan, path.join(path.dirname(logFile || '.'), 'pool-migration-plan.txt'));
+            migration.summary = plan.stats;
+            migration.overwrites = plan.overwrites.length;
+            migration.collisions = plan.collisions;
+            journalPlan(db, plan, { replace: true });
+            log(`migrate: planned ${plan.stats.moves} move(s), ${plan.overwrites.length} would overwrite`);
+          } catch (e) { migration.error = e.message; log('migrate: planning failed — ' + e.message); }
+          finally { migration.planning = false; }
+        })();
+        return json(res, 200, { ok: true });
+      }
+
+      if (p === '/api/migrate/start' && req.method === 'POST') {
+        if (migration.planning || migration.running) return json(res, 409, { error: 'already busy' });
+        const ready = preflight(db, { poolRoot: policy.poolRoot || 'P:\\' });
+        if (!ready.ok) return json(res, 409, { error: 'not ready', problems: ready.problems });
+        migration.running = true; migration.stop = false; migration.error = null;
+        (async () => {
+          try {
+            migration.stats = await runMigration(db, {
+              log: (m) => log('migrate: ' + m),
+              isWatching: policy.isWatching || (async () => true),
+              shouldStop: () => migration.stop,
+              onProgress: (s) => { migration.stats = s; }
+            });
+          } catch (e) { migration.error = e.message; log('migrate: run failed — ' + e.message); }
+          finally { migration.running = false; }
+        })();
+        return json(res, 200, { ok: true });
+      }
+
+      if (p === '/api/migrate/stop' && req.method === 'POST') {
+        migration.stop = true;
+        return json(res, 200, { ok: true, note: 'will stop after the file in flight finishes' });
       }
 
       if (p === '/api/duplicates/scan' && req.method === 'POST') {
@@ -250,6 +317,17 @@ export const PAGE = `<!doctype html>
 <section>
   <h2>Library</h2>
   <div class="grid" id="stats"></div>
+</section>
+
+<section>
+  <h2>Pool migration <span class="sub">— manual. Nothing moves until you say so.</span></h2>
+  <div class="row" style="margin-bottom:14px">
+    <button id="mplan">Plan the move</button>
+    <button id="mgo" class="sig">Start moving</button>
+    <button id="mstop">Stop</button>
+    <span class="sub" id="mstate"></span>
+  </div>
+  <div id="migrate"></div>
 </section>
 
 <section>
@@ -414,11 +492,73 @@ async function tick() {
       renderDupes(await get('/api/duplicates'));
     } else if (!s.dupes.ranAt) renderDupes(s.dupes);
     await renderBad();
+    renderMigrate(await get('/api/migrate'));
     const l = await get('/api/log');
     $('log').textContent = l.text || 'nothing logged yet';
     $('log').scrollTop = $('log').scrollHeight;
   } catch (e) { $('head').textContent = 'not running'; }
 }
+
+function renderMigrate(m) {
+  const st = m.status || {};
+  const pf = m.preflight || {};
+  $('mplan').disabled = !!(m.planning || m.running);
+  $('mgo').disabled = !!(m.planning || m.running) || !pf.ok;
+  $('mstop').disabled = !m.running;
+
+  if (m.planning) {
+    $('mstate').textContent = 'reading bytes — ' + m.done + ' of ' + m.total + ' contested name(s)';
+  } else if (m.running) {
+    const s = m.stats || {};
+    $('mstate').textContent = (s.done||0) + ' moved, ' + (s.failed||0) + ' failed — ' + GB(s.bytes||0);
+  } else if (m.error) {
+    $('mstate').textContent = m.error;
+  } else {
+    $('mstate').textContent = st.total ? st.done + ' of ' + st.total + ' moved' : 'nothing planned yet';
+  }
+
+  const out = [];
+  if (st.total) {
+    out.push('<div class="bar"><i style="width:' + (st.percent||0) + '%"></i></div>');
+    out.push('<div class="grid">' + [
+      ['Planned', st.total.toLocaleString()],
+      ['Moved', st.done.toLocaleString()],
+      ['Left', st.remaining.toLocaleString()],
+      ['Failed', st.failed]
+    ].map(([k,v]) => '<div class="cell"><div class="k">' + k + '</div><div class="v">' + esc(v) + '</div></div>').join('') + '</div>');
+  }
+
+  // The plan's own verdict on the contested names, which is the part worth
+  // reading before pressing anything.
+  if (m.summary) {
+    out.push('<p class="sub">' + m.summary.versions + ' kept as separate versions · ' +
+      m.summary.duplicates + ' identical copies left in place · ' +
+      m.summary.unknown + ' unreadable · ' +
+      (m.overwrites ? '<b style="color:var(--signal)">' + m.overwrites + ' WOULD OVERWRITE</b>' : 'nothing would be overwritten') +
+      (m.report ? ' · <span class="path">' + esc(m.report) + '</span>' : '') + '</p>');
+  }
+
+  // Why the button is off. A disabled control with no reason is a bug report
+  // waiting to happen.
+  if (!pf.ok && (pf.problems||[]).length) {
+    out.push('<p class="sub">Not ready:</p><ul class="sub">' +
+      pf.problems.slice(0, 8).map((x) => '<li>' + esc(x) + '</li>').join('') + '</ul>');
+  }
+  if ((st.failures||[]).length) {
+    out.push('<p class="sub">Failed:</p>' + st.failures.slice(0, 10).map((f) =>
+      '<div class="row"><span class="path">' + esc(f.src) + '</span><span class="sub">' + esc(f.error) + '</span></div>').join(''));
+  }
+  $('migrate').innerHTML = out.join('');
+}
+
+$('mplan').onclick = async () => { await post('/api/migrate/plan', {}); tick(); };
+$('mstop').onclick = async () => { await post('/api/migrate/stop', {}); tick(); };
+$('mgo').onclick = async () => {
+  if (!confirm('Move the library into the pool?\\n\\nFiles are copied and verified before the original is deleted, and it stops whenever anyone starts watching. You can stop it at any time and it picks up where it left off.')) return;
+  const r = await post('/api/migrate/start', {});
+  if (!r.ok) alert('Not ready:\\n\\n' + ((r.data.problems||[r.data.error]).join('\\n')));
+  tick();
+};
 
 $('scan').onclick = async () => { await post('/api/duplicates/scan', {}); tick(); };
 $('scanfull').onclick = async () => { await post('/api/duplicates/scan', { full:true }); tick(); };

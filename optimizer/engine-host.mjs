@@ -134,7 +134,13 @@ export async function startEngine({ root, port = 8097 } = {}) {
 
   const policy = {
     allow4kVideo: config.optimizeAllow4kVideo === true,
-    allowHdrVideo: config.optimizeAllowHdrVideo === true
+    allowHdrVideo: config.optimizeAllowHdrVideo === true,
+    poolRoot: config.poolRoot || 'P:\\',
+    // The migration saturates the same disks playback reads from, so it obeys
+    // the same rule as the encoder — and shares the one implementation of it,
+    // rather than growing a second copy that can rot separately. Declared
+    // below and hoisted; the reference is taken lazily either way.
+    isWatching: () => someoneWatching()
   };
   engine.setThrottle({
     pauseBetweenJobsMs: 60_000,
