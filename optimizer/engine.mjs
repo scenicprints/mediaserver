@@ -23,7 +23,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFile, execFileSync } from 'node:child_process';
 import { ffmpegBin, ffprobeBin, nvencAvailable } from './ffmpeg.mjs';
-import { VMAF, vmafAvailable, measureVmaf, probeComplexity, sampleVerdict } from './vmaf.mjs';
+import { VMAF, vmafAvailable, measureVmaf, probeComplexity } from './vmaf.mjs';
 
 const yield_ = () => new Promise((r) => setImmediate(r));
 
@@ -1189,23 +1189,36 @@ async function runJob(db, job, { log, allow4kVideo, allowHdrVideo }) {
     } else {
       const gb = (n) => (n / 2 ** 30).toFixed(2) + ' GB';
 
-      // Quality first, before the size question is even asked.
+      // The sampled grade is RECORDED BUT NOT ACTED ON.
       //
-      // A file that cannot survive the encode is not a cheaper file, it is a
-      // ruined one, and the saving it promises is the measure of how much
-      // picture is about to be thrown away — the more grain a transfer has, the
-      // better the "saving" looks and the worse the result. Refusing on the
-      // samples costs minutes. Refusing at the gate costs an hour and reaches
-      // the same conclusion.
-      const verdict = sampleVerdict(probe);
-      if (verdict) {
-        note(`Left ${path.basename(src)} alone — ${verdict}`);
-        log(`Optimizer left ${path.basename(src)} alone — ${verdict}`);
-        return setState('skipped', { error: verdict, ended_at: Date.now(),
-          vmaf_mean: probe.vmafMean, vmaf_min: probe.vmafMin });
-      }
+      // The idea was to refuse a doomed encode in minutes instead of an hour.
+      // It was checked against the full-encode scores it would have to predict,
+      // and it does not predict them:
+      //
+      //   In the Mood for Love   full 87.8   sampled 68.3
+      //   Puss in Boots          full 94.7   sampled 72.2
+      //   Unhinged               full 66.1   sampled 83.2
+      //   Boba Fett Book II      full 68.4   sampled 76.2
+      //
+      // Twenty points low here, seventeen high there. Not a bias that could be
+      // corrected with an offset — noise.
+      //
+      // It is not a broken comparison: a losslessly encoded window scored 99.11
+      // against its source, so the measurement itself is sound. The problem is
+      // that a six-second clip encoded on its own is not those six seconds
+      // inside a two-hour encode, and WHICH six seconds you take moves the
+      // answer enormously — windows of the same film scored 63.8 and 89.6.
+      // Five windows is enough to grade a finished encode, where the question
+      // is "did this survive"; it is not enough to predict one.
+      //
+      // Gating on it would have refused all four of those films, plus Nightmare
+      // Alley and Puss in Boots which missed the real gate by a tenth of a
+      // point — and a skipped file is never retried, so each wrong refusal is a
+      // permanent loss. The number stays for diagnosis. The decision stays with
+      // the gate, which compares two aligned full-length files and is the only
+      // measurement here that has been shown to mean anything.
       if (probe.vmafMean != null) {
-        note(`${path.basename(src)} samples at VMAF ${probe.vmafMean.toFixed(1)} — going ahead`);
+        note(`${path.basename(src)} sampled at VMAF ${probe.vmafMean.toFixed(1)} (indicative only)`);
       }
 
       if (probe.saveBytes < MIN_PROBE_SAVE) {

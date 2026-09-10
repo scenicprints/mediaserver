@@ -54,14 +54,6 @@ export const VMAF = {
 
 export function setVmaf(opts = {}) { Object.assign(VMAF, opts); }
 
-// How far below the pass mark a SAMPLE has to fall before an encode is called
-// off before it starts. Samples are short clips encoded with no preceding
-// frames to reference, so they score a little lower than the same seconds will
-// inside a full encode. This margin is the allowance for that difference: the
-// sample must fail clearly, not narrowly, or the check would refuse films that
-// would have passed.
-export const SAMPLE_MARGIN = 3;
-
 // ---- Capability --------------------------------------------------------
 
 let _has = null;
@@ -298,25 +290,14 @@ export async function probeComplexity(src, {
   };
 }
 
-// Would a full encode of this file survive the gate?
+// There was a sampleVerdict() here that turned the grade above into a decision:
+// refuse a doomed encode in minutes rather than an hour. It was measured
+// against the full-encode scores it had to predict, and it did not predict them
+// — see the note at the probe's call site in engine.mjs for the numbers. It is
+// gone rather than left disabled, because a plausible-looking helper with
+// passing tests is an invitation to wire it back up.
 //
-// Judged on the graded samples, with a margin. A 6-second clip encoded on its
-// own is not identical to the same seconds inside a two-hour encode — it has no
-// preceding frames to reference — so it scores a little LOWER than the real
-// thing will. Refusing right at the pass mark would therefore throw away films
-// that would in fact have passed, so the sample has to fail clearly, not
-// narrowly, before an hour of work is called off.
-//
-// Returns null when it should go ahead, or a sentence saying why not.
-export function sampleVerdict(probe, { margin = SAMPLE_MARGIN } = {}) {
-  if (!probe || probe.vmafMean == null) return null;   // ungraded: not evidence
-  if (probe.vmafMean < VMAF.min - margin) {
-    return `sampled at VMAF ${probe.vmafMean.toFixed(1)}, well below the ${VMAF.min} pass mark — ` +
-           `this looks like film grain or fine detail that would be destroyed, so it is left alone`;
-  }
-  if (probe.vmafMin != null && probe.vmafMin < VMAF.floor - margin) {
-    return `worst sampled scene scored VMAF ${probe.vmafMin.toFixed(1)}, well below the ${VMAF.floor} floor ` +
-           `(mean was ${probe.vmafMean.toFixed(1)}) — left alone`;
-  }
-  return null;
-}
+// If this is revisited, the thing to fix is not the threshold. It is that five
+// six-second clips cannot stand in for a two-hour encode: windows of one film
+// scored 63.8 and 89.6, so the answer depends mostly on which seconds were
+// picked. More windows, or whole-file measurement, or nothing.
