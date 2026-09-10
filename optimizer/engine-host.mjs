@@ -49,7 +49,15 @@ function minutesUntilOpen(win, now = new Date()) {
   const cur = now.getHours() * 60 + now.getMinutes();
   return from >= cur ? from - cur : (24 * 60 - cur) + from;
 }
-const stamp = () => new Date().toISOString().replace('T', ' ').slice(0, 19);
+// Local time, not UTC. The working window is expressed in local hours, so a
+// log in UTC would show 03:10 for a job that ran at 20:10 and make the one
+// thing this log has to prove — that it only worked overnight — unreadable.
+const stamp = () => {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
+         ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+};
 
 // ---- One engine at a time --------------------------------------------------
 //
