@@ -182,7 +182,7 @@ export function startUI(db, {
 // as the rest: squared off, small caps, letterspaced, one signal colour used
 // for state and never for decoration.
 // ---------------------------------------------------------------------------
-const PAGE = `<!doctype html>
+export const PAGE = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8" />
 <title>Marquee Optimizer</title>
 <meta name="viewport" content="width=device-width,initial-scale=1" />
@@ -423,7 +423,7 @@ async function tick() {
 $('scan').onclick = async () => { await post('/api/duplicates/scan', {}); tick(); };
 $('scanfull').onclick = async () => { await post('/api/duplicates/scan', { full:true }); tick(); };
 $('copybad').onclick = async () => {
-  const text = badCache.map((i) => i.what).join('\n');
+  const text = badCache.map((i) => i.what).join('\\n');
   try { await navigator.clipboard.writeText(text); $('copybad').textContent = 'Copied'; }
   catch { $('copybad').textContent = 'Could not copy'; }
   setTimeout(() => { $('copybad').textContent = 'Copy list'; }, 1800);

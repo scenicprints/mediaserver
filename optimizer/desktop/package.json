@@ -1,0 +1,8 @@
+{
+  "name": "marquee-optimizer",
+  "productName": "Marquee Optimizer",
+  "version": "1.0.0",
+  "description": "Keeps the Marquee library lean and playable on every device.",
+  "main": "main.cjs",
+  "author": "scenicprints"
+}
