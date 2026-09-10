@@ -120,6 +120,41 @@ filters, instant scrolling, 12-card rows, per-row layout+paint containment); nat
 ---
 
 ## ✅ Done
+- **Browse rows rotate, and the seasonal row follows the actual calendar (2026-09-10).**
+  Home/Movies/TV used to emit *every* row every time — one per genre, one per decade, plus the
+  staples — so the shuffle at the end reordered ~35 rows that were always the same 35 rows, under
+  four pinned rows that never moved. Now `candidateRows()` builds a pool and `chooseRows()` deals a
+  hand out of it under per-group quotas (`ROW_QUOTA`: core/mood/discovery/genre/decade; 19 rows on
+  desktop, 13 on a TV — the TV page went from ~360 cards to ~156). Seeded once per visit
+  (`ROTATION_SEED`, rerolled on reload and every 4 h) so navigating between tabs or closing the
+  player no longer reshuffles the page mid-browse. New rows in the pool: 18 **mood** cuts
+  (Feel-Good Comedies, Edge of Your Seat, Rom-Coms, Based on a True Story, Out in Space, Heists
+  and Cons, Creature Features, Slow Burns…) and **discovery** rows that only exist because of
+  what's in the library — Hidden Gems, Short and Sweet, Settle In, From the Vault, Roll the Dice,
+  *Because you watched X*, *The Year 1998*, and franchise rows off the Collections grouping
+  (`/api/collections` now returns member `ids`; the client loads it in `loadAll`). Every row that
+  leans on a genre carries a `topic`, and a claimed topic blocks the plain genre row, so
+  "Documentary" and "🎬 Documentaries" can never stack. Rows work on `{x, kind}` pairs, so Home
+  rows mix movies and shows instead of Home being a movies page with two show rows on it.
+  **Seasonal**: the old month-keyed themes were genre mush wearing a season's name (September =
+  "🍁 Fall Dramas" = any Drama ≥ 6.5). Replaced with a dated calendar of real occasions —
+  New Year, Super Bowl, Valentine's, Presidents Day, St. Patrick's, Easter, Earth Day, May the
+  Fourth, Cinco de Mayo, Mother's Day, Memorial Day, Father's Day, **Fourth of July**, Back to
+  School, Halloween (+ Not-So-Spooky), Veterans Day, Thanksgiving, Christmas. Floating dates are
+  computed (`nthDow`/`lastDow`, and Easter by computus), holidays match on **title and overview**
+  rather than genre, and a theme with too few genuine matches simply doesn't run: **there is no
+  filler, and about a quarter of the year has no seasonal row at all**, which is the intent.
+  **Windows are a run-up, never a day** — nobody sits down to a holiday film on the holiday, so
+  each theme carries `on` (the day it falls) plus a window that opens 10–14 days ahead and closes
+  the day after; the month-long ones (Halloween, Christmas, Back to School) stay month-long. When
+  windows overlap, the theme whose day is **nearest** takes the slot (`daysUntil`, wrapping the
+  year end; `rank` only breaks an exact tie), so the Big Game owns Super Bowl Sunday even though
+  Valentine's has been up a week, and Thanksgiving outranks Christmas on Thanksgiving itself.
+  Verified with a harness that evals the block out of `app.js` — floating dates against real
+  2025-27 calendars, every window's length and lead-in, overlap ordering, ~20 title-match cases,
+  `seasonalRows` end-to-end against a fixture shelf on nine real dates, rotation across 6 visits
+  per view — plus a live DOM pass in the browser (rows render, "See all" works, TV mode honours
+  its smaller quota).
 - **Admin: delete files from the server (2026-07-13).** Admins get a 🗑 **Delete file**
   button in the movie/episode detail (per selected version) that permanently removes the
   physical file from disk + its library entry (pruning the now-empty logical movie/episode/
@@ -423,6 +458,11 @@ filters, instant scrolling, 12-card rows, per-row layout+paint containment); nat
 ---
 
 ## 🔜 Next (start here — priority order)
+0. **Apple TV rows are now behind the web app.** `appletv/Sources/Browse.swift` has its own
+   `movieRows`/`showRows` — a fixed list, emitted in a fixed order, with no seasonal row and no
+   rotation. The web UI (which is also what Android TV and webOS load) got the pool + calendar on
+   2026-09-10; the tvOS app didn't, deliberately, since it ships through cloud CI on the owner's
+   say-so. Port `chooseRows`/`seasonalCalendar` to Swift when the app next goes out.
 0. **Skip Intro — REBUILT & re-enabled (2026-07-13).** Fixed the two things that got it pulled:
    (1) **accuracy** — `src/introdetect.js` now matches each episode against several others and keeps
    only the intro range a **consensus** of pairings agrees on (≥2 for 3+-episode seasons), so a

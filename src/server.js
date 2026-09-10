@@ -472,15 +472,16 @@ app.get('/api/collections', async () => {
     const items = metaMembers(def);
     if (items.length < 3) return null;
     const art = items.find((i) => i.backdrop) || items[0];
-    return { id: def.id, name: def.name, count: items.length, poster: art.poster, backdrop: art.backdrop, meta: true };
+    return { id: def.id, name: def.name, count: items.length, ids: items.map((i) => i.id), poster: art.poster, backdrop: art.backdrop, meta: true };
   }).filter(Boolean).sort((a, b) => b.count - a.count);
 
   const tmdb = db.prepare(
     `SELECT collection_id AS id, collection_name AS name, COUNT(*) AS count,
-            MAX(collection_poster) AS poster, MAX(backdrop) AS backdrop, MIN(poster) AS memberPoster
-     FROM movies WHERE collection_id IS NOT NULL
+            MAX(collection_poster) AS poster, MAX(backdrop) AS backdrop, MIN(poster) AS memberPoster,
+            GROUP_CONCAT(m.id) AS ids
+     FROM movies m WHERE collection_id IS NOT NULL
      GROUP BY collection_id, collection_name HAVING count >= 3 ORDER BY name COLLATE NOCASE`
-  ).all().map((r) => ({ id: r.id, name: r.name, count: r.count, poster: r.poster || r.memberPoster, backdrop: r.backdrop }));
+  ).all().map((r) => ({ id: r.id, name: r.name, count: r.count, ids: String(r.ids || '').split(',').filter(Boolean).map(Number), poster: r.poster || r.memberPoster, backdrop: r.backdrop }));
 
   return [...meta, ...tmdb];
 });

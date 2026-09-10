@@ -142,6 +142,7 @@ const detailClose = document.getElementById('detail-close');
 let movies = [];
 let shows = [];
 let continueItems = [];
+let collections = []; // franchise groupings, for the franchise rows on Home/Movies
 let currentView = 'home';
 let heroItems = [];
 let heroIdx = 0;
@@ -181,13 +182,14 @@ function setPref(key, value) {
 }
 
 async function loadAll() {
-  const [mv, sh, cont] = await Promise.all([
+  const [mv, sh, cont, col] = await Promise.all([
     fetch('/api/movies').then((r) => r.json()),
     fetch('/api/shows').then((r) => r.json()),
     fetch('/api/continue').then((r) => r.json()),
+    fetch('/api/collections').then((r) => r.json()).catch(() => []),
     loadPrefs()
   ]);
-  movies = mv; shows = sh; continueItems = cont;
+  movies = mv; shows = sh; continueItems = cont; collections = Array.isArray(col) ? col : [];
   refreshPreroll(); // prefetch the movie pre-roll (fire and forget)
 }
 
@@ -209,37 +211,323 @@ function setView(view) {
 window.addEventListener('scroll', () => nav.classList.toggle('scrolled', window.scrollY > 40));
 
 function genresOf(m) { try { return JSON.parse(m.genres || '[]'); } catch (_e) { return []; } }
-function allGenres(list) { const s = new Set(); list.forEach((m) => genresOf(m).forEach((g) => s.add(g))); return [...s].sort(); }
-function decadesOf(list) { return [...new Set(list.map((m) => (m.year ? Math.floor(m.year / 10) * 10 : null)).filter(Boolean))].sort((a, b) => b - a); }
 
-function recommended(list) {
-  const r = list.filter((m) => !m.watched && (m.rating || 0) >= 7).sort((a, b) => (b.rating || 0) - (a.rating || 0));
-  return r.length ? r : [...list].sort((a, b) => (b.rating || 0) - (a.rating || 0));
-}
-function shuffle(a) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
+// ============================================================
+//  Home / Movies / TV Shows — the rows
+// ============================================================
+// Rows are DRAWN FROM A POOL rather than all emitted at once. A few pinned rows
+// stay put (Continue Watching, whatever is in season, Recently Added) and the
+// rest of the page is a random selection out of every candidate row below that
+// has enough titles to be worth drawing. So the line-up today isn't the line-up
+// yesterday, and Movies isn't the same page every time you open it.
+//
+// The pick is seeded once per visit, not per render: moving Home to Movies and
+// back keeps the rows you were just looking at, and closing the player doesn't
+// reshuffle the page out from under you. A reload deals a new hand, and so does
+// the clock every four hours, for the TVs that never get closed.
 
-// There's always a season on — pick a theme by the current month and filter by
-// genre (and a little title-matching for holidays, since we have no keywords).
-function seasonalTheme() {
-  const m = new Date().getMonth() + 1;
-  const anyG = (it, gs) => genresOf(it).some((g) => gs.includes(g));
-  const hasG = (it, g) => genresOf(it).includes(g);
-  if (m === 12) return { title: '🎄 Holiday Movies', match: (it) => /christmas|holiday|santa|\belf\b|grinch|scrooge|no[eë]l|xmas|home alone|klaus|nightmare before/i.test(it.title) || (hasG(it, 'Family') && /snow|winter|miracle|wonderful life/i.test(it.title)) };
-  if (m === 11) return { title: '🍂 Cozy Fall Favorites', match: (it) => anyG(it, ['Family', 'Comedy', 'Drama']) && (it.rating || 0) >= 6.5 };
-  if (m === 10) return { title: '🎃 Halloween Frights', match: (it) => anyG(it, ['Horror', 'Thriller']) };
-  if (m === 9) return { title: '🍁 Fall Dramas', match: (it) => hasG(it, 'Drama') && (it.rating || 0) >= 6.5 };
-  if (m >= 6 && m <= 8) return { title: '☀️ Summer Blockbusters', match: (it) => anyG(it, ['Action', 'Adventure', 'Science Fiction']) && (it.rating || 0) >= 6.5 };
-  if (m === 2) return { title: '💘 Date Night', match: (it) => hasG(it, 'Romance') };
-  if (m >= 3 && m <= 5) return { title: '🌸 Spring Adventures', match: (it) => anyG(it, ['Adventure', 'Family', 'Fantasy']) };
-  return { title: '❄️ New Year, Great Films', match: (it) => (it.rating || 0) >= 7.8 }; // January
+const ROTATION_SEED = (((Date.now() / 14400000) | 0) ^ ((Math.random() * 0xffffffff) >>> 0)) >>> 0;
+const rowSeed = (view) => (hashStr('rows:' + view) ^ ROTATION_SEED) >>> 0;
+function rng(seed) { let s = (seed >>> 0) || 1; return () => { s = (Math.imul(s, 1664525) + 1013904223) >>> 0; return s / 4294967296; }; }
+// Shuffle (and optionally take n) with a supplied random source.
+function pickN(arr, n, rand) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(rand() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+  return n == null ? a : a.slice(0, n);
 }
-// A seasonal row from a pool of {x, kind}. Null if too little fits the theme.
-function seasonalRow(pool) {
-  const t = seasonalTheme();
-  const items = pool.filter((p) => t.match(p.x)).sort((a, b) => (b.x.rating || 0) - (a.x.rating || 0));
-  if (items.length < 3) return null;
+
+// Every row works on {x, kind} pairs, so one Home row can hold movies and shows
+// side by side instead of Home being a movies page with two show rows on it.
+function pairsFor(view) {
+  if (view === 'tv') return shows.map((x) => ({ x, kind: 'show' }));
+  if (view === 'movies') return movies.map((x) => ({ x, kind: 'movie' }));
+  return [...movies.map((x) => ({ x, kind: 'movie' })), ...shows.map((x) => ({ x, kind: 'show' }))];
+}
+const gOf = (p) => genresOf(p.x);
+const hasG = (p, g) => gOf(p).includes(g);
+const anyG = (p, gs) => gOf(p).some((g) => gs.includes(g));
+const rat = (p) => p.x.rating || 0;
+const yr = (p) => p.x.year || 0;
+const mins = (p) => p.x.runtime || (p.x.duration ? Math.round(p.x.duration / 60) : 0);
+const isMovie = (p) => p.kind === 'movie';
+const lowTitle = (p) => (p.x.title || '').toLowerCase();
+const lowText = (p) => ((p.x.title || '') + ' ' + (p.x.overview || '')).toLowerCase();
+const pRating = (a, b) => rat(b) - rat(a);
+const pYear = (a, b) => yr(b) - yr(a);
+const pYearUp = (a, b) => yr(a) - yr(b);
+const pAdded = (a, b) => (b.x.added_at || 0) - (a.x.added_at || 0);
+const pPlayed = (a, b) => (b.x.last_played_at || 0) - (a.x.last_played_at || 0);
+
+// ---------- The seasonal calendar ----------
+// Dated windows, not "it's month 9, here's some drama". A holiday row matches on
+// the title and the overview, so the week of the Fourth turns up Independence
+// Day and The Patriot; if the library hasn't got enough that genuinely fit, the
+// row doesn't run at all rather than padding itself out with a genre.
+
+const dayKey = (m, d) => m * 100 + d;
+// Day-of-month of the nth <dow> of a month (dow: 0 = Sunday), and of the last one.
+const nthDow = (y, m, dow, n) => 1 + ((dow - new Date(y, m - 1, 1).getDay() + 7) % 7) + (n - 1) * 7;
+function lastDow(y, m, dow) { const last = new Date(y, m, 0); return last.getDate() - ((last.getDay() - dow + 7) % 7); }
+// Easter Sunday (anonymous Gregorian computus) as [month, day].
+function easterMD(y) {
+  const a = y % 19, b = Math.floor(y / 100), c = y % 100;
+  const d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3), h = (19 * a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4), k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7;
+  const mm = Math.floor((a + 11 * h + 22 * l) / 451);
+  return [Math.floor((h + l - 7 * mm + 114) / 31), ((h + l - 7 * mm + 114) % 31) + 1];
+}
+// A window opening `before` days ahead of a floating date and closing `after` days past it.
+function spanAround(y, md, before, after) {
+  const a = new Date(y, md[0] - 1, md[1] - before), b = new Date(y, md[0] - 1, md[1] + after);
+  return [dayKey(a.getMonth() + 1, a.getDate()), dayKey(b.getMonth() + 1, b.getDate())];
+}
+const inWindow = (from, to, k) => (from <= to ? k >= from && k <= to : k >= from || k <= to);
+// Whole days between today and a [month, day], the short way round the year, so
+// Dec 28 is four days from New Year's rather than three hundred and sixty-one.
+function daysUntil(md, now) {
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  let best = Infinity;
+  for (const y of [now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1]) {
+    const diff = Math.abs((new Date(y, md[0] - 1, md[1]) - today) / 86400000);
+    if (diff < best) best = diff;
+  }
+  return best;
+}
+
+function seasonalCalendar(y) {
+  const win = (m1, d1, m2, d2) => [dayKey(m1, d1), dayKey(m2, d2)];
+  const superBowl = [2, nthDow(y, 2, 0, 2)];   // 2nd Sunday in February
+  const easter = easterMD(y);
+  const mothers = [5, nthDow(y, 5, 0, 2)];     // 2nd Sunday in May
+  const memorial = [5, lastDow(y, 5, 1)];      // last Monday in May
+  const fathers = [6, nthDow(y, 6, 0, 3)];     // 3rd Sunday in June
+  const presidents = [2, nthDow(y, 2, 1, 3)];  // 3rd Monday in February
+  const thanks = [11, nthDow(y, 11, 4, 4)];    // 4th Thursday in November
+
+  // `on` is the day the occasion actually falls; `win` is how long the row runs
+  // for. Nobody sits down to a holiday film ON the holiday, so every window opens
+  // a good week or two ahead and closes the day after. When two overlap, the one
+  // whose day is NEARER wins the slot (`rank` only breaks an exact tie), so Big
+  // Game Weekend owns Super Bowl Sunday even though Valentine's is already up.
+  // At most two seasonal rows run at once.
+  return [
+    { id: 'newyear', rank: 10, on: [1, 1], name: '🥂 Ring in the New Year', win: win(12, 22, 1, 3), min: 3,
+      textRe: /\bnew year'?s?\b|times square|hogmanay|auld lang syne|midnight kiss/ },
+
+    { id: 'superbowl', rank: 15, on: superBowl, name: '🏈 Big Game Weekend', win: spanAround(y, superBowl, 13, 1), min: 3,
+      textRe: /\bfootball\b|quarterback|gridiron|touchdown|super bowl|friday night lights|\bnfl\b|linebacker|the blind side|remember the titans|\brudy\b|any given sunday|draft day|jerry maguire|the longest yard/ },
+
+    { id: 'valentine', rank: 10, on: [2, 14], name: "💘 Valentine's Night In", win: win(2, 1, 2, 15), min: 4,
+      genres: ['Romance'], minRating: 6, sort: pRating },
+
+    { id: 'presidents', rank: 10, on: presidents, name: '🎩 Presidents Day', win: spanAround(y, presidents, 9, 1), min: 3,
+      textRe: /\bpresident(ial)?\b|the white house|oval office|\blincoln\b|george washington|\bnixon\b|\bjfk\b|air force one|\bthe west wing\b|primary colors|all the president's men/ },
+
+    { id: 'stpat', rank: 10, on: [3, 17], name: '☘️ Luck of the Irish', win: win(3, 4, 3, 18), min: 3,
+      textRe: /\birish\b|\bireland\b|\bdublin\b|belfast|leprechaun|shamrock|\bceltic\b|boondock saints|the commitments|waking ned/ },
+
+    { id: 'easter', rank: 10, on: easter, name: '🐣 Easter Weekend', win: spanAround(y, easter, 14, 1), min: 3,
+      textRe: /\beaster\b|resurrection|the passion of the christ|ten commandments|prince of egypt|\bben-?hur\b|\brisen\b|jesus christ|\bmoses\b|easter bunny|peter rabbit|\bpassover\b/ },
+
+    { id: 'earthday', rank: 20, on: [4, 22], name: '🌎 Earth Day', win: win(4, 12, 4, 23), min: 3,
+      textRe: /\bwildlife\b|rainforest|\bsafari\b|national park|conservation|endangered|\bclimate\b|the natural world|\bpenguins?\b|\bwhales?\b|planet earth|our planet/ },
+
+    { id: 'starwars', rank: 5, on: [5, 4], name: '🌌 May the Fourth', win: win(4, 24, 5, 5), min: 3,
+      titleRe: /star wars|\bjedi\b|\bsith\b|skywalker|rogue one|the mandalorian|\bandor\b|ahsoka|clone wars|empire strikes back|phantom menace|attack of the clones|revenge of the sith|force awakens|the last jedi|book of boba/ },
+
+    { id: 'cinco', rank: 20, on: [5, 5], name: '🌮 Cinco de Mayo', win: win(4, 27, 5, 6), min: 3,
+      textRe: /\bmexico\b|\bmexican\b|\boaxaca\b|guadalajara|day of the dead|dia de los muertos|luchador|mariachi|\bcartel\b|tijuana|\bcoco\b/ },
+
+    { id: 'mothers', rank: 10, on: mothers, name: "💐 Mother's Day", win: spanAround(y, mothers, 12, 1), min: 3,
+      textRe: /\bmother(s|hood)?\b|\bmom\b|\bmoms\b|\bmama\b|\bmommy\b|\bmum\b/ },
+
+    { id: 'memorial', rank: 10, on: memorial, name: '🇺🇸 Memorial Day', win: spanAround(y, memorial, 12, 1), min: 4,
+      genres: ['War'], sort: pRating },
+
+    { id: 'fathers', rank: 10, on: fathers, name: "🧢 Father's Day", win: spanAround(y, fathers, 12, 1), min: 3,
+      textRe: /\bfather(s|hood)?\b|\bdad\b|\bdads\b|\bpapa\b|\bdaddy\b/ },
+
+    { id: 'july4', rank: 5, on: [7, 4], name: '🎆 Fourth of July', win: win(6, 21, 7, 5), min: 3,
+      titleRe: /independence day|the patriot\b|captain america|national treasure|born on the fourth of july|top gun|apollo 13|hidden figures|first man\b|saving private ryan|air force one|remember the titans|forrest gump|the sandlot|\bjaws\b|\bglory\b|rocky iv|the right stuff|\b1776\b|yankee doodle/,
+      textRe: /independence day|fourth of july|american revolution|founding fathers|declaration of independence|revolutionary war/ },
+
+    { id: 'school', rank: 20, on: [9, 1], name: '🎒 Back to School', win: win(8, 15, 9, 20), min: 4,
+      textRe: /high school|\bcollege\b|university|\bcampus\b|\bteacher\b|\bstudents?\b|\bprincipal\b|graduation|\bdorm\b|freshman|senior year|classroom|\bprom\b|boarding school|\bdetention\b|valedictorian/ },
+
+    { id: 'halloween', rank: 5, on: [10, 31], name: '🎃 Halloween Frights', win: win(9, 21, 10, 31), min: 5,
+      genres: ['Horror'], sort: pRating },
+
+    { id: 'notsospooky', rank: 12, on: [10, 31], name: '👻 Not-So-Spooky', win: win(10, 1, 10, 31), min: 3,
+      pick: (p) => anyG(p, ['Family', 'Animation', 'Fantasy', 'Comedy'])
+        && /\bhalloween\b|\bghosts?\b|\bghostly\b|\bmonsters?\b|\bwitch(es)?\b|\bvampire|\bpumpkin|haunted|\bspooky\b|\bzombie|goosebumps|hocus pocus|addams|\bghouls?\b|coraline|\bcasper\b|trick or treat/.test(lowText(p)) },
+
+    { id: 'veterans', rank: 10, on: [11, 11], name: '🎖️ Veterans Day', win: win(11, 1, 11, 12), min: 4,
+      genres: ['War'], sort: pRating },
+
+    { id: 'thanksgiving', rank: 5, on: thanks, name: '🦃 Thanksgiving', win: spanAround(y, thanks, 13, 1), min: 3,
+      textRe: /thanksgiving|\bturkey day\b|planes,? trains|home for the holidays|\bpilgrims?\b|\bplymouth\b|free birds|friendsgiving/ },
+
+    { id: 'christmas', rank: 5, on: [12, 25], name: '🎄 Christmas Movies', win: win(11, 24, 12, 26), min: 3,
+      textRe: /\bchristmas\b|\bxmas\b|santa claus|\bsanta\b|\bst\.? nick\b|father christmas|\belf\b|\bgrinch\b|scrooge|\bnoel\b|reindeer|\bnativity\b|north pole|home alone|die hard|it'?s a wonderful life|miracle on 34th|\bjingle\b|nutcracker|\byuletide\b|mistletoe|krampus|\bklaus\b|polar express|a christmas carol|a christmas story|\bgremlins\b|love actually/ }
+  ];
+}
+
+// Does this title honestly belong in that theme?
+function themeMatcher(t) {
+  return (p) => {
+    if (t.pick) return t.pick(p);
+    if (t.minRating && rat(p) < t.minRating) return false;
+    if (t.genres && !anyG(p, t.genres)) return false;
+    if (t.titleRe || t.textRe) {
+      const hit = (t.titleRe && t.titleRe.test(lowTitle(p))) || (t.textRe && t.textRe.test(lowText(p)));
+      if (!hit) return false;
+    }
+    return true;
+  };
+}
+
+// What's in season today: at most two rows, tightest occasion first, and only
+// the ones with enough real matches to fill a row.
+function seasonalRows(pool) {
+  const now = new Date();
+  const k = dayKey(now.getMonth() + 1, now.getDate());
+  const out = [];
+  const byNearest = (a, b) => (daysUntil(a.on, now) - daysUntil(b.on, now)) || (a.rank - b.rank);
+  for (const t of seasonalCalendar(now.getFullYear()).sort(byNearest)) {
+    if (!inWindow(t.win[0], t.win[1], k)) continue;
+    const items = pool.filter(themeMatcher(t));
+    if (items.length < (t.min || 4)) continue;
+    out.push({ group: 'seasonal', name: t.name, items, sort: t.sort || pRating, min: t.min || 4 });
+    if (out.length === 2) break;
+  }
+  return out;
+}
+
+// ---------- The candidate pool ----------
+// Everything the page COULD show. Nothing in here is guaranteed a slot.
+function candidateRows(view, P, rand) {
+  const rows = [];
+  const add = (group, name, items, sort, min, topic) => { if (items.length >= (min || 4)) rows.push({ group, name, items, sort, min, topic }); };
+  const movieP = P.filter(isMovie);
+  const showP = P.filter((p) => p.kind === 'show');
+  const thisYear = new Date().getFullYear();
+  const label = (onHome, elsewhere) => (view === 'home' ? onHome : elsewhere);
+
+  // --- core: the staples ---
+  add('core', 'Recommended', P.filter((p) => !p.x.watched && rat(p) >= 7), pRating);
+  add('core', 'Recently Released', P.slice(), pYear);
+  add('core', 'Top Rated', P.slice(), pRating);
+  add('core', 'Critically Acclaimed', P.filter((p) => rat(p) >= 8), pRating);
+  add('core', 'Fresh This Week', P.filter((p) => p.x.added_at && Date.now() - p.x.added_at < 7 * 86400000), pAdded, 3);
+  add('core', 'Favorites', movieP.filter((p) => p.x.favorite), pRating, 3);
+  add('core', label('Unwatched Movies', 'Unwatched'), movieP.filter((p) => !p.x.watched), pRating);
+  add('core', 'Watch Again', movieP.filter((p) => p.x.watched), pPlayed, 3);
+  add('core', label('4K Movies', '4K'), movieP.filter((p) => (p.x.qualities || '').includes('4K')), pRating, 3);
+  add('core', 'New Episodes', showP.filter((p) => p.x.unwatched > 0), pAdded);
+  add('core', 'Finish What You Started', showP.filter((p) => p.x.unwatched > 0 && p.x.last_played_at), pPlayed, 3);
+  if (view === 'home') {
+    add('core', 'Movies', movieP.slice(), pRating);
+    add('core', 'TV Shows', showP.slice(), pRating);
+  }
+
+  // --- mood: cuts a genre name alone doesn't get you ---
+  // Third field is the genre the row leans on. Claiming a genre blocks the plain
+  // genre row for it, so "Documentary" and "🎬 Documentaries" can never end up
+  // stacked on the same page. Null means the row cuts across genres.
+  const moods = [
+    ['😄 Feel-Good Comedies', (p) => hasG(p, 'Comedy') && rat(p) >= 6.5, 'Comedy'],
+    ['😱 Edge of Your Seat', (p) => anyG(p, ['Thriller', 'Mystery']) && rat(p) >= 6, 'Thriller'],
+    ['💞 Rom-Coms', (p) => hasG(p, 'Romance') && hasG(p, 'Comedy'), null],
+    ['🏡 Family Movie Night', (p) => hasG(p, 'Family') && rat(p) >= 6, 'Family'],
+    ['🎨 Animated', (p) => hasG(p, 'Animation'), 'Animation'],
+    ['📖 Based on a True Story', (p) => /based on (a |the )?(true|real)|a true story|true events|real events|inspired by (a |the )?true/.test(lowText(p)), null],
+    ['🚀 Into the Unknown', (p) => hasG(p, 'Science Fiction') && rat(p) >= 6, 'Science Fiction'],
+    ['🐉 Swords and Sorcery', (p) => hasG(p, 'Fantasy'), 'Fantasy'],
+    ['🕵️ Crime and Capers', (p) => hasG(p, 'Crime'), 'Crime'],
+    ['🎖️ War Stories', (p) => hasG(p, 'War'), 'War'],
+    ['🤠 Westerns', (p) => hasG(p, 'Western'), 'Western'],
+    ['🎬 Documentaries', (p) => hasG(p, 'Documentary'), 'Documentary'],
+    ['🎵 Music and Musicals', (p) => hasG(p, 'Music'), 'Music'],
+    ['💥 Big and Loud', (p) => anyG(p, ['Action', 'Adventure']) && rat(p) >= 6.5, 'Action'],
+    ['🌌 Out in Space', (p) => /\bspace\b|astronauts?\b|\borbit\b|\bmars\b|\bnasa\b|spaceship|space station|\bgalaxy\b|interstellar|moon landing|cosmonaut/.test(lowText(p)), null],
+    ['💰 Heists and Cons', (p) => /\bheist\b|\brobbery\b|con (man|artist)|\bthieves\b|bank job|\bgrifter|\bswindle|\bcaper\b/.test(lowText(p)), null],
+    ['👹 Creature Features', (p) => hasG(p, 'Horror') && /\bmonsters?\b|\bcreature\b|\bsharks?\b|dinosaur|\bkaiju\b|\baliens?\b|\bbeast\b/.test(lowText(p)), null],
+    ['🧠 Slow Burns', (p) => hasG(p, 'Drama') && mins(p) >= 130, null]
+  ];
+  for (const m of moods) add('mood', m[0], P.filter(m[1]), pRating, 4, m[2]);
+
+  // --- discovery: rows that only exist because of what's actually in here ---
+  add('discovery', '💎 Hidden Gems', P.filter((p) => rat(p) >= 7 && !p.x.watched && !p.x.last_played_at && yr(p) && yr(p) <= thisYear - 5), pRating);
+  add('discovery', '⏱️ Short and Sweet', movieP.filter((p) => mins(p) >= 40 && mins(p) <= 100), pRating);
+  add('discovery', '🍿 Settle In', movieP.filter((p) => mins(p) >= 150), pRating);
+  add('discovery', '📼 From the Vault', P.filter((p) => yr(p) && yr(p) < 1980), pRating);
+  add('discovery', '⏪ Watched Lately', P.filter((p) => p.x.last_played_at), pPlayed, 3);
+  add('discovery', '🎲 Roll the Dice', pickN(P, 60, rand), null);
+
+  // Because you watched — off one of the last few things actually played, so it
+  // isn't the same suggestion every single time.
+  const played = P.filter((p) => p.x.last_played_at).sort(pPlayed).slice(0, 5);
+  const seed = pickN(played, 1, rand)[0];
+  if (seed && gOf(seed).length) {
+    const gs = gOf(seed);
+    add('discovery', `Because you watched ${seed.x.title}`, P.filter((p) => p.x !== seed.x && !p.x.watched && anyG(p, gs)), pRating);
+  }
+
+  // A year the library happens to be deep on.
+  const byYear = {};
+  P.forEach((p) => { if (yr(p)) (byYear[yr(p)] = byYear[yr(p)] || []).push(p); });
+  const fatYear = pickN(Object.keys(byYear).filter((k) => byYear[k].length >= 6), 1, rand)[0];
+  if (fatYear) add('discovery', `The Year ${fatYear}`, byYear[fatYear], pRating);
+
+  // Franchises, straight off the same grouping the Collections tab uses.
+  if (view !== 'tv') {
+    for (const c of pickN(collections.filter((c) => (c.ids || []).length >= 3), 3, rand)) {
+      const ids = new Set(c.ids);
+      add('discovery', '🎞️ ' + c.name.replace(/ Collection$/, ''), movieP.filter((p) => ids.has(p.x.id)), pYearUp, 3);
+    }
+  }
+
+  // --- genres and decades: the long tail, sampled rather than dumped ---
+  for (const g of [...new Set(P.flatMap(gOf))].sort()) add('genre', g, P.filter((p) => hasG(p, g)), pRating, 4, g);
+  const decades = [...new Set(P.map((p) => (yr(p) ? Math.floor(yr(p) / 10) * 10 : 0)).filter(Boolean))].sort((a, b) => b - a);
+  for (const d of decades) add('decade', `${d}s`, P.filter((p) => yr(p) >= d && yr(p) < d + 10), pYear);
+
+  return rows;
+}
+
+// How many of each kind make the page. TVs get fewer: hundreds of cards in one
+// document is what makes a low-power TV WebView crawl.
+const ROW_QUOTA = TV_MODE
+  ? { core: 3, mood: 3, discovery: 2, genre: 3, decade: 1 }
+  : { core: 4, mood: 5, discovery: 3, genre: 5, decade: 2 };
+
+function chooseRows(view, P, rand) {
+  const need = Object.assign({}, ROW_QUOTA);
+  const claimed = new Set();
+  const out = [];
+  // One pass over the shuffled pool. Filling the quotas this way rather than
+  // group by group means a row skipped for claiming a shelf that's already
+  // taken gets topped up by the next candidate, instead of costing the page a row.
+  for (const r of pickN(candidateRows(view, P, rand), null, rand)) {
+    if (!need[r.group]) continue;
+    if (r.topic && claimed.has(r.topic)) continue;
+    if (r.topic) claimed.add(r.topic);
+    need[r.group]--;
+    out.push(r);
+  }
+  // One staple opens the block so the page doesn't start on "1970s". It's a
+  // straight shuffle from there.
+  const lead = out.find((r) => r.group === 'core');
+  return lead ? [lead, ...out.filter((r) => r !== lead)] : out;
+}
+
+// Turn a row definition into cards. Only the rows that made the cut get here;
+// building the DOM is the expensive half.
+function materializeRow(r) {
+  const items = r.sort ? r.items.slice().sort(r.sort) : r.items;
   const cards = (n) => items.slice(0, n).map((p) => buildMediaCard(p.x, p.kind));
-  return { title: t.title, cards: cards(TV_MODE ? ROW_N : 30), seeAll: () => ({ title: t.title, cards: cards(items.length) }) };
+  return { title: r.name, cards: cards(ROW_N), seeAll: () => ({ title: r.name, cards: cards(items.length) }) };
 }
 
 function renderView() {
@@ -250,59 +538,30 @@ function renderView() {
   if (currentView === 'requests') { renderRequests(); return; }
   if (currentView === 'livetv') { renderLiveTv(); return; }
   rowsEl.style.paddingTop = '';
-  const top = [], rest = [];
-  const byYear = (a, b) => (b.year || 0) - (a.year || 0);
-  const push = (arr, title, list, kind) => { if (list.length) arr.push({ title, kind, cards: mediaCards(list.slice(0, ROW_N), kind), seeAll: () => ({ title, cards: mediaCards(list, kind) }) }); };
 
-  if (currentView === 'movies') {
-    setHero(movies.filter((m) => m.backdrop));
-    const cw = continueItems.filter((c) => c.kind === 'movie');
-    if (cw.length) top.push({ title: 'Continue Watching', cards: continueCards(cw) });
-    push(top, 'Recently Added', [...movies].sort(byRecent), 'movie');
-    push(top, 'Recently Released', [...movies].sort(byYear), 'movie');
-    push(top, 'Recommended', recommended(movies), 'movie');
-    push(rest, 'Top Rated', [...movies].sort(byRating), 'movie');
-    push(rest, 'Critically Acclaimed', movies.filter((m) => m.rating >= 8).sort(byRating), 'movie');
-    push(rest, 'Unwatched', movies.filter((m) => !m.watched), 'movie');
-    push(rest, 'Watch Again', movies.filter((m) => m.watched), 'movie');
-    push(rest, 'Favorites', movies.filter((m) => m.favorite), 'movie');
-    push(rest, '4K', movies.filter((m) => (m.qualities || '').includes('4K')), 'movie');
-    allGenres(movies).forEach((g) => push(rest, g, movies.filter((m) => genresOf(m).includes(g)).sort(byRating), 'movie'));
-    decadesOf(movies).forEach((d) => push(rest, `${d}s`, movies.filter((m) => m.year >= d && m.year < d + 10).sort(byYear), 'movie'));
-  } else if (currentView === 'tv') {
-    setHero(shows.filter((s) => s.backdrop));
-    const cw = continueItems.filter((c) => c.kind === 'episode');
-    if (cw.length) top.push({ title: 'Continue Watching', cards: continueCards(cw) });
-    push(top, 'Recently Added', [...shows].sort(byRecent), 'show');
-    push(top, 'Recently Released', [...shows].sort(byYear), 'show');
-    push(top, 'Recommended', recommended(shows), 'show');
-    push(rest, 'New Episodes', shows.filter((s) => s.unwatched > 0), 'show');
-    push(rest, 'Top Rated', [...shows].sort(byRating), 'show');
-    push(rest, 'Critically Acclaimed', shows.filter((s) => s.rating >= 8).sort(byRating), 'show');
-    allGenres(shows).forEach((g) => push(rest, g, shows.filter((s) => genresOf(s).includes(g)).sort(byRating), 'show'));
-    decadesOf(shows).forEach((d) => push(rest, `${d}s`, shows.filter((s) => s.year >= d && s.year < d + 10).sort(byYear), 'show'));
-  } else {
-    const mixed = [...movies.filter((m) => m.backdrop), ...shows.filter((s) => s.backdrop)].sort(byRating);
-    setHero(mixed);
-    if (continueItems.length) top.push({ title: 'Continue Watching', cards: continueCards(continueItems) });
-    top.push({ title: 'Recently Added', cards: mixedRecent(ROW_N) });
-    push(top, 'Recently Released', [...movies].sort(byYear), 'movie');
-    push(top, 'Recommended', recommended(movies), 'movie');
-    push(rest, 'Movies', [...movies].sort(byRating), 'movie');
-    push(rest, 'TV Shows', [...shows].sort(byRating), 'show');
-    push(rest, 'Critically Acclaimed', movies.filter((m) => m.rating >= 8).sort(byRating), 'movie');
-    push(rest, 'Unwatched Movies', movies.filter((m) => !m.watched), 'movie');
-    push(rest, 'Favorites', movies.filter((m) => m.favorite), 'movie');
-    allGenres(movies).forEach((g) => push(rest, g, movies.filter((m) => genresOf(m).includes(g)).sort(byRating), 'movie'));
-    decadesOf(movies).forEach((d) => push(rest, `${d}s`, movies.filter((m) => m.year >= d && m.year < d + 10).sort(byYear), 'movie'));
+  const view = currentView;
+  const P = pairsFor(view);
+  if (view === 'movies') setHero(movies.filter((m) => m.backdrop));
+  else if (view === 'tv') setHero(shows.filter((s) => s.backdrop));
+  else setHero([...movies.filter((m) => m.backdrop), ...shows.filter((s) => s.backdrop)].sort(byRating));
+
+  const rand = rng(rowSeed(view));
+  const out = [];
+  const cw = view === 'movies' ? continueItems.filter((c) => c.kind === 'movie')
+    : view === 'tv' ? continueItems.filter((c) => c.kind === 'episode')
+    : continueItems;
+  if (cw.length) out.push({ title: 'Continue Watching', cards: continueCards(cw) });
+
+  // Pinned: what's in season, then what just landed. Everything after rotates.
+  const pinned = [...seasonalRows(P), { group: 'core', name: 'Recently Added', items: P.slice(), sort: pAdded, min: 1 }];
+  const seen = new Set();
+  for (const r of [...pinned, ...chooseRows(view, P, rand)]) {
+    const key = r.name.replace(/[^a-z0-9]/gi, '').toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(materializeRow(r));
   }
-  // Seasonal row — always last among the permanent (fixed) rows.
-  const seasonalPool = currentView === 'tv' ? shows.map((x) => ({ x, kind: 'show' }))
-    : currentView === 'movies' ? movies.map((x) => ({ x, kind: 'movie' }))
-    : [...movies.map((x) => ({ x, kind: 'movie' })), ...shows.map((x) => ({ x, kind: 'show' }))];
-  const sr = seasonalRow(seasonalPool);
-  if (sr) top.push(sr);
-  drawRows([...top, ...shuffle(rest)]);
+  drawRows(out);
 }
 
 let libraryKind = 'movie';
@@ -967,15 +1226,6 @@ function showGridView(title, cards) {
   cards.forEach((c) => grid.appendChild(c));
   rowsEl.appendChild(sec);
   document.getElementById('grid-back').addEventListener('click', renderView);
-}
-
-function mixedRecent(n) {
-  const m = movies.map((x) => ({ x, kind: 'movie' }));
-  const s = shows.map((x) => ({ x, kind: 'show' }));
-  return [...m, ...s]
-    .sort((a, b) => (b.x.added_at || 0) - (a.x.added_at || 0))
-    .slice(0, n)
-    .map(({ x, kind }) => buildMediaCard(x, kind));
 }
 
 // ---------- Hero ----------

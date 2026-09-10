@@ -216,7 +216,7 @@ struct BrowseScreen: View {
     }
 }
 
-// ---- Row/hero builders (mirror the web app's view() row set) ----
+// ---- Card and hero builders. The ROWS themselves are in BrowseRows.swift ----
 enum Browse {
     static func movieCard(_ m: Movie) -> BrowseCard {
         if m.isStream {
@@ -271,86 +271,6 @@ enum Browse {
         let m = movies.filter { $0.backdrop != nil && !$0.isStream }.map { HeroItem(id: "m\($0.id)", title: $0.title, backdrop: $0.backdrop, year: $0.year, rating: $0.rating, badge: $0.bestQuality, overview: $0.overview, route: .movie($0.localId ?? 0)) }
         let s = shows.filter { $0.backdrop != nil && !$0.isStream }.map { HeroItem(id: "s\($0.id)", title: $0.title, backdrop: $0.backdrop, year: $0.year, rating: $0.rating, badge: $0.episodes.map { "\($0) eps" }, overview: $0.overview, route: .show($0.localId ?? 0)) }
         return weeklyPick((m + s).sorted { ($0.rating ?? 0) > ($1.rating ?? 0) }, 6)
-    }
-
-    static func movieRows(_ movies: [Movie]) -> [BrowseRow] {
-        var rows: [BrowseRow] = []
-        func add(_ id: String, _ t: String, _ list: [Movie]) {
-            if !list.isEmpty { rows.append(BrowseRow(id: id, title: t, cards: list.prefix(24).map(movieCard))) }
-        }
-        add("recent", "Recently Added", movies.sorted { ($0.addedAt ?? 0) > ($1.addedAt ?? 0) })
-        add("released", "Recently Released", movies.sorted { ($0.year ?? 0) > ($1.year ?? 0) })
-        add("rec", "Recommended", movies.filter { ($0.watched ?? 0) == 0 }.sorted { ($0.rating ?? 0) > ($1.rating ?? 0) })
-        add("top", "Top Rated", movies.sorted { ($0.rating ?? 0) > ($1.rating ?? 0) })
-        add("acclaim", "Critically Acclaimed", movies.filter { ($0.rating ?? 0) >= 8 }.sorted { ($0.rating ?? 0) > ($1.rating ?? 0) })
-        add("unwatched", "Unwatched", movies.filter { ($0.watched ?? 0) == 0 })
-        add("again", "Watch Again", movies.filter { ($0.watched ?? 0) == 1 })
-        add("fav", "Favorites", movies.filter { ($0.favorite ?? 0) == 1 })
-        add("4k", "4K", movies.filter { $0.is4K })
-        for g in topGenres(movies.map { $0.genreList }) {
-            add("g-\(g)", g, movies.filter { $0.genreList.contains(g) }.sorted { ($0.rating ?? 0) > ($1.rating ?? 0) })
-        }
-        for d in decades(movies.map { $0.year }) {
-            add("d-\(d)", "\(d)s", movies.filter { ($0.year ?? 0) >= d && ($0.year ?? 0) < d + 10 }.sorted { ($0.year ?? 0) > ($1.year ?? 0) })
-        }
-        return rows
-    }
-
-    static func showRows(_ shows: [Show]) -> [BrowseRow] {
-        var rows: [BrowseRow] = []
-        func add(_ id: String, _ t: String, _ list: [Show]) {
-            if !list.isEmpty { rows.append(BrowseRow(id: id, title: t, cards: list.prefix(24).map(showCard))) }
-        }
-        add("recent", "Recently Added", shows.sorted { ($0.addedAt ?? 0) > ($1.addedAt ?? 0) })
-        add("released", "Recently Released", shows.sorted { ($0.year ?? 0) > ($1.year ?? 0) })
-        add("new", "New Episodes", shows.filter { ($0.unwatched ?? 0) > 0 })
-        add("top", "Top Rated", shows.sorted { ($0.rating ?? 0) > ($1.rating ?? 0) })
-        add("acclaim", "Critically Acclaimed", shows.filter { ($0.rating ?? 0) >= 8 }.sorted { ($0.rating ?? 0) > ($1.rating ?? 0) })
-        for g in topGenres(shows.map { $0.genreList }) {
-            add("g-\(g)", g, shows.filter { $0.genreList.contains(g) }.sorted { ($0.rating ?? 0) > ($1.rating ?? 0) })
-        }
-        return rows
-    }
-
-    // Home's Recently Added mixes movies AND shows by added date (web mixedRecent).
-    static func mixedRecentCards(_ movies: [Movie], _ shows: [Show]) -> [BrowseCard] {
-        let m = movies.map { (at: $0.addedAt ?? 0, card: movieCard($0)) }
-        let s = shows.map { (at: $0.addedAt ?? 0, card: showCard($0)) }
-        return (m + s).sorted { $0.at > $1.at }.prefix(24).map { $0.card }
-    }
-
-    static func homeRows(_ movies: [Movie], _ shows: [Show]) -> [BrowseRow] {
-        var rows: [BrowseRow] = []
-        func addM(_ id: String, _ t: String, _ list: [Movie]) {
-            if !list.isEmpty { rows.append(BrowseRow(id: id, title: t, cards: list.prefix(24).map(movieCard))) }
-        }
-        func addS(_ id: String, _ t: String, _ list: [Show]) {
-            if !list.isEmpty { rows.append(BrowseRow(id: id, title: t, cards: list.prefix(24).map(showCard))) }
-        }
-        let recent = mixedRecentCards(movies, shows)
-        if !recent.isEmpty { rows.append(BrowseRow(id: "recent", title: "Recently Added", cards: recent)) }
-        addM("released", "Recently Released", movies.sorted { ($0.year ?? 0) > ($1.year ?? 0) })
-        addM("rec", "Recommended", movies.filter { ($0.watched ?? 0) == 0 }.sorted { ($0.rating ?? 0) > ($1.rating ?? 0) })
-        addM("movies", "Movies", movies.sorted { ($0.rating ?? 0) > ($1.rating ?? 0) })
-        addS("tv", "TV Shows", shows.sorted { ($0.rating ?? 0) > ($1.rating ?? 0) })
-        addM("acclaim", "Critically Acclaimed", movies.filter { ($0.rating ?? 0) >= 8 }.sorted { ($0.rating ?? 0) > ($1.rating ?? 0) })
-        addM("unwatched", "Unwatched Movies", movies.filter { ($0.watched ?? 0) == 0 })
-        addM("fav", "Favorites", movies.filter { ($0.favorite ?? 0) == 1 })
-        for g in topGenres(movies.map { $0.genreList }) {
-            addM("g-\(g)", g, movies.filter { $0.genreList.contains(g) }.sorted { ($0.rating ?? 0) > ($1.rating ?? 0) })
-        }
-        return rows
-    }
-
-    // Genres present, ordered by how many titles carry them (most first).
-    static func topGenres(_ lists: [[String]]) -> [String] {
-        var counts: [String: Int] = [:]
-        for l in lists { for g in l { counts[g, default: 0] += 1 } }
-        return counts.filter { $0.value >= 3 }.sorted { $0.value > $1.value }.map { $0.key }
-    }
-    static func decades(_ years: [Int?]) -> [Int] {
-        let ds = Set(years.compactMap { $0 }.filter { $0 > 1900 }.map { ($0 / 10) * 10 })
-        return ds.sorted(by: >)
     }
 }
 

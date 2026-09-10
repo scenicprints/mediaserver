@@ -22,6 +22,7 @@ struct Movie: Identifiable, Decodable, Hashable {
     let runtime: Int?
     let versions: Int?
     let addedAt: Double?
+    let lastPlayedAt: Double?    // powers "Because you watched" and Hidden Gems
     let qualities: String?
     let source: String?          // "stream" for streaming-only titles
     let providers: [String]?     // streaming provider slugs (stream titles)
@@ -29,7 +30,7 @@ struct Movie: Identifiable, Decodable, Hashable {
 
     enum CodingKeys: String, CodingKey {
         case id, title, year, poster, backdrop, overview, rating, genres, watched, favorite
-        case resumePosition, duration, runtime, versions, addedAt, qualities, source, providers, alsoOn
+        case resumePosition, duration, runtime, versions, addedAt, lastPlayedAt, qualities, source, providers, alsoOn
     }
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
@@ -49,6 +50,7 @@ struct Movie: Identifiable, Decodable, Hashable {
         runtime = try? c.decode(Int.self, forKey: .runtime)
         versions = try? c.decode(Int.self, forKey: .versions)
         addedAt = try? c.decode(Double.self, forKey: .addedAt)
+        lastPlayedAt = try? c.decode(Double.self, forKey: .lastPlayedAt)
         qualities = try? c.decode(String.self, forKey: .qualities)
         source = try? c.decode(String.self, forKey: .source)
         providers = try? c.decode([String].self, forKey: .providers)
@@ -110,13 +112,14 @@ struct Show: Identifiable, Decodable, Hashable {
     let unwatched: Int?
     let genres: String?
     let addedAt: Double?
+    let lastPlayedAt: Double?
     let source: String?
     let providers: [String]?
     let alsoOn: [String]?
 
     enum CodingKeys: String, CodingKey {
         case id, title, year, poster, backdrop, overview, rating, episodes, unwatched
-        case genres, addedAt, source, providers, alsoOn
+        case genres, addedAt, lastPlayedAt, source, providers, alsoOn
     }
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
@@ -132,6 +135,7 @@ struct Show: Identifiable, Decodable, Hashable {
         unwatched = try? c.decode(Int.self, forKey: .unwatched)
         genres = try? c.decode(String.self, forKey: .genres)
         addedAt = try? c.decode(Double.self, forKey: .addedAt)
+        lastPlayedAt = try? c.decode(Double.self, forKey: .lastPlayedAt)
         source = try? c.decode(String.self, forKey: .source)
         providers = try? c.decode([String].self, forKey: .providers)
         alsoOn = try? c.decode([String].self, forKey: .alsoOn)
@@ -150,16 +154,18 @@ struct Collection: Identifiable, Decodable, Hashable {
     let id: String
     let name: String
     let count: Int?
+    let ids: [Int]?              // member movie ids, so a browse row can be built from it
     let poster: String?
     let backdrop: String?
 
-    enum CodingKeys: String, CodingKey { case id, name, count, poster, backdrop }
+    enum CodingKeys: String, CodingKey { case id, name, count, ids, poster, backdrop }
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
         if let i = try? c.decode(Int.self, forKey: .id) { id = String(i) }
         else { id = (try? c.decode(String.self, forKey: .id)) ?? UUID().uuidString }
         name = (try? c.decode(String.self, forKey: .name)) ?? "Collection"
         count = try? c.decode(Int.self, forKey: .count)
+        ids = try? c.decode([Int].self, forKey: .ids)
         poster = try? c.decode(String.self, forKey: .poster)
         backdrop = try? c.decode(String.self, forKey: .backdrop)
     }

@@ -8,7 +8,7 @@ struct HomeView: View {
     var body: some View {
         BrowseScreen(route: $route,
                      heroItems: Browse.heroMixed(store.movies, store.shows),
-                     rows: Browse.homeRows(store.movies, store.shows),
+                     rows: Browse.rows(.home, movies: store.movies, shows: store.shows, collections: store.collections),
                      continueKind: nil)
             .task { if store.movies.isEmpty { await store.loadHome() } }
     }
