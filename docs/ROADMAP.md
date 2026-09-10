@@ -461,11 +461,13 @@ filters, instant scrolling, 12-card rows, per-row layout+paint containment); nat
 ---
 
 ## 🔜 Next (start here — priority order)
-0. **Apple TV needs a TestFlight build to actually get the new rows.** The Swift side landed
-   with the web side (`appletv/Sources/BrowseRows.swift`, 2026-09-10) and the preview workflow
-   compiles it on every push, but the tvOS app only reaches the Apple TV through a **manual**
-   run of the `Apple TV app` workflow. Web, Android TV and webOS pick the change up from the
-   server; this one waits for the owner to press ship.
+0. **Verify the new browse rows on the real TVs.** Shipped to every client on 2026-09-10: the
+   Dell took the update (now on `da8d39e`, confirmed live against the real library — 1636
+   movies, 334 shows, 93 collections, 22 rows a visit out of a 73-row pool, a different hand
+   each reload), which carries web, Android TV and webOS; **TestFlight build 72** carries the
+   Apple TV. What's unverified is how it *reads* on a television: whether 13 rows is the right
+   number for a TV page, whether the emoji row titles land at 10 feet, and whether the seasonal
+   row is noticeable where it sits (second, under Continue Watching).
 0. **Skip Intro — REBUILT & re-enabled (2026-07-13).** Fixed the two things that got it pulled:
    (1) **accuracy** — `src/introdetect.js` now matches each episode against several others and keeps
    only the intro range a **consensus** of pairings agrees on (≥2 for 3+-episode seasons), so a
