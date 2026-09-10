@@ -750,10 +750,13 @@ final class Store: ObservableObject {
     // eligibility machinery (-1002/-11868/-12927). `start` begins the remux at
     // that keyframe (resume/deep-seek) — the client keeps position = start +
     // currentTime as its timeline base.
-    func hlsURL(kind: String, fileId: Int, start: Double = 0) -> URL? {
+    func hlsURL(kind: String, fileId: Int, start: Double = 0, atrack: Int? = nil) -> URL? {
         guard let t = token else { return nil }
         let st = start > 0 ? "&start=\(String(format: "%.2f", start))" : ""
-        return URL(string: "\(cleanBase)/api/hls/\(kind)/\(fileId)/index.m3u8?token=\(t)&\(audioQuery())\(st)")
+        // A media playlist carries one audio rendition, so choosing a track is
+        // a different remux rather than a selection inside the player.
+        let at = atrack.map { "&atrack=\($0)" } ?? ""
+        return URL(string: "\(cleanBase)/api/hls/\(kind)/\(fileId)/index.m3u8?token=\(t)&\(audioQuery())\(at)\(st)")
     }
 
     // Where will a copied stream asked to start at `start` REALLY begin? The

@@ -404,3 +404,43 @@ nobody writes. It was verified to fail by deleting a guard.
 `npm test` is the client rules only — fast, no ffmpeg. The optimizer's
 quality-gate suite needs ffmpeg with libvmaf and stays local as
 `npm run test:optimizer`.
+
+---
+
+## 2026-09-10 — The audio picker actually appears on 4K HDR
+
+It did not, and the reason was structural rather than a missing control.
+
+A 4K HDR title routes to the **AVPlayer** engine (the only tvOS pipeline that
+emits real HDR), fed by the server's HLS remux. An HLS **media playlist carries
+exactly one audio rendition**, so `AVMediaSelectionGroup` always reported a
+single option, `audioOptions.count > 1` was false, and the Audio section never
+rendered. The picker worked perfectly on every VLC file and was invisible on
+precisely the files with the interesting soundtracks.
+
+Changing track on that route is therefore **a new remux, not a selection inside
+the player**.
+
+- **Server** — `/api/hls/...` accepts `atrack=<n>`, the 0-based index among the
+  file's audio streams, and maps it instead of the Apple-native track `codecInfo`
+  picks for itself. It is part of the session key, so two viewers on two tracks
+  get two remuxes rather than one of them silently getting the other's. It is
+  carried through the playlist's segment URLs.
+- **Copy-vs-transcode is decided on the track being sent**, not the one that was
+  auto-picked. Asking for the DTS track transcodes it; copying it would hand the
+  Apple TV a stream it plays as silence.
+- **Client** — on the AV route the list comes from `/api/audio/list`, because the
+  player genuinely cannot know it. Choosing one re-requests the remux and
+  resumes at the same moment, the same way the reload after AI subtitles works.
+
+**TrueHD is deliberately absent from this menu.** Selecting it would make the
+server decode TrueHD to feed the remux, which `hls.js` already documents as able
+to crash ffmpeg outright and stall the stream. Losing the film to change a
+soundtrack is a bad trade. The VLC route still offers it — it decodes TrueHD in
+the player, where a failure costs nothing.
+
+The menu's tick mirrors the server's own preference order, so before you pick
+anything it marks the track you can actually hear rather than track 0. That logic
+is duplicated client-side on purpose: the alternative is a round trip before
+playback to ask a question whose answer is five lines. **If `PREF` in `hls.js`
+changes, change `hlsDefaultTrack` with it.**

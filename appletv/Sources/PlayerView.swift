@@ -635,6 +635,26 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     // The server's view of the same audio streams, used to label and rank them.
     @Published var serverAudio: [AudioTrack] = []
     private var audioRequested = false
+    // Which audio stream the HLS remux is currently being asked for. The player
+    // cannot report this — it only ever sees one rendition — so it is tracked.
+    private var avAudioIndex = 0
+    private var audioPickKnown = false
+
+    // What hls.js will have picked on its own: the first Apple-native codec in
+    // its preference order, else track 0. Duplicated here deliberately — the
+    // alternative is another round trip before playback to ask a question whose
+    // answer is five lines of logic. If the server's PREF list changes, change
+    // this with it.
+    static func hlsDefaultTrack(_ tracks: [AudioTrack]) -> Int {
+        let pref = ["eac3", "ac3", "aac", "alac", "mp3"]
+        var bestRank = Int.max
+        var chosen = tracks.first?.index ?? 0
+        for t in tracks {
+            guard let r = pref.firstIndex(of: t.codec.lowercased()) else { continue }
+            if r < bestRank { bestRank = r; chosen = t.index }
+        }
+        return chosen
+    }
     private var autoAudioApplied = false
     @Published var currentSubtitle = -1
     @Published var currentAudio = 0
@@ -1016,6 +1036,11 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
 
     // Populate the subtitle + audio menus from the HLS media-selection groups.
     private func refreshAVTracks(_ item: AVPlayerItem) {
+        // The audio list on this route comes from the server, not the player —
+        // see applyAudioPreference. refreshAudioTracks() is the VLC path and
+        // never runs here, so without this the list was never even requested.
+        loadServerAudio()
+        applyAudioPreference()
         let asset = item.asset
         if let g = asset.mediaSelectionGroup(forMediaCharacteristic: .legible) {
             avLegible = g
@@ -1304,10 +1329,32 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     func selectAudio(_ id: Int) {
         currentAudio = id
         if useAV {
-            if let g = avAudible, let item = av?.currentItem, id >= 0, id < g.options.count { item.select(g.options[id], in: g) }
+            // A media playlist has one audio rendition, so there is nothing to
+            // select in the player — the track has to come from the server. Ask
+            // for it and resume where we were.
+            avAudioIndex = id
+            avReloadForAudio(id)
             return
         }
         player.currentAudioTrackIndex = Int32(id)
+    }
+
+    // Re-request the remux with a different audio stream and pick playback back
+    // up at the same moment. Same shape as the reload after AI subtitles land.
+    private func avReloadForAudio(_ track: Int) {
+        guard useAV, let q = av, let store, let fid = fileId,
+              let url = store.hlsURL(kind: kind, fileId: fid, start: 0, atrack: track) else { return }
+        let at = q.currentTime()
+        let item = AVPlayerItem(url: url)
+        q.removeAllItems(); q.insert(item, after: nil)
+        avMainItem = item
+        avStatusObs = item.observe(\.status, options: [.new]) { [weak self] it, _ in
+            Task { @MainActor in
+                guard let self, it.status == .readyToPlay else { return }
+                self.av?.seek(to: at, toleranceBefore: .zero, toleranceAfter: .positiveInfinity)
+            }
+        }
+        q.play()
     }
     // Batch 2 parity: the RIGHT audio track, not merely the first one.
     //
@@ -1328,6 +1375,32 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     }
 
     private func applyAudioPreference() {
+        // On the AVPlayer route the track list cannot come from the player: an
+        // HLS media playlist carries ONE audio rendition, so AVMediaSelection
+        // always reports a single option and the Audio menu never appeared on
+        // exactly the 4K HDR files that route this way. The server's list is
+        // the real one; switching is a re-request, not an in-player selection.
+        if useAV {
+            guard !serverAudio.isEmpty else { return }
+            // TrueHD is deliberately not offered on this route. Choosing it
+            // would make the server DECODE TrueHD to feed the remux, which
+            // hls.js documents as able to crash ffmpeg outright and stall the
+            // stream — losing the film to change a soundtrack is a bad trade.
+            // Every other track is either copied or transcoded safely. The
+            // VLC route is unaffected: it decodes TrueHD in the player.
+            let offerable = serverAudio.filter { !["truehd", "mlp"].contains($0.codec.lowercased()) }
+            guard !offerable.isEmpty else { return }
+            audioOptions = offerable.map { TrackOption(id: $0.index, label: $0.label) }
+            // Until the viewer picks, the playing track is whichever one the
+            // server chose for itself. Work that out rather than assuming the
+            // first, or the menu ticks a track that is not the one you can hear.
+            if !audioPickKnown {
+                audioPickKnown = true
+                avAudioIndex = PlayerModel.hlsDefaultTrack(offerable)
+                currentAudio = avAudioIndex
+            }
+            return
+        }
         guard !serverAudio.isEmpty, serverAudio.count == audioOptions.count else { return }
         // Better labels either way — "ENG · DTS · 5.1" beats "Track 1".
         audioOptions = zip(audioOptions, serverAudio).map { TrackOption(id: $0.id, label: $1.label) }
@@ -1429,6 +1502,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         serverAudio = []; audioRequested = false; autoAudioApplied = false
         upNextDismissed = false
         scrubTarget = nil; seekPending = nil; scrubCommit?.cancel(); scrubCommit = nil
+        audioPickKnown = false; avAudioIndex = 0
         // A Live TV channel mixes films and episodes, so the endpoint — and the
         // kind everything downstream reports and probes with — has to follow
         // what is actually being played, not what came before it.

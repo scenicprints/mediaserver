@@ -63,9 +63,15 @@ function audioOptsFromQuery(q) {
   // start=<sec>: begin the remux AT that keyframe (resume/deep-seek — the
   // Plex model). The client resolves the exact keyframe via /api/seekpoint
   // first and keeps `position = start + currentTime` as its timeline base.
+  // atrack=<n>: play THIS audio stream (0-based among audio streams), instead
+  // of the Apple-native one codecInfo picks. The HDR path is AVPlayer-only and
+  // a media playlist carries exactly one audio rendition, so switching track is
+  // a new remux — there is no in-player alternative on this route.
+  const at = parseInt(q.atrack, 10);
   return {
     forceStereo: q.audio !== 'surround',
     forceAac: q.aac === '1',
+    atrack: Number.isInteger(at) && at >= 0 ? at : null,
     start: Math.max(0, parseFloat(q.start) || 0)
   };
 }
@@ -75,7 +81,8 @@ function fileRow(db, kind, fileId) {
 }
 function key(kind, fileId, opts) {
   const st = opts.start > 0 ? `-st${Math.round(opts.start)}` : '';
-  return `${kind}-${fileId}-${opts.forceStereo ? 's' : 'x'}${opts.forceAac ? 'a' : ''}${st}`.replace(/[^a-z0-9-]/gi, '');
+  const at = opts.atrack != null ? `-t${opts.atrack}` : '';
+  return `${kind}-${fileId}-${opts.forceStereo ? 's' : 'x'}${opts.forceAac ? 'a' : ''}${at}${st}`.replace(/[^a-z0-9-]/gi, '');
 }
 
 // Probe once (cached ~10 min): the video/audio codec names + duration decide
@@ -125,6 +132,9 @@ async function codecInfo(filePath) {
     // Real overall bitrate (+10% headroom) for the master's BANDWIDTH, like Plex.
     bandwidth: duration > 0 && size > 0 ? Math.round((size * 8 / duration) * 1.1) : 20000000,
     acodec: aStream && String(aStream.codec_name || '').toLowerCase(),
+    // Every audio stream's codec, indexed the same way `atrack` is, so an
+    // explicitly requested track can be checked before it is copied.
+    audioCodecs: audio.map((x) => String(x.codec_name || '').toLowerCase()),
     aMap,
     duration
   };
@@ -202,7 +212,7 @@ function audioCodecTag(acodec) {
 // Propagate the query the segment/init/subtitle URIs need (AVPlayer resolves
 // them relative to the playlist and drops the query — including ?token=).
 function passQuery(q) {
-  const keep = ['token', 'audio', 'aac', 'start'];
+  const keep = ['token', 'audio', 'aac', 'atrack', 'start'];
   const parts = [];
   for (const k of keep) if (q[k] != null && q[k] !== '') parts.push(`${k}=${encodeURIComponent(q[k])}`);
   return parts.length ? '?' + parts.join('&') : '';
@@ -256,7 +266,14 @@ function spawnFfmpeg(s, filePath, opts, ci) {
   if (!ff) throw new Error('ffmpeg not installed');
   const nvenc = !!ffStatus().nvenc;
   const vcopy = !!ci.vcodec && APPLE_VIDEO.has(ci.vcodec);
-  const acopy = !!ci.acodec && APPLE_AUDIO.has(ci.acodec) && !opts.forceAac;
+  // An explicit request wins over the automatic pick.
+  const aIndex = opts.atrack != null ? opts.atrack : (ci.aMap || 0);
+  // Judge the track we are ACTUALLY sending. Copying is only safe for a codec
+  // Apple can decode; asking for the DTS track must transcode it rather than
+  // hand the Apple TV something it will play as silence. This is also why
+  // TrueHD is never copied — decoding it can crash ffmpeg outright.
+  const aCodec = (ci.audioCodecs && ci.audioCodecs[aIndex]) || ci.acodec;
+  const acopy = !!aCodec && APPLE_AUDIO.has(aCodec) && !opts.forceAac;
 
   const args = ['-hide_banner', '-loglevel', 'error'];
   // GPU decode only helps when we must actually re-encode video; a copy needs no
@@ -269,7 +286,7 @@ function spawnFfmpeg(s, filePath, opts, ci) {
   // Map the best (Apple-native, copyable) audio track chosen in codecInfo — not
   // blindly track 0 — so a TrueHD/DTS-HD track 0 doesn't force a crash-prone
   // decode when the file also carries an AC-3/E-AC-3 track we can copy.
-  args.push('-i', filePath, '-map', '0:v:0', '-map', `0:a:${ci.aMap || 0}?`, '-sn', '-dn');
+  args.push('-i', filePath, '-map', '0:v:0', '-map', `0:a:${aIndex}?`, '-sn', '-dn');
 
   if (vcopy) {
     args.push('-c:v', 'copy');
