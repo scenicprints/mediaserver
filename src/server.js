@@ -131,7 +131,12 @@ const INVITE_CODE = String(config.inviteCode || 'CHANGE-ME');
 const HTTPS = !!config.https; // set once we're behind TLS, to mark cookies Secure
 
 // Endpoints reachable without a session (everything else under /api requires one).
-const AUTH_PUBLIC = new Set(['/api/auth/status', '/api/register', '/api/login']);
+// '/api/local/activity' answers one question — how many people are watching
+// right now — and answers it ONLY to 127.0.0.1. It is public because the thing
+// that needs it, the optimizer, is a separate program with no account here, and
+// it went to work during other people's films for want of being able to ask.
+// It returns a count and nothing else: no titles, no users, no addresses.
+const AUTH_PUBLIC = new Set(['/api/auth/status', '/api/register', '/api/login', '/api/local/activity']);
 
 function currentUser(req) {
   const tok = tokenFromReq(req);
@@ -1348,6 +1353,29 @@ app.post('/api/session/end', async (req) => {
 
 // Admin: everyone currently watching, with the troubleshooting detail (engine,
 // progress, buffer health, device) the "Now Playing" settings tab renders.
+// Is anyone watching? Loopback only.
+//
+// The optimizer rewrites multi-gigabyte files and must never do it while
+// someone is mid-film. It used to ask /api/admin/sessions, got 401 because it
+// has no login, read that as "cannot tell", and carried on working anyway —
+// so the one rule that matters, playback beats housekeeping, silently did
+// nothing for as long as it existed.
+app.get('/api/local/activity', async (req, reply) => {
+  const ip = String(req.ip || '');
+  if (ip !== '127.0.0.1' && ip !== '::1' && ip !== '::ffff:127.0.0.1') {
+    return reply.code(403).send({ error: 'loopback only' });
+  }
+  // A session is live if it has reported in recently; a browser that was closed
+  // without saying so must not hold the optimizer off for ever.
+  const cutoff = Date.now() - 90_000;
+  let watching = 0;
+  for (const s of sessions.values()) {
+    const seen = Number(s.lastSeen || s.updatedAt || s.startedAt || 0);
+    if (seen >= cutoff && !s.paused) watching++;
+  }
+  return { watching, sessions: sessions.size };
+});
+
 app.get('/api/admin/sessions', async (req, reply) => {
   if (!requireAdmin(req, reply)) return;
   pruneSessions();
