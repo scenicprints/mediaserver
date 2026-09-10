@@ -964,6 +964,11 @@ body.tv-nav .nav-link { font-size: 17px; padding: 9px 12px; }
 .acct-role { color: var(--accent-2); font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; font-weight: 700; }
 .acct-item { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 4px; border-bottom: 1px solid var(--line); }
 
+/* Admin: set another account's OpenSubtitles login (they send you the key). */
+.os-admin { padding: 12px; margin-bottom: 8px; background: var(--panel-2); border: 1px solid var(--line); border-top: none; }
+.os-admin .muted { margin-bottom: 8px; }
+.os-admin .oa-status { font-size: 13px; }
+
 /* Server-level settings are hidden unless the signed-in user is an admin. */
 .admin-only { display: none; }
 body.is-admin .admin-only { display: block; }

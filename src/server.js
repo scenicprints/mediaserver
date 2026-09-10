@@ -324,7 +324,14 @@ app.get('/api/me', async (req) => ({ user: req.user }));
 // Admin: manage accounts (you add your friend here — no server-level access for them).
 app.get('/api/users', async (req, reply) => {
   if (!requireAdmin(req, reply)) return;
-  return db.prepare('SELECT id, username, role, created_at FROM users ORDER BY created_at').all();
+  const users = db.prepare('SELECT id, username, role, created_at FROM users ORDER BY created_at').all();
+  // So the admin list can show who still needs a subtitle account. Only the status
+  // and the OpenSubtitles username travel - never the key or the password.
+  for (const u of users) {
+    const os = userOS(u.id);
+    u.openSubtitles = { configured: osEnabled(os), username: os.username || '' };
+  }
+  return users;
 });
 
 app.post('/api/users', async (req, reply) => {
@@ -767,9 +774,15 @@ app.get('/api/version', async () => gitInfo());
 
 // Short, easy-to-type link for sideloading the Android TV app onto a new TV
 // (typing the full GitHub release URL on a remote is painful). Public on purpose.
-app.get('/tv', async (req, reply) =>
-  reply.redirect('https://github.com/scenicprints/mediaserver/releases/download/marquee-tv-latest/app-release.apk')
-);
+//
+// Hands over the armeabi-v7a split, NOT the universal build. Every arm64 Android
+// device also runs armeabi-v7a, so this one file installs everywhere, while the
+// universal APK is 94 MB because it carries both libVLCs - and the 32-bit VAVA
+// projector can never load the arm64 half it would be paying for. /tv/64 is there
+// for a 64-bit device that wants its native build.
+const APK = 'https://github.com/scenicprints/mediaserver/releases/download/marquee-tv-latest/';
+app.get('/tv', async (req, reply) => reply.redirect(APK + 'app-armeabi-v7a-release.apk'));
+app.get('/tv/64', async (req, reply) => reply.redirect(APK + 'app-arm64-v8a-release.apk'));
 
 // Ask GitHub whether newer code exists (fetches, then compares local vs remote).
 // Async git — the fetch can take seconds, and a synchronous call here would
@@ -1963,22 +1976,40 @@ app.post('/api/settings/preroll', async (req, reply) => {
   return { path: config.prerollPath || '', available: !!prerollFile() };
 });
 
-// Each user saves their own OpenSubtitles login (per-user, so quotas don't mix).
-app.post('/api/settings/opensubtitles', async (req, reply) => {
-  const { apiKey, username, password } = req.body || {};
+// Save an OpenSubtitles login into a user's settings. A blank field means "leave
+// this one alone" - the Settings form never fills the key or password back in, so
+// re-saving to change one field must not silently wipe the other two. Pass
+// clear:true to remove the account outright.
+function saveUserOS(userId, body) {
+  const { apiKey, username, password, clear } = body || {};
   const vals = {
-    'os:apiKey': (apiKey || '').trim(),
-    'os:username': (username || '').trim(),
+    'os:apiKey': String(apiKey || '').trim(),
+    'os:username': String(username || '').trim(),
     'os:password': password || ''
   };
   const upsert = db.prepare('INSERT INTO user_settings (user_id, key, value) VALUES (?, ?, ?) ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value');
   const del = db.prepare('DELETE FROM user_settings WHERE user_id = ? AND key = ?');
   for (const [k, v] of Object.entries(vals)) {
-    if (v) upsert.run(req.user.id, k, v); else del.run(req.user.id, k);
+    if (clear) del.run(userId, k);
+    else if (v) upsert.run(userId, k, v);
   }
-  const os = userOS(req.user.id);
+  const os = userOS(userId);
   clearAuth(os); // drop this account's cached login token
-  return { ok: true, configured: osEnabled(os) };
+  return { ok: true, configured: osEnabled(os), username: os.username || '' };
+}
+
+// Each user saves their own OpenSubtitles login (per-user, so quotas don't mix).
+app.post('/api/settings/opensubtitles', async (req) => saveUserOS(req.user.id, req.body));
+
+// Admin: set someone else's OpenSubtitles login, for when they hand you their key
+// rather than typing it in themselves. Same blank-means-leave-alone rules.
+app.post('/api/users/:id/opensubtitles', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const id = Number(req.params.id);
+  if (!db.prepare('SELECT 1 FROM users WHERE id = ?').get(id)) {
+    return reply.code(404).send({ error: 'not found' });
+  }
+  return saveUserOS(id, req.body);
 });
 
 // ---- Boot ----

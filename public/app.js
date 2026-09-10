@@ -2989,6 +2989,7 @@ const osUser = document.getElementById('os-user');
 const osPass = document.getElementById('os-pass');
 const osStatus = document.getElementById('os-status');
 const osSave = document.getElementById('os-save');
+const osClear = document.getElementById('os-clear');
 const pickerState = { path: null, parent: null, type: 'movie' };
 
 document.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', () => { document.getElementById(b.dataset.close).classList.add('hidden'); if (b.dataset.close === 'settings') { stopSessionsPolling(); stopDiagPolling(); } }));
@@ -3561,8 +3562,8 @@ async function loadSettings() {
       const nameEl = document.getElementById('acct-name'); if (nameEl) nameEl.textContent = s.user.username;
       const roleEl = document.getElementById('acct-role'); if (roleEl) roleEl.textContent = s.user.role === 'admin' ? 'admin' : '';
     }
-    if (s.openSubtitles.configured) { osStatus.textContent = '✓ Subtitle search is on' + (s.openSubtitles.username ? ' (' + s.openSubtitles.username + ')' : '') + '.'; osUser.value = s.openSubtitles.username || ''; }
-    else osStatus.textContent = 'Add your free OpenSubtitles account to enable subtitle search.';
+    paintOsStatus(s.openSubtitles);
+    if (s.openSubtitles.configured) osUser.value = s.openSubtitles.username || '';
     // Off-network viewers get the smaller version of a title by default; see
     // preferredFile. The server decides "remote", not the client.
     if (typeof s.remote === 'boolean') isRemoteViewer = s.remote;
@@ -3593,6 +3594,62 @@ async function loadUsers() {
     const label = document.createElement('span');
     label.textContent = u.username + (u.role === 'admin' ? ' · admin' : '') + (isMe ? ' (you)' : '');
     row.appendChild(label);
+    // For someone who'd rather send you their OpenSubtitles key than type it in
+    // themselves: paste it here and it lands on their account, not yours.
+    let form = null;
+    if (!isMe) {
+      const subBtn = document.createElement('button');
+      subBtn.className = 'btn';
+      const paintSubBtn = (on, who) => {
+        subBtn.textContent = on ? '✓ Subtitles' : 'Subtitles…';
+        subBtn.title = on
+          ? 'OpenSubtitles is set up' + (who ? ' (' + who + ')' : '')
+          : 'Set up this account’s OpenSubtitles login';
+      };
+      paintSubBtn(!!(u.openSubtitles && u.openSubtitles.configured), u.openSubtitles && u.openSubtitles.username);
+
+      form = document.createElement('div');
+      form.className = 'os-admin hidden';
+      form.innerHTML = `
+        <p class="muted">Paste what ${escapeHtml(u.username)} sent you. Anything left blank stays as it is.</p>
+        <input class="sa-input oa-key" placeholder="API key" autocomplete="off" />
+        <input class="sa-input oa-user" placeholder="OpenSubtitles username" autocomplete="off" />
+        <input class="sa-input oa-pass" type="password" placeholder="OpenSubtitles password" autocomplete="new-password" />
+        <div class="add-row" style="margin-bottom:0">
+          <button class="btn primary oa-save">Save for ${escapeHtml(u.username)}</button>
+          <span class="oa-status muted"></span>
+        </div>`;
+      if (u.openSubtitles && u.openSubtitles.username) form.querySelector('.oa-user').value = u.openSubtitles.username;
+      const oaStatus = form.querySelector('.oa-status');
+      form.querySelector('.oa-save').addEventListener('click', async (e) => {
+        const btn = e.target;
+        btn.disabled = true; oaStatus.textContent = 'Saving…';
+        let d = {};
+        try {
+          d = await (await fetch('/api/users/' + u.id + '/opensubtitles', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              apiKey: form.querySelector('.oa-key').value.trim(),
+              username: form.querySelector('.oa-user').value.trim(),
+              password: form.querySelector('.oa-pass').value
+            })
+          })).json();
+        } catch (_e) {}
+        btn.disabled = false;
+        oaStatus.textContent = d.configured
+          ? '✓ Subtitle search is on for ' + u.username + '.'
+          : (d.error || 'Could not save.');
+        form.querySelector('.oa-key').value = '';
+        form.querySelector('.oa-pass').value = '';
+        if (d.username) form.querySelector('.oa-user').value = d.username;
+        paintSubBtn(!!d.configured, d.username);
+      });
+
+      subBtn.addEventListener('click', () => form.classList.toggle('hidden'));
+      row.appendChild(subBtn);
+    }
+
     if (!isMe && u.role !== 'admin') {
       const del = document.createElement('button');
       del.className = 'btn'; del.textContent = 'Remove';
@@ -3604,6 +3661,7 @@ async function loadUsers() {
       row.appendChild(del);
     }
     list.appendChild(row);
+    if (form) list.appendChild(form);
   }
 }
 
@@ -3620,13 +3678,29 @@ if (nuAdd) nuAdd.addEventListener('click', async () => {
   if (r.ok) { u.value = ''; p.value = ''; loadUsers(); }
   else { const d = await r.json().catch(() => ({})); alert(d.error || 'Could not add user.'); }
 });
+function paintOsStatus(d) {
+  osStatus.textContent = d && d.configured
+    ? '✓ Subtitle search is on' + (d.username ? ' (' + d.username + ')' : '') + '.'
+    : 'Add your free OpenSubtitles account to enable subtitle search.';
+  if (osClear) osClear.classList.toggle('hidden', !(d && d.configured));
+}
+// The key and password boxes come back empty every time Settings opens, so a blank
+// field means "leave that one alone" — changing your username can't wipe your key.
 osSave.addEventListener('click', async () => {
   osSave.textContent = 'Saving…'; osSave.disabled = true;
   let d = {};
   try { d = await (await fetch('/api/settings/opensubtitles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ apiKey: osKey.value.trim(), username: osUser.value.trim(), password: osPass.value }) })).json(); } catch (_e) {}
   osSave.textContent = 'Save subtitle account'; osSave.disabled = false;
-  osStatus.textContent = d.configured ? '✓ Saved — subtitle search is on.' : 'Saved.';
+  paintOsStatus(d);
   osKey.value = ''; osPass.value = '';
+  if (d.username) osUser.value = d.username;
+});
+if (osClear) osClear.addEventListener('click', async () => {
+  if (!confirm('Disconnect your OpenSubtitles account? Subtitle search turns off until you add it again.')) return;
+  let d = {};
+  try { d = await (await fetch('/api/settings/opensubtitles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clear: true }) })).json(); } catch (_e) {}
+  osKey.value = ''; osUser.value = ''; osPass.value = '';
+  paintOsStatus(d);
 });
 
 async function checkForUpdate() {
