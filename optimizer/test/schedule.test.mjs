@@ -19,7 +19,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const SRC = fs.readFileSync(path.join(HERE, '..', 'engine-host.mjs'), 'utf8');
+// Newlines are normalised because this test reads source as text, and the
+// file's line endings are not the contract — a CRLF round-trip made by an
+// unrelated edit once hid every case here behind one scraping failure.
+const SRC = fs.readFileSync(path.join(HERE, '..', 'engine-host.mjs'), 'utf8').split('\r\n').join('\n');
 
 // The window helpers are internal to the module by design — nothing outside it
 // should be deciding when the optimizer may run. Lift them out to test the

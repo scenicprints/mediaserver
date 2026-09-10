@@ -22,7 +22,7 @@ import { tierOf } from './engine.mjs';
 // the exact byte length. Two different episodes never collide on that, and it
 // turns a 200 GB read into a few hundred megabytes. A full hash is available
 // with { full: true } when certainty matters more than time.
-async function fingerprint(file, { full = false } = {}) {
+export async function fingerprint(file, { full = false } = {}) {
   const CHUNK = 64 * 1024 * 1024;
   const h = crypto.createHash('sha256');
   const size = fs.statSync(file).size;
