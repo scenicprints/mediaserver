@@ -136,6 +136,9 @@ filters, instant scrolling, 12-card rows, per-row layout+paint containment); nat
   leans on a genre carries a `topic`, and a claimed topic blocks the plain genre row, so
   "Documentary" and "🎬 Documentaries" can never stack. Rows work on `{x, kind}` pairs, so Home
   rows mix movies and shows instead of Home being a movies page with two show rows on it.
+  **Apple TV** gets the same pool and the same calendar in `appletv/Sources/BrowseRows.swift`,
+  replacing its own fixed `movieRows`/`showRows`; Android TV and webOS load the web UI, so they
+  pick it up with the server.
   **Seasonal**: the old month-keyed themes were genre mush wearing a season's name (September =
   "🍁 Fall Dramas" = any Drama ≥ 6.5). Replaced with a dated calendar of real occasions —
   New Year, Super Bowl, Valentine's, Presidents Day, St. Patrick's, Easter, Earth Day, May the
@@ -458,11 +461,11 @@ filters, instant scrolling, 12-card rows, per-row layout+paint containment); nat
 ---
 
 ## 🔜 Next (start here — priority order)
-0. **Apple TV rows are now behind the web app.** `appletv/Sources/Browse.swift` has its own
-   `movieRows`/`showRows` — a fixed list, emitted in a fixed order, with no seasonal row and no
-   rotation. The web UI (which is also what Android TV and webOS load) got the pool + calendar on
-   2026-09-10; the tvOS app didn't, deliberately, since it ships through cloud CI on the owner's
-   say-so. Port `chooseRows`/`seasonalCalendar` to Swift when the app next goes out.
+0. **Apple TV needs a TestFlight build to actually get the new rows.** The Swift side landed
+   with the web side (`appletv/Sources/BrowseRows.swift`, 2026-09-10) and the preview workflow
+   compiles it on every push, but the tvOS app only reaches the Apple TV through a **manual**
+   run of the `Apple TV app` workflow. Web, Android TV and webOS pick the change up from the
+   server; this one waits for the owner to press ship.
 0. **Skip Intro — REBUILT & re-enabled (2026-07-13).** Fixed the two things that got it pulled:
    (1) **accuracy** — `src/introdetect.js` now matches each episode against several others and keeps
    only the intro range a **consensus** of pairings agrees on (≥2 for 3+-episode seasons), so a
