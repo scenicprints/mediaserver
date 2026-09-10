@@ -135,6 +135,41 @@ async function work(limit) {
   return queued;
 }
 
+// ---- One at a time -----------------------------------------------------
+//
+// Two optimizers on the same library is the worst case this program has: both
+// reading and writing multi-gigabyte files on the same tired USB disks at once,
+// which is the exact condition that made this machine unresponsive twice, and
+// both picking jobs out of the same queue with no idea the other exists.
+//
+// It happened for real on 2026-09-09 — a hand-started run and the service, side
+// by side — so the program now refuses rather than trusting whoever starts it
+// to check first. Read-only commands are unaffected; they touch nothing.
+const LOCK = path.join(ROOT, 'data', 'optimizer.lock');
+const NEEDS_LOCK = ['work', 'watch'];
+
+function alive(pid) {
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
+}
+
+function takeLock() {
+  try {
+    const held = JSON.parse(fs.readFileSync(LOCK, 'utf8'));
+    if (held.pid && held.pid !== process.pid && alive(held.pid)) {
+      log(`another optimizer is already running (pid ${held.pid}, started ${new Date(held.at).toLocaleString()}).`);
+      log('Refusing to start a second one — two of these on the same drives is how the machine locks up.');
+      process.exit(1);
+    }
+    // The holder is gone; the lock is stale and ours to take.
+  } catch { /* no lock, or unreadable: take it */ }
+  fs.writeFileSync(LOCK, JSON.stringify({ pid: process.pid, at: Date.now(), cmd }), 'utf8');
+  const release = () => { try { const h = JSON.parse(fs.readFileSync(LOCK, 'utf8')); if (h.pid === process.pid) fs.rmSync(LOCK, { force: true }); } catch {} };
+  process.on('exit', release);
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { release(); process.exit(130); });
+}
+
+if (NEEDS_LOCK.includes(cmd)) takeLock();
+
 const st = await ff.detect(ROOT, config);
 if (!st.available) { console.error('ffmpeg not found — nothing can run'); process.exit(1); }
 
