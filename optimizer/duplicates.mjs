@@ -65,6 +65,50 @@ function scoreCopy(r) {
   return { score, reasons };
 }
 
+// Is this file safe to delete as a duplicate, RIGHT NOW?
+//
+// The report is a snapshot and the owner acts on it later — possibly much
+// later, possibly after the library has changed underneath it. So nothing is
+// taken on trust from the report: the twin is found again and the bytes are
+// compared again at the moment of deletion. A stale report must not be able to
+// delete the last copy of anything.
+//
+// Returns { ok, keeper, reason }. Only ok:true is safe to act on.
+export async function confirmDropSafe(db, fileKind, fileId, { full = false } = {}) {
+  const me = db.prepare('SELECT * FROM media_info WHERE file_kind = ? AND file_id = ?').get(fileKind, fileId);
+  if (!me) return { ok: false, reason: 'not in the library' };
+  if (me.probe_error) return { ok: false, reason: 'this file cannot be read, so it cannot be compared' };
+  if (!fs.existsSync(me.path)) return { ok: false, reason: 'already gone from disk' };
+
+  // The owner's rule, enforced here and not merely reported: 4K is never
+  // deleted as a duplicate.
+  if (tierOf(me.width, me.height) === '4K') {
+    return { ok: false, reason: '4K — never deleted as a duplicate' };
+  }
+
+  // Find the same cheap group the report used, then prove it by reading.
+  const peers = db.prepare(`
+    SELECT * FROM media_info
+    WHERE file_kind IS NOT NULL AND size = ? AND width = ? AND height = ? AND vcodec IS ?
+      AND NOT (file_kind = ? AND file_id = ?)`)
+    .all(me.size, me.width, me.height, me.vcodec, fileKind, fileId)
+    .filter((p) => Math.abs((Number(p.duration) || 0) - (Number(me.duration) || 0)) < 1);
+
+  if (!peers.length) return { ok: false, reason: 'nothing else in the library looks like this file' };
+
+  let mine;
+  try { mine = await fingerprint(me.path, { full }); }
+  catch (e) { return { ok: false, reason: 'could not read this file: ' + e.message }; }
+
+  for (const p of peers) {
+    if (!fs.existsSync(p.path)) continue;
+    let theirs;
+    try { theirs = await fingerprint(p.path, { full }); } catch { continue; }
+    if (theirs === mine) return { ok: true, keeper: p, reason: null };
+  }
+  return { ok: false, reason: 'no surviving copy has identical bytes — this may be the only one' };
+}
+
 export async function findDuplicates(db, { log = () => {}, full = false, onProgress = null } = {}) {
   const rows = db.prepare(`
     SELECT mi.*, COALESCE(m.title, s.title) AS title

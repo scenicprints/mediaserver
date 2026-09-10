@@ -18,6 +18,10 @@
 //   node optimizer/run.mjs watch       stay running; handle new content as it lands
 //   node optimizer/run.mjs duplicates  find real duplicates and recommend which
 //                                      copy to keep. Reports only, never deletes.
+//   node optimizer/run.mjs drop <k:id> [...]  delete a copy the report named, after
+//                                      proving all over again that an identical
+//                                      twin still exists. This is the only part
+//                                      of the program that deletes on request.
 //   node optimizer/run.mjs stuck       what it has given up on and why
 //   node optimizer/run.mjs retry [id]  put stuck work back in the queue. With no
 //                                      id, everything that failed for a reason
@@ -29,14 +33,44 @@ import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import * as ff from './ffmpeg.mjs';
 import * as engine from './engine.mjs';
-import { findDuplicates } from './duplicates.mjs';
+import { findDuplicates, confirmDropSafe } from './duplicates.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const cmd = process.argv[2] || 'status';
 const arg = Number(process.argv[3]) || 0;
 
 const stamp = () => new Date().toISOString().replace('T', ' ').slice(0, 19);
-const log = (m) => console.log(`[${stamp()}] ${m}`);
+
+// ---- The log survives the window --------------------------------------
+//
+// This runs unattended, for weeks, in a console window nobody is watching. Up
+// to now that window WAS the log: close it, or reboot, and every decision it
+// made went with it. That is the wrong property for the one program on this
+// machine that deletes things, and after 2026-09-08 it is the wrong property
+// twice over.
+//
+// Kept deliberately dumb — append a line, roll the file when it gets big. No
+// dependency, nothing to configure, and nothing that can fail in a way that
+// stops the actual work: every write is best-effort.
+const LOG_FILE = path.join(ROOT, 'data', 'optimizer.log');
+const LOG_MAX = 8 * 1024 * 1024;
+
+function logToFile(line) {
+  try {
+    // Roll once, keeping one generation. Two files of bounded size beats an
+    // unbounded one, and beats losing the history entirely.
+    try {
+      if (fs.statSync(LOG_FILE).size > LOG_MAX) fs.renameSync(LOG_FILE, LOG_FILE + '.1');
+    } catch { /* no log yet, or the roll failed — either way, carry on */ }
+    fs.appendFileSync(LOG_FILE, line + '\r\n', 'utf8');
+  } catch { /* logging must never be the thing that stops the work */ }
+}
+
+const log = (m) => {
+  const line = `[${stamp()}] ${m}`;
+  console.log(line);
+  logToFile(line);
+};
 const TB = (b) => (Number(b) / 2 ** 40).toFixed(2) + ' TiB';
 const GB = (b) => (Number(b) / 2 ** 30).toFixed(1) + ' GB';
 
@@ -249,13 +283,52 @@ if (cmd === 'status') {
       log(`${GB(d.size)}  ${d.title}${d.note ? '   [' + d.note + ']' : ''}`);
       log(`   KEEP  ${d.keep.r.path}`);
       log(`         (${d.keep.reasons.join(', ') || 'no particular advantage'})`);
-      for (const x of d.drop) log(`   DROP  ${x.r.path}`);
+      for (const x of d.drop) log(`   DROP  ${x.r.file_kind}:${x.r.file_id}  ${x.r.path}`);
     }
     log('');
     log(`${res.confirmed.length} duplicate group(s), ${GB(total)} reclaimable if you remove the DROP copies.`);
-    log('Nothing has been deleted. Review the list and remove what you want gone.');
+    log('Nothing has been deleted.');
+    log('To remove one, pass its id:   node optimizer/run.mjs drop movie:1234');
+    log('It is checked again at that point, so an out-of-date list cannot delete the last copy.');
   }
   log(`${res.falsePositives} candidate group(s) turned out to be different files that merely look identical.`);
+} else if (cmd === 'drop') {
+  // The owner's decision, taken one file at a time and re-proved before it is
+  // acted on. Nothing here is automatic and nothing here is bulk.
+  const targets = process.argv.slice(3).filter((a) => /^(movie|episode):\d+$/i.test(a));
+  if (!targets.length) {
+    log('Nothing to do. Pass ids from the duplicates report, e.g.:');
+    log('  node optimizer/run.mjs drop movie:1234 episode:5678');
+    process.exit(1);
+  }
+  let freed = 0, gone = 0;
+  for (const t of targets) {
+    const [kind, idStr] = t.split(':');
+    const fileId = parseInt(idStr, 10);
+    const row = db.prepare('SELECT path, size FROM media_info WHERE file_kind = ? AND file_id = ?').get(kind, fileId);
+    const name = row ? path.basename(row.path) : t;
+
+    const check = await confirmDropSafe(db, kind, fileId, { full: process.argv.includes('--full') });
+    if (!check.ok) { log(`REFUSED ${name}: ${check.reason}`); continue; }
+
+    log(`${name}`);
+    log(`  identical to ${check.keeper.path}`);
+    try {
+      fs.rmSync(row.path, { force: true });
+    } catch (e) { log(`  FAILED to delete: ${e.message}`); continue; }
+
+    // Take it out of the library too, or Marquee keeps offering a file that is
+    // no longer there.
+    const table = kind === 'episode' ? 'episode_files' : 'movie_files';
+    try { db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(fileId); } catch (e) { log('  (library row: ' + e.message + ')'); }
+    try { db.prepare('DELETE FROM media_info WHERE file_kind = ? AND file_id = ?').run(kind, fileId); } catch {}
+
+    freed += Number(row.size) || 0;
+    gone++;
+    log('  deleted; the copy above is untouched.');
+  }
+  log('');
+  log(`Removed ${gone} of ${targets.length} requested. ${GB(freed)} freed.`);
 } else if (cmd === 'watch') {
   // How this is meant to run: unattended, for good. It clears whatever backlog
   // exists, then wakes every 15 minutes to pick up new content.
@@ -278,6 +351,6 @@ if (cmd === 'status') {
     await new Promise((r) => setTimeout(r, 15 * 60 * 1000));
   }
 } else {
-  console.error(`unknown command "${cmd}" — try status, scan, plan, work, watch, duplicates, stuck or retry`);
+  console.error(`unknown command "${cmd}" — try status, scan, plan, work, watch, duplicates, drop, stuck or retry`);
   process.exit(1);
 }
