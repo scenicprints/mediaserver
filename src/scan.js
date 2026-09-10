@@ -157,6 +157,18 @@ export async function pruneMissing(db) {
   return { removed };
 }
 
+// Folders whose contents are another program's output rather than source media.
+//
+// "Plex Versions" holds what Plex's "Optimize for TV" produced: a re-encode of
+// the episode sitting next to it. Walking into it indexed 127 of those as real
+// episodes, so Attack on Titan S03E13 appeared with two files, one a transcode
+// of the other — and the transcode was usually the LARGER of the two, so any
+// rule that picked by size would have preferred it.
+//
+// Matched as a whole folder name, never as a substring, so a show called
+// "Plex Versions Documentary" would still be scanned.
+const GENERATED_DIRS = new Set(['plex versions']);
+
 async function walk(dir, cb) {
   let entries;
   try {
@@ -167,6 +179,7 @@ async function walk(dir, cb) {
   for (const e of entries) {
     const full = path.join(dir, e.name);
     if (e.isDirectory()) {
+      if (GENERATED_DIRS.has(e.name.toLowerCase())) continue;
       await walk(full, cb);
     } else if (e.isFile()) {
       let stat;
