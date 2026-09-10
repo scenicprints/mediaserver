@@ -28,6 +28,12 @@ const LOG_MAX = 8 * 1024 * 1024;
 // the duplicate finder are always there — only the encoding is scheduled.
 const DEFAULT_WINDOW = { from: '00:00', to: '05:00' };
 
+// How many of each kind of job to line up per cycle. Separate numbers, because
+// one shared number meant storage starved compatibility completely — see the
+// queueing block below.
+const COMPAT_PER_CYCLE = 3;
+const STORAGE_PER_CYCLE = 2;
+
 function parseHM(s, fallback) {
   const m = /^(\d{1,2}):(\d{2})$/.exec(String(s || ''));
   if (!m) return fallback;
@@ -192,20 +198,37 @@ export async function startEngine({ root, port = 8097 } = {}) {
     for (;;) {
       if (!withinWindow(workWindow)) { log('outside the working hours — stopping for tonight'); return; }
       if (await someoneWatching() === true) { log('someone is watching — standing down'); return; }
+      // The two halves of this program get SEPARATE budgets.
+      //
+      // They shared one, and storage always filled it: there are 1,445 storage
+      // jobs and they were queued first, so the 771 files that force a friend's
+      // TV to transcode sat behind all of them. Weeks of waiting for the work
+      // this program was actually built to do. Not one addaudio job had ever
+      // been created.
+      //
+      // Compatibility gets the larger share on purpose. It is additive — it adds
+      // a playable track and copies the video untouched, proving that with a
+      // bitstream hash — so it cannot fail a quality gate, cannot lose picture,
+      // and is the only profile allowed near a 4K HDR file. It is also minutes
+      // per file where a video re-encode is hours.
       const { items } = engine.analyze(db, policy);
-      let queued = 0;
-      for (const it of items.filter((i) => profiles.includes(i.profile))) {
-        if (queued >= 5) break;
-        if (engine.enqueue(db, it.kind, it.fileId, policy).jobId) queued++;
-      }
+      let storageQueued = 0;
+      let compatQueued = 0;
+
       if (profiles.includes('addaudio')) {
         for (const it of engine.compatibilityCandidates(db)) {
-          if (queued >= 5) break;
-          if (engine.enqueueAddAudio(db, it.kind, it.fileId).jobId) queued++;
+          if (compatQueued >= COMPAT_PER_CYCLE) break;
+          if (engine.enqueueAddAudio(db, it.kind, it.fileId).jobId) compatQueued++;
         }
       }
+      for (const it of items.filter((i) => profiles.includes(i.profile))) {
+        if (storageQueued >= STORAGE_PER_CYCLE) break;
+        if (engine.enqueue(db, it.kind, it.fileId, policy).jobId) storageQueued++;
+      }
+
+      const queued = storageQueued + compatQueued;
       if (!queued) return;
-      log(`queued ${queued} job(s)`);
+      log(`queued ${queued} job(s) — ${compatQueued} compatibility, ${storageQueued} storage`);
       engine.worker.stop = false;
       // Watch for both reasons to stop mid-job: a viewer appearing, and the
       // window closing. Either returns the file in flight to the queue with its
