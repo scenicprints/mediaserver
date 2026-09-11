@@ -246,6 +246,37 @@ export function copyNoClobber(src, dst) {
   return b;
 }
 
+/**
+ * The same thing, without stopping the world.
+ *
+ * copyFileSync blocks the single thread for the whole copy, which for a 50 GB
+ * remux off a USB disk is minutes. That is survivable in the one-shot CLI tool
+ * that uses the synchronous version above, and NOT survivable in the migration:
+ * it copies twenty thousand files from inside the process that also serves the
+ * window and runs the encoder, so the program would appear dead for hours.
+ *
+ * The same mistake — an async-looking function doing synchronous reads —
+ * already shipped once in the duplicate finder and read to the owner as a
+ * crash. See the note above fingerprint() in duplicates.mjs.
+ */
+export async function copyNoClobberAsync(src, dst) {
+  const exists = await fs.promises.access(dst).then(() => true, () => false);
+  if (exists) throw new Error(`destination already exists, refusing to overwrite: ${dst}`);
+
+  await fs.promises.mkdir(path.dirname(dst), { recursive: true });
+  const tmp = dst + '.partial';
+  await fs.promises.rm(tmp, { force: true });
+  await fs.promises.copyFile(src, tmp);
+
+  const [a, b] = await Promise.all([fs.promises.stat(src), fs.promises.stat(tmp)]);
+  if (a.size !== b.size) {
+    await fs.promises.rm(tmp, { force: true });
+    throw new Error(`size mismatch after copy: ${a.size} vs ${b.size}`);
+  }
+  await fs.promises.rename(tmp, dst);
+  return b.size;
+}
+
 // Pre-flight for any batch of moves: find every collision BEFORE a single file
 // is touched — against files already on disk, and against other moves in the
 // same batch that would land on the same path. Acting first and validating

@@ -36,7 +36,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fingerprint } from './duplicates.mjs';
-import { driveRank, copyNoClobber, findCollisions } from './engine.mjs';
+import { driveRank, copyNoClobberAsync, findCollisions } from './engine.mjs';
 
 // Longest prefix wins, so H:\4k is matched before H:\ would be.
 export const DEFAULT_MAP = [
@@ -396,7 +396,7 @@ export function preflight(db, { poolRoot = 'P:\\', headroomBytes = 50 * 2 ** 30 
  * has never been watched working is a guard nobody should trust, so the test
  * suite supplies a copy that lands the wrong bytes and checks what happens.
  */
-export async function migrateOne(db, row, { full = false, copyFn = copyNoClobber } = {}) {
+export async function migrateOne(db, row, { full = false, copyFn = copyNoClobberAsync } = {}) {
   const setState = db.prepare('UPDATE pool_moves SET state = ?, error = ?, finished_at = ? WHERE id = ?');
   const fail = (msg) => { setState.run('failed', msg, Date.now(), row.id); return { state: 'failed', error: msg }; };
 
@@ -408,7 +408,7 @@ export async function migrateOne(db, row, { full = false, copyFn = copyNoClobber
 
     db.prepare('UPDATE pool_moves SET state = ?, started_at = ?, error = NULL WHERE id = ?').run('copying', Date.now(), row.id);
     try {
-      copyFn(row.src, row.dst);
+      await copyFn(row.src, row.dst);
     } catch (e) {
       try { fs.rmSync(row.dst + '.partial', { force: true }); } catch {}
       return fail('copy failed: ' + e.message);
