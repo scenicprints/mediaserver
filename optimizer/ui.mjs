@@ -186,10 +186,13 @@ export function startUI(db, {
               full: !!body.full,
               onProgress: (n, total) => { dupes.done = n; dupes.total = total; }
             });
+            // Pass the full description of every copy through. This used to
+            // send two bare paths, which is not enough for anyone to judge
+            // which copy to keep — and for a byte-identical pair the scoring
+            // could not tell them apart either.
             dupes.groups = r.confirmed.map((d) => ({
               title: d.title, size: d.size, reclaimable: d.reclaimable, is4k: d.is4k, note: d.note,
-              keep: { path: d.keep.r.path, reasons: d.keep.reasons },
-              drop: d.drop.map((x) => ({ id: `${x.r.file_kind}:${x.r.file_id}`, path: x.r.path }))
+              copies: d.copies, differs: d.differs
             }));
             dupes.ranAt = Date.now();
           } catch (e) { dupes.error = e.message; }
@@ -296,6 +299,22 @@ export const PAGE = `<!doctype html>
   .tag.locked { color:var(--ink3); }
   .path { color:var(--ink2); word-break:break-all; font-family:ui-monospace,Consolas,monospace; font-size:11.5px; }
   .why { color:var(--ink3); font-size:11.5px; }
+  /* What the file is — stated once, because every copy in a group shares it. */
+  .spec { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:2px 22px;
+    margin:14px 0 12px; padding:12px 14px; background:var(--sunk); border:1px solid var(--rule); }
+  .spec > div { display:flex; gap:10px; align-items:baseline; min-width:0; }
+  .spec .k { color:var(--ink3); font-size:10px; letter-spacing:.16em; text-transform:uppercase; white-space:nowrap; }
+  .spec .v { color:var(--ink); font-size:12.5px; font-variant-numeric:tabular-nums; word-break:break-word; }
+  /* The verdict on how the copies relate. One signal colour, used for state. */
+  .differs { border-left:2px solid var(--signal); padding:8px 12px; margin-bottom:12px;
+    font-size:12px; color:var(--ink); background:var(--panel2); }
+  .same { border-left:2px solid var(--rule); padding:8px 12px; margin-bottom:12px;
+    font-size:12px; color:var(--ink3); }
+  .copy { border:1px solid var(--rule); padding:10px 12px; margin-top:8px; background:var(--panel2); }
+  .copy.rec { border-color:var(--ink3); }
+  .copyhead { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  .drive { font-size:11px; font-weight:700; letter-spacing:.14em; color:var(--signal); }
+  .fname { margin-top:6px; font-size:12.5px; color:var(--ink); word-break:break-all; }
   pre { background:var(--sunk); border:1px solid var(--rule); padding:14px 16px; margin:0;
     max-height:340px; overflow:auto; font-family:ui-monospace,Consolas,monospace; font-size:11.5px;
     color:var(--ink2); white-space:pre-wrap; word-break:break-word; }
@@ -425,19 +444,51 @@ function renderDupes(d) {
   $('dupstate').textContent = groups.length + ' genuine duplicate group(s)' + (total ? ' — ' + GB(total) + ' reclaimable' : '');
   if (!groups.length) { $('dupes').innerHTML = '<div class="empty">Nothing is duplicated. Metadata matches were checked byte for byte and were different files.</div>'; return; }
 
-  $('dupes').innerHTML = groups.map((g) =>
-    '<div class="dupe"><div class="h"><span class="title">' + esc(g.title) + '</span>' +
-      '<span class="size">' + GB(g.size) + (g.is4k ? ' · 4K' : '') + '</span></div>' +
-      '<div class="keepline"><span class="tag keep">Keep</span><span class="path">' + esc(g.keep.path) + '</span></div>' +
-      (g.keep.reasons && g.keep.reasons.length ? '<div class="why">' + esc(g.keep.reasons.join(', ')) + '</div>' : '') +
-      g.drop.map((x) =>
-        '<div class="dropline">' +
-          (g.is4k
-            ? '<span class="tag locked">4K — kept</span>'
-            : '<button class="danger" data-drop="' + esc(x.id) + '">Delete</button>') +
-          '<span class="path">' + esc(x.path) + '</span></div>').join('') +
+  $('dupes').innerHTML = groups.map((g) => {
+    const copies = g.copies || [];
+    const first = copies[0] || {};
+    // What the file IS. Identical across every copy — that is what made them a
+    // group — so it is stated once rather than repeated in every row.
+    const mins = first.duration ? Math.round(first.duration / 60) + ' min' : null;
+    const res = first.width && first.height ? first.width + '×' + first.height : null;
+    const vid = [first.vcodec, res, first.vkbps ? (Math.round(first.vkbps / 100) / 10) + ' Mbps' : null,
+                 first.hdr ? 'HDR' : null].filter(Boolean).join(' · ');
+    const aud = (first.audio || []).map((a) =>
+      [a.codec, a.ch ? a.ch + 'ch' : null, a.kbps ? a.kbps + 'k' : null, a.lang].filter(Boolean).join(' ')).join('  +  ');
+
+    const spec = '<div class="spec">' +
+      '<div><span class="k">Video</span><span class="v">' + esc(vid || '—') + '</span></div>' +
+      '<div><span class="k">Audio</span><span class="v">' + esc(aud || '—') + '</span></div>' +
+      '<div><span class="k">Runtime</span><span class="v">' + esc(mins || '—') + '</span></div>' +
+      '<div><span class="k">Each copy</span><span class="v">' + GB(g.size) + '</span></div>' +
+    '</div>';
+
+    // The honest headline: for a byte-identical group nothing differs except
+    // where the files live, and saying so beats a table of matching numbers.
+    const diff = (g.differs && g.differs.length)
+      ? '<div class="differs"><b>These copies differ:</b> ' +
+          g.differs.map((d) => esc(d.field) + ' (' + d.values.map((v) => esc(String(v))).join(' vs ') + ')').join(' · ') + '</div>'
+      : '<div class="same">Byte-for-byte identical — same picture, same sound, same everything. Only the location differs.</div>';
+
+    const rows = copies.map((c) => {
+      const tag = c.recommended
+        ? '<span class="tag keep">Keep</span>'
+        : (g.is4k ? '<span class="tag locked">4K — kept</span>'
+                  : '<button class="danger" data-drop="' + esc(c.id) + '">Delete</button>');
+      return '<div class="copy' + (c.recommended ? ' rec' : '') + '">' +
+        '<div class="copyhead">' + tag + '<span class="drive">' + esc(c.drive) + '</span>' +
+        '<span class="path">' + esc(c.folder) + '</span></div>' +
+        '<div class="fname">' + esc(c.filename) + '</div>' +
+        (c.reasons && c.reasons.length ? '<div class="why">' + esc(c.reasons.join(' · ')) + '</div>' : '') +
+      '</div>';
+    }).join('');
+
+    return '<div class="dupe"><div class="h"><span class="title">' + esc(g.title) + '</span>' +
+      '<span class="size">' + GB(g.reclaimable) + ' reclaimable' + (g.is4k ? ' · 4K' : '') + '</span></div>' +
+      spec + diff + rows +
       (g.note ? '<div class="why">' + esc(g.note) + '</div>' : '') +
-    '</div>').join('');
+    '</div>';
+  }).join('');
 }
 
 function renderStuck(s) {
@@ -574,12 +625,14 @@ document.addEventListener('click', async (e) => {
   const b = e.target.closest('[data-drop]');
   if (!b) return;
   const id = b.getAttribute('data-drop');
-  const row = b.parentElement.querySelector('.path').textContent;
-  if (!confirm('Delete this copy?\\n\\n' + row + '\\n\\nThe other copy is kept. This cannot be undone.')) return;
+  const card = b.closest('.copy');
+  const folder = card.querySelector('.path').textContent;
+  const name = card.querySelector('.fname').textContent;
+  if (!confirm('Delete this copy?\\n\\n' + name + '\\n' + folder + '\\n\\nThe copy marked Keep stays. This cannot be undone.')) return;
   b.disabled = true; b.textContent = 'checking';
   const r = await post('/api/drop', { id });
   if (!r.ok) { b.disabled = false; b.textContent = 'Delete'; alert('Refused: ' + (r.data.error || 'unknown')); return; }
-  b.parentElement.remove();
+  card.remove();
   tick();
 });
 

@@ -16,7 +16,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { tierOf } from './engine.mjs';
+import { tierOf, driveRank } from './engine.mjs';
 
 // Hash a slice of the file rather than all of it: the first and last 64 MB plus
 // the exact byte length. Two different episodes never collide on that, and it
@@ -82,7 +82,20 @@ export async function fingerprint(file, { full = false } = {}) {
 
 // Which copy is worth keeping? Higher score wins. Deliberately conservative and
 // explainable — the owner sees the reasoning, not just a verdict.
-function scoreCopy(r) {
+//
+// Note what these tests can and cannot do here. Every copy in a group has the
+// SAME BYTES — that is what got it into the group — so it necessarily has the
+// same audio tracks, the same container contents, the same resolution. All
+// three tests below therefore tie for every real duplicate, and the winner was
+// whichever row SQLite happened to return first. The recommendation looked
+// reasoned and was arbitrary.
+//
+// Drive health is the tiebreak, because it is the one thing that genuinely
+// differs between two identical files: one of them is on a disk with 552
+// reallocated sectors and the other is not. It is applied as a fraction so it
+// orders ties without ever outranking a real difference — which matters
+// because this same function is used where the copies are NOT identical.
+export function scoreCopy(r) {
   let score = 0;
   const reasons = [];
   const audio = (() => { try { return JSON.parse(r.audio_json || '[]'); } catch { return []; } })();
@@ -93,7 +106,63 @@ function scoreCopy(r) {
   const inRightFolder = tierOf(r.width, r.height) === '4K'
     ? /\\4k\\/i.test(r.path) : !/\\4k\\/i.test(r.path);
   if (inRightFolder) { score += 3; reasons.push('correct folder'); }
+
+  // Healthiest drive first. driveRank returns 0 for the best drive in the
+  // configured order, so a smaller rank must score higher.
+  const rank = driveRank(r.path);
+  score += 1 / (rank + 2);
+  reasons.push(`on ${String(r.path).slice(0, 2).toUpperCase()}`);
+
   return { score, reasons };
+}
+
+/** Everything worth knowing about one copy, for a person deciding by eye. */
+export function describeCopy(r) {
+  let audio = [];
+  try { audio = JSON.parse(r.audio_json || '[]'); } catch { /* no tracks listed */ }
+  return {
+    id: `${r.file_kind}:${r.file_id}`,
+    path: r.path,
+    drive: String(r.path || '').slice(0, 2).toUpperCase(),
+    folder: path.dirname(String(r.path || '')),
+    filename: path.basename(String(r.path || '')),
+    size: Number(r.size) || 0,
+    container: r.container || null,
+    duration: Number(r.duration) || 0,
+    vcodec: r.vcodec || null,
+    width: r.width || null,
+    height: r.height || null,
+    tier: tierOf(r.width, r.height),
+    vkbps: r.vkbps || null,
+    hdr: !!r.hdr,
+    audio: audio.map((a) => ({ codec: a.codec || null, ch: a.ch || null, kbps: a.kbps || null, lang: a.lang || null }))
+  };
+}
+
+/**
+ * Which of these fields actually differ across the copies?
+ *
+ * The honest answer for a byte-identical group is "only the location", and
+ * saying so plainly is more useful than a table of numbers that are the same in
+ * every column. It also makes a genuine difference impossible to miss.
+ */
+export function differencesBetween(copies) {
+  const fields = [
+    ['resolution', (c) => (c.width && c.height ? `${c.width}x${c.height}` : null)],
+    ['video codec', (c) => c.vcodec],
+    ['video bitrate', (c) => (c.vkbps ? Math.round(c.vkbps / 100) / 10 + ' Mbps' : null)],
+    ['HDR', (c) => (c.hdr ? 'yes' : 'no')],
+    ['container', (c) => c.container],
+    ['runtime', (c) => (c.duration ? Math.round(c.duration / 60) + ' min' : null)],
+    ['size', (c) => c.size],
+    ['audio', (c) => c.audio.map((a) => `${a.codec} ${a.ch}ch${a.lang ? ' ' + a.lang : ''}`).join(' + ')]
+  ];
+  const out = [];
+  for (const [name, get] of fields) {
+    const values = copies.map(get);
+    if (new Set(values.map((v) => String(v))).size > 1) out.push({ field: name, values });
+  }
+  return out;
 }
 
 // Is this file safe to delete as a duplicate, RIGHT NOW?
@@ -190,6 +259,11 @@ export async function findDuplicates(db, { log = () => {}, full = false, onProgr
         is4k,
         keep: scored[0],
         drop: scored.slice(1),
+        // Full specifications for every copy, and an explicit list of what
+        // actually differs between them. Without this the panel showed two
+        // paths and a Delete button, which is not enough to decide anything.
+        copies: scored.map((s) => ({ ...describeCopy(s.r), reasons: s.reasons, recommended: s === scored[0] })),
+        differs: differencesBetween(scored.map((s) => describeCopy(s.r))),
         // The owner said 4K is never deleted as a duplicate. Surfaced, not acted on.
         note: is4k ? '4K — reported only, never proposed for deletion' : null
       });
