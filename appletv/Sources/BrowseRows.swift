@@ -81,7 +81,16 @@ final class BrowseItem {
     let unwatched: Int
     let localId: Int?
     let runtimeMinutes: Int
-    let card: BrowseCard             // built once
+    // The card is made when a row actually shows it. A page displays a few
+    // hundred; the pool holds thousands, and building a card for every title in
+    // the library to show a twentieth of them is work nobody asked for.
+    private let movie: Movie?
+    private let show: Show?
+    var card: BrowseCard {
+        if let movie { return Browse.movieCard(movie) }
+        if let show { return Browse.showCard(show) }
+        preconditionFailure("a browse item is always a movie or a show")
+    }
 
     // The keyword moods, decided once rather than per render.
     let isTrueStory: Bool
@@ -107,7 +116,7 @@ final class BrowseItem {
         if let r = m.runtime, r > 0 { runtimeMinutes = r }
         else if let d = m.duration, d > 0 { runtimeMinutes = Int(d / 60) }
         else { runtimeMinutes = 0 }
-        card = Browse.movieCard(m)
+        movie = m; show = nil
         isTrueStory = Rx.test(MoodRx.trueStory, searchText)
         isSpace = Rx.test(MoodRx.space, searchText)
         isHeist = Rx.test(MoodRx.heist, searchText)
@@ -130,7 +139,7 @@ final class BrowseItem {
         unwatched = s.unwatched ?? 0
         localId = s.localId
         runtimeMinutes = 0
-        card = Browse.showCard(s)
+        movie = nil; show = s
         isTrueStory = Rx.test(MoodRx.trueStory, searchText)
         isSpace = Rx.test(MoodRx.space, searchText)
         isHeist = Rx.test(MoodRx.heist, searchText)
@@ -572,6 +581,7 @@ extension Browse {
         let started = CFAbsoluteTimeGetCurrent()
         let pool = items(tab, movies, shows)
         guard !pool.isEmpty else { return [] }
+        let pooled = CFAbsoluteTimeGetCurrent()
         var rng = SeededRNG(RowRotation.seed(tab))
         let pinned = Seasonal.rows(pool)
             + [RowDef(group: .core, name: "Recently Added", items: pool, sort: RowSort.added)]
@@ -587,8 +597,13 @@ extension Browse {
         // One line per rebuild, for the CI job that runs this against a
         // real-sized library. Cache hits say nothing, so what gets measured is
         // the build itself — the thing that used to take about a second.
-        let ms = (CFAbsoluteTimeGetCurrent() - started) * 1000
-        NSLog("ROWCOST tab=%@ items=%d rows=%d ms=%.0f", String(describing: tab), pool.count, out.count, ms)
+        // Split so a failed budget says WHERE the time went: `pool` is the
+        // per-title work (parse the genres, read the keywords once each),
+        // `build` is filtering and sorting the rows out of it.
+        let now = CFAbsoluteTimeGetCurrent()
+        NSLog("ROWCOST tab=%@ items=%d rows=%d ms=%.0f pool=%.0f build=%.0f",
+              String(describing: tab), pool.count, out.count,
+              (now - started) * 1000, (pooled - started) * 1000, (now - pooled) * 1000)
         return out
     }
 }
