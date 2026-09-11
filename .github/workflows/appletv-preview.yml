@@ -111,13 +111,17 @@ jobs:
           BUNDLE: com.scenicprints.marqueetv
           BULK: '2000'
           # A Debug build, in a simulator, on a shared runner — several times
-          # slower than the Release build on the actual box, so this is not a
-          # claim about what the television does. It is sized to catch the kind
-          # of regression this exists for: the version that shipped did roughly
-          # forty times the per-title work, which lands in the tens of seconds
-          # here. A measured pass is ~400ms, so the budget leaves room for a
-          # noisy runner and still fails long before anything reaches a TV.
-          BUDGET_MS: '1500'
+          # slower than the Release build on the actual box, so this is NOT a
+          # claim about what the television does.
+          #
+          # Observed passes: 580ms and 779ms for the same work on consecutive
+          # runs, so the runner alone swings this by a third. The budget is set
+          # for the regression it exists to catch, not to police tens of
+          # milliseconds: the version that froze the app did about forty times
+          # the per-title work, which lands in the tens of seconds here. A tight
+          # budget on a runner this noisy would flake, and a flaky gate is one
+          # nobody reads.
+          BUDGET_MS: '3000'
         run: |
           set -eo pipefail
           DEV=$(xcrun simctl list devices booted | grep -m1 "Apple TV" | sed -E 's/.*\(([0-9A-Fa-f-]{36})\).*/\1/')
