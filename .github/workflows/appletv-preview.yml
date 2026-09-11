@@ -118,13 +118,16 @@ jobs:
               "SIMCTL_CHILD_PREVIEW_TAB=home" \
               "SIMCTL_CHILD_PREVIEW_BULK=$BULK" \
               xcrun simctl launch --terminate-running-process "$DEV" "$BUNDLE"
-          sleep 30
-          xcrun simctl spawn "$DEV" log show --style compact --start "$SINCE" \
-            --predicate 'senderImagePath CONTAINS "MarqueeTV"' > rowcost.log 2>/dev/null || true
+          sleep 40
+          # Match on the message, not on who logged it: NSLog attributes
+          # senderImagePath to the logging library rather than the app binary,
+          # which is how the first version of this step found nothing at all.
+          LOG="xcrun simctl spawn $DEV log show --style compact --start"
+          $LOG "$SINCE" --predicate 'eventMessage CONTAINS "ROWCOST"' > rowcost.log 2>/dev/null || true
           grep -o 'ROWCOST[^"]*' rowcost.log | sort -u | tee rowcost.txt || true
           if [ ! -s rowcost.txt ]; then
-            echo "::error::no ROWCOST line — the app never built a page, so this check proved nothing"
-            tail -40 rowcost.log || true
+            echo "::error::no ROWCOST line - the app never built a page, so this check proved nothing"
+            $LOG "$SINCE" --predicate 'process == "MarqueeTV"' 2>/dev/null | tail -60 || true
             exit 1
           fi
           ITEMS=$(sed -E 's/.*items=([0-9]+).*/\1/' rowcost.txt | sort -rn | head -1)
