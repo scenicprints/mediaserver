@@ -210,7 +210,18 @@ function setView(view) {
 
 window.addEventListener('scroll', () => nav.classList.toggle('scrolled', window.scrollY > 40));
 
-function genresOf(m) { try { return JSON.parse(m.genres || '[]'); } catch (_e) { return []; } }
+// Parsed once per title, not once per read. A row set touches this tens of
+// thousands of times (every genre row filters the whole library), and re-parsing
+// the JSON on each read is what made the same code freeze the Apple TV app.
+// Keyed off the object, so it dies with the list on the next load.
+const _genreCache = new WeakMap();
+function genresOf(m) {
+  let g = _genreCache.get(m);
+  if (g) return g;
+  try { g = JSON.parse(m.genres || '[]'); } catch (_e) { g = []; }
+  _genreCache.set(m, g);
+  return g;
+}
 
 // ============================================================
 //  Home / Movies / TV Shows — the rows
@@ -251,7 +262,14 @@ const yr = (p) => p.x.year || 0;
 const mins = (p) => p.x.runtime || (p.x.duration ? Math.round(p.x.duration / 60) : 0);
 const isMovie = (p) => p.kind === 'movie';
 const lowTitle = (p) => (p.x.title || '').toLowerCase();
-const lowText = (p) => ((p.x.title || '') + ' ' + (p.x.overview || '')).toLowerCase();
+// Same reasoning as genresOf: the keyword rows scan this for every title, and
+// rebuilding a title+overview string on each read is pure waste.
+const _textCache = new WeakMap();
+function lowText(p) {
+  let t = _textCache.get(p.x);
+  if (t === undefined) { t = ((p.x.title || '') + ' ' + (p.x.overview || '')).toLowerCase(); _textCache.set(p.x, t); }
+  return t;
+}
 const pRating = (a, b) => rat(b) - rat(a);
 const pYear = (a, b) => yr(b) - yr(a);
 const pYearUp = (a, b) => yr(a) - yr(b);

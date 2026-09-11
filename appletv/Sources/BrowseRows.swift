@@ -13,46 +13,132 @@ import Foundation
 //  Apple TV that never gets quit.
 //
 //  Keep this in step with `candidateRows` / `seasonalCalendar` in public/app.js.
+//
+//  ---- A NOTE ON COST, because the first cut of this froze the app ----
+//
+//  `Browse.rows` is called from a SwiftUI `body`, and body runs again on every
+//  state change AND every focus move. The first version read `Movie.genreList`
+//  inside each row's filter — and that property parses the genres JSON on every
+//  access — and matched moods with `range(of:options:.regularExpression)`, which
+//  compiles a fresh NSRegularExpression per call. Against a real library (1636
+//  films, 334 shows) one call came to 86,358 JSON parses and 8,004 regex
+//  compiles: about a second of main-thread work per render on Apple TV silicon.
+//  The shell drew, the rows never arrived, and the remote did nothing.
+//
+//  So: every per-item cost is paid ONCE, in BrowseItem's initialiser (genres
+//  parsed once, search text built once, the keyword moods decided once against
+//  cached regexes), and the finished rows are memoised behind a stamp that
+//  tracks the data they were built from. Rows are cheap predicate filters over
+//  a class — a reference, so filtering doesn't copy a Movie's ten strings.
+//  Adding a row that parses or compiles anything per item would undo all of it.
 // ============================================================================
 
-enum BrowseTab { case home, movies, tv }
+enum BrowseTab: Hashable { case home, movies, tv }
 
-// A row item is a movie OR a show, so one Home row can hold both — the tvOS
-// stand-in for the web app's {x, kind} pairs.
-enum BrowseItem {
-    case movie(Movie)
-    case show(Show)
-
-    var key: String { switch self { case .movie(let m): return "m\(m.id)"; case .show(let s): return "s\(s.id)" } }
-    var isMovie: Bool { if case .movie = self { return true }; return false }
-    var title: String { switch self { case .movie(let m): return m.title; case .show(let s): return s.title } }
-    var year: Int { switch self { case .movie(let m): return m.year ?? 0; case .show(let s): return s.year ?? 0 } }
-    var rating: Double { switch self { case .movie(let m): return m.rating ?? 0; case .show(let s): return s.rating ?? 0 } }
-    var genreList: [String] { switch self { case .movie(let m): return m.genreList; case .show(let s): return s.genreList } }
-    var overview: String { switch self { case .movie(let m): return m.overview ?? ""; case .show(let s): return s.overview ?? "" } }
-    var addedAt: Double { switch self { case .movie(let m): return m.addedAt ?? 0; case .show(let s): return s.addedAt ?? 0 } }
-    var lastPlayedAt: Double { switch self { case .movie(let m): return m.lastPlayedAt ?? 0; case .show(let s): return s.lastPlayedAt ?? 0 } }
-    var watched: Bool { if case .movie(let m) = self { return (m.watched ?? 0) == 1 }; return false }
-    var favorite: Bool { if case .movie(let m) = self { return (m.favorite ?? 0) == 1 }; return false }
-    var is4K: Bool { if case .movie(let m) = self { return m.is4K }; return false }
-    var unwatched: Int { if case .show(let s) = self { return s.unwatched ?? 0 }; return 0 }
-    var localId: Int? { switch self { case .movie(let m): return m.localId; case .show(let s): return s.localId } }
-    var runtimeMinutes: Int {
-        guard case .movie(let m) = self else { return 0 }
-        if let r = m.runtime, r > 0 { return r }
-        if let d = m.duration, d > 0 { return Int(d / 60) }
-        return 0
+// Compiled once per pattern and kept. Everything here runs on the main thread
+// (SwiftUI body), so a plain static dictionary is the right amount of machinery.
+enum Rx {
+    private static var cache: [String: NSRegularExpression] = [:]
+    static func test(_ pattern: String, _ text: String) -> Bool {
+        guard !text.isEmpty else { return false }
+        let re: NSRegularExpression
+        if let hit = cache[pattern] {
+            re = hit
+        } else {
+            guard let made = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return false }
+            cache[pattern] = made
+            re = made
+        }
+        return re.firstMatch(in: text, options: [], range: NSRange(text.startIndex..., in: text)) != nil
     }
-    var card: BrowseCard { switch self { case .movie(let m): return Browse.movieCard(m); case .show(let s): return Browse.showCard(s) } }
-
-    func hasGenre(_ g: String) -> Bool { genreList.contains(g) }
-    func anyGenre(_ gs: [String]) -> Bool { genreList.contains { gs.contains($0) } }
-    /// Title and overview together, which is what the holiday matchers read.
-    var searchText: String { title + " " + overview }
 }
 
-private func rx(_ text: String, _ pattern: String) -> Bool {
-    text.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
+// Keyword moods. Decided once per title, in the initialiser below — never in a
+// row's filter.
+private enum MoodRx {
+    static let trueStory = #"based on (a |the )?(true|real)|a true story|true events|real events|inspired by (a |the )?true"#
+    static let space = #"\bspace\b|astronauts?\b|\borbit\b|\bmars\b|\bnasa\b|spaceship|space station|\bgalaxy\b|interstellar|moon landing|cosmonaut"#
+    static let heist = #"\bheist\b|\brobbery\b|con (man|artist)|\bthieves\b|bank job|\bgrifter|\bswindle|\bcaper\b"#
+    static let creature = #"\bmonsters?\b|\bcreature\b|\bsharks?\b|dinosaur|\bkaiju\b|\baliens?\b|\bbeast\b"#
+}
+
+// A row item is a movie OR a show, so one Home row can hold both — the tvOS
+// stand-in for the web app's {x, kind} pairs. A CLASS, so the ~70 candidate rows
+// filter references rather than copying a struct full of strings each time.
+final class BrowseItem {
+    let isMovie: Bool
+    let key: String
+    let title: String
+    let year: Int
+    let rating: Double
+    let genres: Set<String>          // parsed once
+    let searchText: String           // title + overview, built once
+    let addedAt: Double
+    let lastPlayedAt: Double
+    let watched: Bool
+    let favorite: Bool
+    let is4K: Bool
+    let unwatched: Int
+    let localId: Int?
+    let runtimeMinutes: Int
+    let card: BrowseCard             // built once
+
+    // The keyword moods, decided once rather than per render.
+    let isTrueStory: Bool
+    let isSpace: Bool
+    let isHeist: Bool
+    let isCreature: Bool
+
+    init(movie m: Movie) {
+        isMovie = true
+        key = "m\(m.id)"
+        title = m.title
+        year = m.year ?? 0
+        rating = m.rating ?? 0
+        genres = Set(m.genreList)
+        searchText = m.title + " " + (m.overview ?? "")
+        addedAt = m.addedAt ?? 0
+        lastPlayedAt = m.lastPlayedAt ?? 0
+        watched = (m.watched ?? 0) == 1
+        favorite = (m.favorite ?? 0) == 1
+        is4K = m.is4K
+        unwatched = 0
+        localId = m.localId
+        if let r = m.runtime, r > 0 { runtimeMinutes = r }
+        else if let d = m.duration, d > 0 { runtimeMinutes = Int(d / 60) }
+        else { runtimeMinutes = 0 }
+        card = Browse.movieCard(m)
+        isTrueStory = Rx.test(MoodRx.trueStory, searchText)
+        isSpace = Rx.test(MoodRx.space, searchText)
+        isHeist = Rx.test(MoodRx.heist, searchText)
+        isCreature = genres.contains("Horror") && Rx.test(MoodRx.creature, searchText)
+    }
+
+    init(show s: Show) {
+        isMovie = false
+        key = "s\(s.id)"
+        title = s.title
+        year = s.year ?? 0
+        rating = s.rating ?? 0
+        genres = Set(s.genreList)
+        searchText = s.title + " " + (s.overview ?? "")
+        addedAt = s.addedAt ?? 0
+        lastPlayedAt = s.lastPlayedAt ?? 0
+        watched = false
+        favorite = false
+        is4K = false
+        unwatched = s.unwatched ?? 0
+        localId = s.localId
+        runtimeMinutes = 0
+        card = Browse.showCard(s)
+        isTrueStory = Rx.test(MoodRx.trueStory, searchText)
+        isSpace = Rx.test(MoodRx.space, searchText)
+        isHeist = Rx.test(MoodRx.heist, searchText)
+        isCreature = genres.contains("Horror") && Rx.test(MoodRx.creature, searchText)
+    }
+
+    func hasGenre(_ g: String) -> Bool { genres.contains(g) }
+    func anyGenre(_ gs: [String]) -> Bool { gs.contains { genres.contains($0) } }
 }
 
 // ---------------------------------------------------------------------------
@@ -69,10 +155,10 @@ enum RowRotation {
     /// Fixed for the life of the launch, so tabbing around doesn't reshuffle the
     /// page; XORed with a four-hour bucket so an app left running still moves on.
     private static let launch = UInt32.random(in: 0...UInt32.max)
+    static var bucket: Int { Int(Date().timeIntervalSince1970 / 14400) }
     static func seed(_ tab: BrowseTab) -> UInt32 {
-        let bucket = UInt32(truncatingIfNeeded: Int(Date().timeIntervalSince1970 / 14400))
         let salt: UInt32 = tab == .home ? 0x9E3779B9 : (tab == .movies ? 0x85EBCA6B : 0xC2B2AE35)
-        return launch ^ bucket ^ salt
+        return launch ^ UInt32(truncatingIfNeeded: bucket) ^ salt
     }
 }
 
@@ -112,12 +198,15 @@ struct SeasonalTheme {
     var minRating: Double? = nil
     var pick: ((BrowseItem) -> Bool)? = nil
 
+    // At most a couple of themes are ever live, and Rx keeps the compiled
+    // pattern, so this is a plain scan rather than a compile per title.
     func matches(_ p: BrowseItem) -> Bool {
         if let pick { return pick(p) }
         if let minRating, p.rating < minRating { return false }
         if let genres, !p.anyGenre(genres) { return false }
         if titleRe != nil || textRe != nil {
-            let hit = (titleRe.map { rx(p.title, $0) } ?? false) || (textRe.map { rx(p.searchText, $0) } ?? false)
+            let hit = (titleRe.map { Rx.test($0, p.title) } ?? false)
+                || (textRe.map { Rx.test($0, p.searchText) } ?? false)
             if !hit { return false }
         }
         return true
@@ -247,7 +336,7 @@ enum Seasonal {
                           win: win(10, 1, 10, 31), min: 3,
                           pick: { p in
                               p.anyGenre(["Family", "Animation", "Fantasy", "Comedy"])
-                                  && rx(p.searchText, #"\bhalloween\b|\bghosts?\b|\bghostly\b|\bmonsters?\b|\bwitch(es)?\b|\bvampire|\bpumpkin|haunted|\bspooky\b|\bzombie|goosebumps|hocus pocus|addams|\bghouls?\b|coraline|\bcasper\b|trick or treat"#)
+                                  && Rx.test(#"\bhalloween\b|\bghosts?\b|\bghostly\b|\bmonsters?\b|\bwitch(es)?\b|\bvampire|\bpumpkin|haunted|\bspooky\b|\bzombie|goosebumps|hocus pocus|addams|\bghouls?\b|coraline|\bcasper\b|trick or treat"#, p.searchText)
                           }),
 
             SeasonalTheme(id: "veterans", rank: 10, on: (11, 11), name: "🎖️ Veterans Day",
@@ -317,9 +406,9 @@ struct RowDef {
 extension Browse {
     static func items(_ tab: BrowseTab, _ movies: [Movie], _ shows: [Show]) -> [BrowseItem] {
         switch tab {
-        case .movies: return movies.map { .movie($0) }
-        case .tv: return shows.map { .show($0) }
-        case .home: return movies.map { BrowseItem.movie($0) } + shows.map { BrowseItem.show($0) }
+        case .movies: return movies.map { BrowseItem(movie: $0) }
+        case .tv: return shows.map { BrowseItem(show: $0) }
+        case .home: return movies.map { BrowseItem(movie: $0) } + shows.map { BrowseItem(show: $0) }
         }
     }
 
@@ -355,14 +444,15 @@ extension Browse {
             add(.core, "TV Shows", showP, RowSort.rating)
         }
 
-        // --- mood: cuts a genre name alone doesn't get you ---
+        // --- mood: cuts a genre name alone doesn't get you. Every predicate here
+        // reads a precomputed field; none of them parse or compile anything.
         let moods: [(String, (BrowseItem) -> Bool, String?)] = [
             ("😄 Feel-Good Comedies", { $0.hasGenre("Comedy") && $0.rating >= 6.5 }, "Comedy"),
             ("😱 Edge of Your Seat", { $0.anyGenre(["Thriller", "Mystery"]) && $0.rating >= 6 }, "Thriller"),
             ("💞 Rom-Coms", { $0.hasGenre("Romance") && $0.hasGenre("Comedy") }, nil),
             ("🏡 Family Movie Night", { $0.hasGenre("Family") && $0.rating >= 6 }, "Family"),
             ("🎨 Animated", { $0.hasGenre("Animation") }, "Animation"),
-            ("📖 Based on a True Story", { rx($0.searchText, #"based on (a |the )?(true|real)|a true story|true events|real events|inspired by (a |the )?true"#) }, nil),
+            ("📖 Based on a True Story", { $0.isTrueStory }, nil),
             ("🚀 Into the Unknown", { $0.hasGenre("Science Fiction") && $0.rating >= 6 }, "Science Fiction"),
             ("🐉 Swords and Sorcery", { $0.hasGenre("Fantasy") }, "Fantasy"),
             ("🕵️ Crime and Capers", { $0.hasGenre("Crime") }, "Crime"),
@@ -371,9 +461,9 @@ extension Browse {
             ("🎬 Documentaries", { $0.hasGenre("Documentary") }, "Documentary"),
             ("🎵 Music and Musicals", { $0.hasGenre("Music") }, "Music"),
             ("💥 Big and Loud", { $0.anyGenre(["Action", "Adventure"]) && $0.rating >= 6.5 }, "Action"),
-            ("🌌 Out in Space", { rx($0.searchText, #"\bspace\b|astronauts?\b|\borbit\b|\bmars\b|\bnasa\b|spaceship|space station|\bgalaxy\b|interstellar|moon landing|cosmonaut"#) }, nil),
-            ("💰 Heists and Cons", { rx($0.searchText, #"\bheist\b|\brobbery\b|con (man|artist)|\bthieves\b|bank job|\bgrifter|\bswindle|\bcaper\b"#) }, nil),
-            ("👹 Creature Features", { $0.hasGenre("Horror") && rx($0.searchText, #"\bmonsters?\b|\bcreature\b|\bsharks?\b|dinosaur|\bkaiju\b|\baliens?\b|\bbeast\b"#) }, nil),
+            ("🌌 Out in Space", { $0.isSpace }, nil),
+            ("💰 Heists and Cons", { $0.isHeist }, nil),
+            ("👹 Creature Features", { $0.isCreature }, nil),
             ("🧠 Slow Burns", { $0.hasGenre("Drama") && $0.runtimeMinutes >= 130 }, nil)
         ]
         for (name, test, topic) in moods { add(.mood, name, pool.filter(test), RowSort.rating, topic: topic) }
@@ -391,10 +481,10 @@ extension Browse {
         // Because you watched — off one of the last few things actually played, so
         // it isn't the same suggestion every single time.
         let played = pool.filter { $0.lastPlayedAt > 0 }.sorted(by: RowSort.played).prefix(5)
-        if let seed = seededShuffle(Array(played), &rng).first, !seed.genreList.isEmpty {
-            let gs = seed.genreList
+        if let seed = seededShuffle(Array(played), &rng).first, !seed.genres.isEmpty {
+            let gs = seed.genres
             add(.discovery, "Because you watched \(seed.title)",
-                pool.filter { $0.key != seed.key && !$0.watched && $0.anyGenre(gs) }, RowSort.rating)
+                pool.filter { $0 !== seed && !$0.watched && !$0.genres.isDisjoint(with: gs) }, RowSort.rating)
         }
 
         // A year the library happens to be deep on.
@@ -415,10 +505,14 @@ extension Browse {
         }
 
         // --- genres and decades: the long tail, sampled rather than dumped ---
-        for g in Set(pool.flatMap { $0.genreList }).sorted() {
+        var genreCounts: [String: Int] = [:]
+        for p in pool { for g in p.genres { genreCounts[g, default: 0] += 1 } }
+        for (g, n) in genreCounts.sorted(by: { $0.key < $1.key }) where n >= 4 {
             add(.genre, g, pool.filter { $0.hasGenre(g) }, RowSort.rating, topic: g)
         }
-        for d in Set(pool.map { $0.year > 0 ? ($0.year / 10) * 10 : 0 }).filter({ $0 > 0 }).sorted(by: >) {
+        var decadeSet = Set<Int>()
+        for p in pool where p.year > 0 { decadeSet.insert((p.year / 10) * 10) }
+        for d in decadeSet.sorted(by: >) {
             add(.decade, "\(d)s", pool.filter { $0.year >= d && $0.year < d + 10 }, RowSort.year)
         }
         return rows
@@ -448,8 +542,33 @@ extension Browse {
         return out
     }
 
+    // ---- The memo ----
+    // body calls rows() on every state change AND every focus move, so the page
+    // is built once per (tab, data, rotation) and handed back after that. The
+    // stamp walks the library once reading four cheap fields, which is the part
+    // that has to stay honest: it must change whenever anything a row sorts or
+    // filters on changes, or the page goes stale after you mark something watched.
+    private static var cache: [BrowseTab: (stamp: String, rows: [BrowseRow])] = [:]
+
+    static func stamp(_ tab: BrowseTab, _ movies: [Movie], _ shows: [Show], _ collections: [Collection]) -> String {
+        var watched = 0, favorite = 0, unwatched = 0
+        var played = 0.0, added = 0.0
+        for m in movies {
+            watched &+= (m.watched ?? 0); favorite &+= (m.favorite ?? 0)
+            played += m.lastPlayedAt ?? 0; added += m.addedAt ?? 0
+        }
+        for s in shows {
+            unwatched &+= (s.unwatched ?? 0)
+            played += s.lastPlayedAt ?? 0; added += s.addedAt ?? 0
+        }
+        return "\(tab)|\(movies.count)|\(shows.count)|\(collections.count)|\(watched)|\(favorite)|\(unwatched)|\(played)|\(added)|\(RowRotation.bucket)"
+    }
+
     /// The whole page for a tab: what's in season, what just landed, then the hand.
     static func rows(_ tab: BrowseTab, movies: [Movie], shows: [Show], collections: [Collection]) -> [BrowseRow] {
+        let key = stamp(tab, movies, shows, collections)
+        if let hit = cache[tab], hit.stamp == key { return hit.rows }
+
         let pool = items(tab, movies, shows)
         guard !pool.isEmpty else { return [] }
         var rng = SeededRNG(RowRotation.seed(tab))
@@ -458,11 +577,12 @@ extension Browse {
         var seen = Set<String>()
         var out: [BrowseRow] = []
         for r in pinned + chooseRows(tab, pool, collections, &rng) {
-            let key = r.name.lowercased().filter { $0.isLetter || $0.isNumber }
-            if seen.contains(key) { continue }
-            seen.insert(key)
+            let name = r.name.lowercased().filter { $0.isLetter || $0.isNumber }
+            if seen.contains(name) { continue }
+            seen.insert(name)
             out.append(r.row)
         }
+        cache[tab] = (key, out)
         return out
     }
 }
