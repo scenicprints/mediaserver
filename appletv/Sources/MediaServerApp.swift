@@ -96,10 +96,16 @@ struct ContentView: View {
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .focusSection()
-                // Back at a tab's root walks focus up to the rail. Deeper in, the
-                // NavigationStack's own handler wins and pops instead; with the
-                // rail focused nothing intercepts, so Back exits the app.
-                .onExitCommand { railFocus = tab }
+                // Back pops a pushed page, and only walks focus up to the rail
+                // once you're at a tab's root.
+                //
+                // This used to just set railFocus and trust "the NavigationStack's
+                // own handler wins and pops when you're deeper in". It doesn't: an
+                // onExitCommand on an ancestor takes the press for its whole
+                // subtree, so Back on a film's page never popped — it moved focus
+                // to the rail, and the next press, with nothing left to intercept
+                // it, quit the app. Handle both cases here, explicitly.
+                .onExitCommand { goBack() }
         }
         .ignoresSafeArea(edges: .bottom)
     }
@@ -119,6 +125,17 @@ struct ContentView: View {
 
     private func binding(_ id: String) -> Binding<[Route]> {
         Binding(get: { paths[id] ?? [] }, set: { paths[id] = $0 })
+    }
+
+    /// One press of Back: up a level if there is one, otherwise up to the rail.
+    /// `paths` is keyed by `Tab.rawValue`, the same key `binding(_:)` uses.
+    private func goBack() {
+        if var here = paths[tab.rawValue], !here.isEmpty {
+            here.removeLast()
+            paths[tab.rawValue] = here
+        } else {
+            railFocus = tab
+        }
     }
 
     // CI "preview" hook: when launched with PREVIEW_* env vars (the screenshot

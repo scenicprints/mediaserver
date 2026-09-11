@@ -232,6 +232,10 @@
     if (modal) { modal.classList.add('hidden'); return; }
     const detail = document.getElementById('detail');
     if (!detail.classList.contains('hidden')) { document.getElementById('detail-close').click(); return; }
+    // A "See all" grid is a screen you pushed, so Back returns to the rows you
+    // came from rather than skipping straight up to the ribbon.
+    const gridBack = document.getElementById('grid-back');
+    if (gridBack) { gridBack.click(); return; }
     if (current && current.closest('.nav')) return; // already on the ribbon → nothing (leave-app on tvOS)
     const nav = document.querySelector('.nav-link.active') || document.querySelector('.nav-link');
     if (nav) { enterNav(); setCurrent(nav); }

@@ -569,6 +569,7 @@ extension Browse {
         let key = stamp(tab, movies, shows, collections)
         if let hit = cache[tab], hit.stamp == key { return hit.rows }
 
+        let started = CFAbsoluteTimeGetCurrent()
         let pool = items(tab, movies, shows)
         guard !pool.isEmpty else { return [] }
         var rng = SeededRNG(RowRotation.seed(tab))
@@ -583,6 +584,11 @@ extension Browse {
             out.append(r.row)
         }
         cache[tab] = (key, out)
+        // One line per rebuild, for the CI job that runs this against a
+        // real-sized library. Cache hits say nothing, so what gets measured is
+        // the build itself — the thing that used to take about a second.
+        let ms = (CFAbsoluteTimeGetCurrent() - started) * 1000
+        NSLog("ROWCOST tab=%@ items=%d rows=%d ms=%.0f", String(describing: tab), pool.count, out.count, ms)
         return out
     }
 }

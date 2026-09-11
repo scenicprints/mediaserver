@@ -110,23 +110,126 @@ export async function movieExtra(apiKey, tmdbId) {
   };
 }
 
+// ---- Matching a file to a TMDB entry -------------------------------------
+//
+// This used to take `results[0]` and ask nothing further. TMDB orders search by
+// POPULARITY, so a small film called "Dead" (2020) came back as Dead Poets
+// Society: the query is a prefix of a far more famous title, and nothing looked
+// at the year or at how much extra title had been bolted on. Wrong metadata is
+// worse than none, because it silently rewrites a film's poster, plot and
+// rating and you have to notice by eye.
+//
+// So every candidate is scored, and a candidate that doesn't clear the bar is
+// refused rather than accepted as the best of a bad lot.
+
+// Compare titles on their letters and digits only: punctuation, accents,
+// ampersands and case are all noise ("WALL·E" = "Wall-E", "Se7en" = "Se7en").
+function normTitle(s) {
+  return String(s || '')
+    .normalize('NFKD').replace(/\p{M}/gu, '')
+    .toLowerCase()
+    .replace(/&/g, ' and ')
+    .replace(/['’`]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+const dropArticle = (s) => s.replace(/^(the|a|an) /, '');
+const yearOf = (c) => {
+  const d = c.release_date || c.first_air_date || '';
+  const y = d ? parseInt(d.slice(0, 4), 10) : NaN;
+  return Number.isFinite(y) ? y : null;
+};
+
+const TITLE_EXACT = 100;   // same title once punctuation is set aside
+const TITLE_PREFIX = 60;   // ours is the front of theirs, or the other way round
+const TITLE_PART = 45;     // one contains the other somewhere
+// A year that agrees is the strongest signal there is; one that disagrees by
+// more than a release-date wobble is close to disqualifying.
+const YEAR_SAME = 40, YEAR_NEAR = 18, YEAR_WRONG = -25, YEAR_WRONG_STEP = -3;
+// Without a year to check against, demand a much closer title.
+const FLOOR = 45;
+
+export function scoreCandidate(c, wantTitle, wantYear) {
+  const want = normTitle(wantTitle);
+  const wantNA = dropArticle(want);
+  if (!wantNA) return -Infinity;
+
+  const wantWords = wantNA.split(' ').length;
+  let best = 0, bestExtra = 0;
+  for (const t of [c.title, c.original_title, c.name, c.original_name]) {
+    if (!t) continue;
+    const gotNA = dropArticle(normTitle(t));
+    if (!gotNA) continue;
+    let s;
+    if (gotNA === wantNA) s = TITLE_EXACT;
+    else if (gotNA.startsWith(wantNA + ' ') || wantNA.startsWith(gotNA + ' ')) s = TITLE_PREFIX;
+    else if (gotNA.includes(wantNA) || wantNA.includes(gotNA)) s = TITLE_PART;
+    else continue;
+    // Words theirs has that ours doesn't. Only this direction is suspicious.
+    // The other one costs nothing: "Marvel's Daredevil" naming the file for
+    // TMDB's "Daredevil" is ordinary. Capped, because plenty of real titles are
+    // long ("Dr. Strangelove or: How I Learned to Stop Worrying...").
+    const extra = Math.max(0, gotNA.split(' ').length - wantNA.split(' ').length);
+    s -= Math.min(extra, 6) * 6;
+    if (s > best) { best = s; bestExtra = extra; }
+  }
+  if (best === 0) return -Infinity;   // titles have nothing in common
+
+  const cy = yearOf(c);
+
+  // The Dead Poets Society rule. When THEIR title carries on past ours, the
+  // shared opening is not evidence of anything on its own — "Dead" opens Dead
+  // Poets Society, "Up" opens Up in the Air, "Heat" opens Heat Wave. Only the
+  // year turns it into evidence, and that is the difference between those and
+  // "Birdman" really being "Birdman or (The Unexpected Virtue of Ignorance)".
+  //
+  // It has to be the SAME year, not the year-either-side that a straight title
+  // match is allowed. That leniency exists for region release drift, and on a
+  // partial title it is just another way to be wrong: "Dead (1990)" would have
+  // taken Dead Poets Society (1989) on a one-year pass.
+  const risky = bestExtra >= 2 || (bestExtra >= 1 && wantWords === 1);
+  if (risky && !(wantYear && cy && cy === wantYear)) return -Infinity;
+
+  if (wantYear && cy) {
+    const off = Math.abs(cy - wantYear);
+    if (off === 0) best += YEAR_SAME;
+    else if (off === 1) best += YEAR_NEAR;   // region release dates drift a year
+    else best += YEAR_WRONG + Math.min(off, 10) * YEAR_WRONG_STEP;
+  }
+  // Popularity breaks ties between equally good matches. Nothing more.
+  best += Math.min(Number(c.popularity) || 0, 50) / 100;
+  return best;
+}
+
+export function pickMatch(results, wantTitle, wantYear) {
+  if (!Array.isArray(results) || !results.length) return null;
+  let bestHit = null, bestScore = -Infinity;
+  for (const c of results) {
+    const s = scoreCandidate(c, wantTitle, wantYear);
+    if (s > bestScore) { bestScore = s; bestHit = c; }
+  }
+  return bestScore >= FLOOR ? bestHit : null;
+}
+
+async function tmdbSearch(apiKey, kind, query, year) {
+  const url = new URL(`${BASE}/search/${kind}`);
+  url.searchParams.set('api_key', apiKey);
+  url.searchParams.set('query', query);
+  if (year) url.searchParams.set('year', String(year));
+  let res;
+  try { res = await fetch(url); } catch { return []; }
+  if (!res.ok) return [];
+  const data = await res.json().catch(() => null);
+  return (data && data.results) || [];
+}
+
 export async function searchMovie(apiKey, title, year) {
   if (!apiKey) return null;
-  const url = new URL(BASE + '/search/movie');
-  url.searchParams.set('api_key', apiKey);
-  url.searchParams.set('query', title);
-  if (year) url.searchParams.set('year', String(year));
-
-  let res;
-  try {
-    res = await fetch(url);
-  } catch {
-    return null;
-  }
-  if (!res.ok) return null;
-
-  const data = await res.json();
-  const hit = data.results && data.results[0];
+  let hit = pickMatch(await tmdbSearch(apiKey, 'movie', title, year), title, year);
+  // A year in a filename can be the release year somewhere else, or simply
+  // wrong. If the filtered search found nothing worth having, look again
+  // unfiltered — the year still has to earn its keep in the scoring.
+  if (!hit && year) hit = pickMatch(await tmdbSearch(apiKey, 'movie', title), title, year);
   if (!hit) return null;
 
   return {
@@ -138,32 +241,19 @@ export async function searchMovie(apiKey, title, year) {
   };
 }
 
-export async function searchTv(apiKey, title) {
+export async function searchTv(apiKey, title, year) {
   if (!apiKey) return null;
-  const url = new URL(BASE + '/search/tv');
-  url.searchParams.set('api_key', apiKey);
-  url.searchParams.set('query', title);
-
-  let res;
-  try {
-    res = await fetch(url);
-  } catch {
-    return null;
-  }
-  if (!res.ok) return null;
-
-  const data = await res.json();
-  const hit = data.results && data.results[0];
+  let hit = pickMatch(await tmdbSearch(apiKey, 'tv', title, year), title, year);
+  if (!hit && year) hit = pickMatch(await tmdbSearch(apiKey, 'tv', title), title, year);
   if (!hit) return null;
 
-  const year = hit.first_air_date ? parseInt(hit.first_air_date.slice(0, 4), 10) : null;
   return {
     tmdb_id: hit.id,
     overview: hit.overview || null,
     poster: hit.poster_path ? POSTER + hit.poster_path : null,
     backdrop: hit.backdrop_path ? BACKDROP + hit.backdrop_path : null,
     rating: typeof hit.vote_average === 'number' ? hit.vote_average : null,
-    year
+    year: yearOf(hit)
   };
 }
 

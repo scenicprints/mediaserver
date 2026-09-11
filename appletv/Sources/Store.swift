@@ -511,9 +511,48 @@ final class Store: ObservableObject {
                 "added_at": (i < 5 ? now : now - 40 * 24 * 3600 * 1000), "episodes": 10 + i, "unwatched": (i % 3)
             ])
         }
+        // PREVIEW_BULK=<n>: pad both lists out to a real-sized library.
+        //
+        // A page of rows costs time in proportion to how many titles it filters,
+        // and the preview's two dozen sample titles hid a build that took about
+        // a second per render against the owner's 1,600 films — which froze the
+        // app on the television while CI stayed green. Sample data cannot catch
+        // a cost that scales, so when CI asks for a real-sized library it gets
+        // one: clones with their own ids, years, genres and watch state, so the
+        // genre and decade rows fan out the way they really do.
+        if let n = ProcessInfo.processInfo.environment["PREVIEW_BULK"].flatMap(Int.init), n > 0 {
+            mDicts = Store.inflate(mDicts, to: n, idBase: 900_000)
+            sDicts = Store.inflate(sDicts, to: max(n / 5, 1), idBase: 800_000)
+        }
+
         let dec = decoder()
         if let d = try? JSONSerialization.data(withJSONObject: mDicts) { movies = (try? dec.decode([Movie].self, from: d)) ?? [] }
         if let d = try? JSONSerialization.data(withJSONObject: sDicts) { shows = (try? dec.decode([Show].self, from: d)) ?? [] }
+    }
+
+    /// Repeat a sample list up to `n` entries, varying the fields the browse rows
+    /// actually sort and filter on so the shape of the page is realistic.
+    nonisolated static func inflate(_ seed: [[String: Any]], to n: Int, idBase: Int) -> [[String: Any]] {
+        guard !seed.isEmpty, n > seed.count else { return seed }
+        let genrePool = tmdbGenres.values.sorted()
+        var out = seed
+        var i = 0
+        while out.count < n {
+            var copy = seed[i % seed.count]
+            let k = out.count
+            copy["id"] = idBase + k
+            copy["title"] = "\(copy["title"] as? String ?? "Title") \(k)"
+            copy["year"] = 1930 + (k * 7) % 96
+            copy["rating"] = Double(30 + (k * 13) % 70) / 10.0
+            copy["watched"] = k % 3 == 0 ? 1 : 0
+            copy["favorite"] = k % 11 == 0 ? 1 : 0
+            copy["runtime"] = 70 + (k * 17) % 110
+            let g = [genrePool[k % genrePool.count], genrePool[(k * 5) % genrePool.count]]
+            copy["genres"] = (try? String(data: JSONSerialization.data(withJSONObject: g), encoding: .utf8) ?? "[]") ?? "[]"
+            out.append(copy)
+            i += 1
+        }
+        return out
     }
 
     // Query string the server uses to mix audio for this device.

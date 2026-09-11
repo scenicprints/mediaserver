@@ -91,3 +91,58 @@ jobs:
           name: preview-shots
           path: appletv/shots/*.png
           if-no-files-found: warn
+
+      # A real-sized library, and a budget for building a page against it.
+      #
+      # Build 72 froze on the owner's Apple TV: the row pool re-parsed each
+      # title's genres inside every row filter and compiled a regex per title,
+      # which came to about a second of main-thread work per render against
+      # 1,600 films — and a render happens on every press of the remote. Every
+      # check above this one passed, because they all run against the two dozen
+      # sample titles the preview loads. A cost that scales with the library
+      # cannot be caught by a library of twenty.
+      #
+      # So: launch the real app with PREVIEW_BULK titles, read the ROWCOST line
+      # the app logs on each rebuild, and fail on the budget.
+      - name: Row build cost at library scale
+        env:
+          BUNDLE: com.scenicprints.marqueetv
+          BULK: '2000'
+          BUDGET_MS: '250'
+        run: |
+          set -eo pipefail
+          DEV=$(xcrun simctl list devices booted | grep -m1 "Apple TV" | sed -E 's/.*\(([0-9A-Fa-f-]{36})\).*/\1/')
+          [ -n "$DEV" ] || { echo "no booted simulator"; exit 1; }
+          SINCE=$(date -u '+%Y-%m-%d %H:%M:%S')
+          env "SIMCTL_CHILD_PREVIEW_TMDB=${{ secrets.MARQUEE_PREVIEW_TMDB }}" \
+              "SIMCTL_CHILD_PREVIEW_TAB=home" \
+              "SIMCTL_CHILD_PREVIEW_BULK=$BULK" \
+              xcrun simctl launch --terminate-running-process "$DEV" "$BUNDLE"
+          sleep 30
+          xcrun simctl spawn "$DEV" log show --style compact --start "$SINCE" \
+            --predicate 'senderImagePath CONTAINS "MarqueeTV"' > rowcost.log 2>/dev/null || true
+          grep -o 'ROWCOST[^"]*' rowcost.log | sort -u | tee rowcost.txt || true
+          if [ ! -s rowcost.txt ]; then
+            echo "::error::no ROWCOST line — the app never built a page, so this check proved nothing"
+            tail -40 rowcost.log || true
+            exit 1
+          fi
+          ITEMS=$(sed -E 's/.*items=([0-9]+).*/\1/' rowcost.txt | sort -rn | head -1)
+          if [ "${ITEMS:-0}" -lt 1000 ]; then
+            echo "::error::only $ITEMS titles reached the rows — PREVIEW_BULK did not take, so the budget below is meaningless"
+            exit 1
+          fi
+          WORST=$(sed -E 's/.*ms=([0-9]+).*/\1/' rowcost.txt | sort -rn | head -1)
+          echo "worst page build: ${WORST}ms across ${ITEMS} titles (budget ${BUDGET_MS}ms)"
+          if [ "$WORST" -gt "$BUDGET_MS" ]; then
+            echo "::error::building a page took ${WORST}ms for ${ITEMS} titles, over the ${BUDGET_MS}ms budget."
+            echo "Something in the row pool is doing per-title work that should be paid once — see the note at the top of BrowseRows.swift."
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rowcost
+          path: appletv/rowcost.*
+          if-no-files-found: ignore
