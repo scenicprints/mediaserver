@@ -8,6 +8,8 @@ on:
   push:
     paths:
       - 'appletv/**'
+      # And this file, or a change to the cost gate below never runs itself.
+      - '.github/workflows/appletv-preview.yml'
   workflow_dispatch:
 
 jobs:
