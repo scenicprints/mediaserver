@@ -42,6 +42,13 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+
+    lint {
+        // targetSdk 28 is deliberate: this is sideloaded onto one Android 7.1
+        // projector and never goes near Google Play, and a higher target only
+        // buys background-execution limits that would fight the bridge service.
+        disable 'ExpiredTargetSdkVersion'
+    }
 }
 
 dependencies {
