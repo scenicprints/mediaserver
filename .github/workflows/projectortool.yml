@@ -1,0 +1,44 @@
+name: Projector Tool
+
+# A service tool for the VAVA projector, not a product. It is never published to
+# a release and never self-updates anything — the APK comes back as a build
+# artifact and gets sideloaded by hand.
+on:
+  push:
+    paths:
+      - 'projectortool/**'
+      - '.github/workflows/projectortool.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install SDK packages
+        run: sdkmanager "platforms;android-34" "build-tools;34.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      # Debug build on purpose: it is signed with the standard debug key, so it
+      # installs straight off a USB stick with no keystore to manage.
+      - name: Build APK
+        working-directory: projectortool
+        run: gradle assembleDebug -PappVersionCode=${{ github.run_number }} --no-daemon --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: projector-tool-apk
+          if-no-files-found: error
+          path: projectortool/app/build/outputs/apk/debug/*.apk

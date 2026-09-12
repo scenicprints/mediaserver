@@ -1,0 +1,29 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'com.scenicprints.projectortool'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.scenicprints.projectortool'
+        // The VAVA projector is Android 7.1 (API 25).
+        minSdk 21
+        targetSdk 28
+        versionCode (project.hasProperty('appVersionCode') ? project.appVersionCode.toInteger() : 1)
+        versionName '1.0'
+    }
+
+    buildTypes {
+        release { minifyEnabled false }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    // FileProvider: Android 7 rejects a file:// uri handed to the package installer.
+    implementation 'androidx.core:core:1.12.0'
+}

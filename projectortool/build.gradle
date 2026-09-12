@@ -1,0 +1,5 @@
+// Standalone from the androidtv app on purpose: this is a throwaway service tool
+// for one device, and it must never ride along with a Marquee release.
+plugins {
+    id 'com.android.application' version '8.5.2' apply false
+}
