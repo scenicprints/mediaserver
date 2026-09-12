@@ -321,6 +321,53 @@ app.post('/api/logout', async (req, reply) => {
 
 app.get('/api/me', async (req) => ({ user: req.user }));
 
+// ---- Passwords ----
+// There was no way to change one. The only user routes were list, create and
+// delete, and the hash is one-way, so a forgotten password meant either editing
+// SQLite by hand on the server or abandoning the account — and abandoning it
+// throws away the watch history and resume points tied to that user id.
+
+// Change your own. The current password is required, so someone who wanders up
+// to a signed-in device can't lock the owner out of their own account.
+app.post('/api/me/password', async (req, reply) => {
+  if (!req.user) return reply.code(401).send({ error: 'sign in first' });
+  if (authThrottled(req)) return reply.code(429).send({ error: 'too many attempts — wait a minute' });
+  const { currentPassword, newPassword } = req.body || {};
+  if (String(newPassword || '').length < 4) {
+    return reply.code(400).send({ error: 'new password too short' });
+  }
+  const u = db.prepare('SELECT id, password_hash FROM users WHERE id = ?').get(req.user.id);
+  if (!u || !verifyPassword(currentPassword, u.password_hash)) {
+    return reply.code(403).send({ error: 'current password is wrong' });
+  }
+  db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(newPassword), u.id);
+  // Sign this account's other devices out, since the old password is what they
+  // were trusted on — but keep the session doing the changing, so you aren't
+  // thrown back to the login screen by your own action.
+  db.prepare('DELETE FROM tokens WHERE user_id = ? AND token != ?').run(u.id, tokenFromReq(req) || '');
+  return { ok: true };
+});
+
+// Admin reset. Deliberately does NOT ask for the current password: the entire
+// point is that nobody has it. This is what rescues a locked-out account
+// without deleting it.
+app.post('/api/users/:id/password', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const id = Number(req.params.id);
+  const { newPassword } = req.body || {};
+  if (String(newPassword || '').length < 4) {
+    return reply.code(400).send({ error: 'password too short' });
+  }
+  const target = db.prepare('SELECT id, username FROM users WHERE id = ?').get(id);
+  if (!target) return reply.code(404).send({ error: 'not found' });
+  db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(newPassword), id);
+  // Every device signed in as that user must authenticate again. If an admin is
+  // resetting their own password, spare the session they're doing it from.
+  const keep = id === req.user.id ? (tokenFromReq(req) || '') : '';
+  db.prepare('DELETE FROM tokens WHERE user_id = ? AND token != ?').run(id, keep);
+  return { ok: true, username: target.username };
+});
+
 // Admin: manage accounts (you add your friend here — no server-level access for them).
 app.get('/api/users', async (req, reply) => {
   if (!requireAdmin(req, reply)) return;
