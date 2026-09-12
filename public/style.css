@@ -186,7 +186,11 @@ button { font-family: inherit; }
 /* ---------- Buttons & chips ---------- */
 .btn {
   display: inline-flex; align-items: center; gap: 8px; cursor: pointer;
-  background: rgba(40, 44, 56, 0.75); color: var(--text); border: 1px solid rgba(255, 255, 255, 0.14);
+  /* The background here is a fixed dark glass chip, so the label has to be a
+     fixed LIGHT ink. It used to be var(--text), which is near-black in the White
+     finish — dark text on a dark button, unreadable. The variants below
+     (.btn-play, .btn-grad, .btn-danger) set their own pair and are unaffected. */
+  background: rgba(40, 44, 56, 0.75); color: #efeee9; border: 1px solid rgba(255, 255, 255, 0.14);
   padding: 11px 20px; border-radius: 0; font-weight: 600; font-size: 15px; backdrop-filter: blur(6px);
   transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
 }
@@ -1031,6 +1035,11 @@ body.tv-mode .vp-fs { display: none; }
    up in the nav section; this is the VERTICAL inset so the bar isn't half-eaten
    at the top of the screen. Page top-paddings grow to match (PAGE_TOP, app.js). */
 body.tv-mode .nav { padding-top: calc(14px + 2vh); }
+/* Live TV sets its own top padding in CSS instead of going through PAGE_TOP
+   (app.js), so it never grew to match the taller TV nav — the channel badge and
+   the "now playing" title were sliding underneath it and getting clipped. 96px
+   is PAGE_TOP's TV value; keep the two in step. */
+body.tv-mode .livetv { padding-top: 96px; }
 /* Requests lives in Settings ▸ Requests on TV: with seven tabs the strip
    overflows an overscanned 960–1280px canvas and remote focus lands on clipped,
    invisible tabs (the "can't get to Requests" bug). Six fit. */

@@ -12,7 +12,11 @@
   // control nested inside a bigger one (e.g. the ▶ inside a card) —
   // the ancestor rule below keeps only the outermost target.
   const SELECTOR = [
-    '.card', '.coll-card', '.req-card', '.nav-link', '.hero-dot', '.see-all', '.season-card',
+    // .hero-dot is deliberately NOT here. The rotating tiles on the marquee are
+    // an indicator, not a destination: making them focusable put a row of stops
+    // between the hero and the first real row, which is what made vertical
+    // navigation feel like it was jumping around. The carousel rotates itself.
+    '.card', '.coll-card', '.req-card', '.nav-link', '.see-all', '.season-card',
     '.episode', '.rec', '.trailer-card', '.tab', '.az', '.frow',
     '.btn', '.close', '.detail-close', '.icon-btn', '.rm', '#update-pill',
     '.src-chip', // Settings ▸ Streaming source toggles — without this the remote can't leave the tab row
