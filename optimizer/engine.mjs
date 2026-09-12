@@ -122,9 +122,29 @@ function tempNameFor(src, ext) {
   return `${stem}${TMP_SUFFIX}.${process.pid}.${Date.now().toString(36)}${ext}`;
 }
 
+/** The file a temp name was made from, or null if the name is not one of ours. */
+export function originalOf(tempPath) {
+  const dir = path.dirname(tempPath);
+  const base = path.basename(tempPath);
+  const i = base.indexOf(TMP_SUFFIX);
+  if (i < 0) return null;
+  const ext = path.extname(base);
+  return path.join(dir, base.slice(0, i) + ext);
+}
+
 // Clear temp files left by runs that are no longer alive. Best-effort by
 // design: one that is still locked is skipped and tried again next time, which
 // is exactly right — it costs nothing and it cannot block the work.
+//
+// WITH ONE ABSOLUTE EXCEPTION. A temp file is litter only while the file it was
+// made from is still there. If the original is MISSING, this temp is not
+// litter — it is the only copy, left behind by a swap that got half way — and
+// deleting it is precisely the data loss this function exists to tidy up after.
+//
+// That is not hypothetical. Nine 4K films, 188 GiB, sat in H:\4k under temp
+// names after their sources were deleted and the rename back failed; the next
+// job in that folder would have swept every one of them. They are recoverable
+// exactly because the bytes are still on disk under an odd name.
 export function sweepTempFiles(dir, { log = () => {} } = {}) {
   let names = [];
   try { names = fs.readdirSync(dir); } catch { return 0; }
@@ -132,6 +152,13 @@ export function sweepTempFiles(dir, { log = () => {} } = {}) {
   for (const n of names) {
     if (!n.includes(TMP_SUFFIX)) continue;
     const p = path.join(dir, n);
+
+    const orig = originalOf(p);
+    if (orig && !fs.existsSync(orig)) {
+      log(`KEEPING ${n} — the file it came from is gone, so this is the only copy. Recover it, do not sweep it.`);
+      continue;
+    }
+
     try {
       const size = fs.statSync(p).size;
       fs.rmSync(p, { force: true });
@@ -140,6 +167,73 @@ export function sweepTempFiles(dir, { log = () => {} } = {}) {
     } catch { /* still held: leave it, we will try again next time */ }
   }
   return freed;
+}
+
+/**
+ * Put back files a half-finished swap left under a temp name.
+ *
+ * Reports by default; pass { apply: true } to move them. Every candidate has to
+ * clear the same bar the swap itself should have: the destination must be free,
+ * the temp must probe as real video, and its duration must match what the
+ * library recorded — a truncated or unreadable temp is left alone and reported
+ * rather than promoted into the library.
+ */
+export async function recoverOrphanedTemps(db, dirs, { apply = false, log = () => {} } = {}) {
+  const found = [], recovered = [], refused = [];
+
+  for (const dir of dirs) {
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch { continue; }
+    for (const n of names) {
+      if (!n.includes(TMP_SUFFIX)) continue;
+      const p = path.join(dir, n);
+      const orig = originalOf(p);
+      if (!orig || fs.existsSync(orig)) continue;   // not an orphan
+      found.push({ temp: p, original: orig });
+    }
+  }
+
+  for (const f of found) {
+    const row = db.prepare('SELECT * FROM media_info WHERE lower(path) = lower(?)').get(f.original);
+    const probe = await probeOne(f.temp);
+    let size = 0;
+    try { size = fs.statSync(f.temp).size; } catch {}
+
+    if (probe.error) { refused.push({ ...f, why: 'the temp file will not probe: ' + probe.error }); continue; }
+    if (!probe.vcodec) { refused.push({ ...f, why: 'no video stream in the temp file' }); continue; }
+    if (fs.existsSync(f.original)) { refused.push({ ...f, why: 'something is at the destination now' }); continue; }
+    if (row && Number(row.duration) > 0 && Math.abs((probe.duration || 0) - Number(row.duration)) > 2) {
+      refused.push({ ...f, why: `runtime does not match the library (${Math.round(row.duration)}s recorded, ${Math.round(probe.duration || 0)}s in the temp file)` });
+      continue;
+    }
+
+    if (!apply) { recovered.push({ ...f, size, duration: probe.duration, pending: true }); continue; }
+
+    try {
+      moveNoClobber(f.temp, f.original);
+      recovered.push({ ...f, size, duration: probe.duration });
+      log(`recovered ${path.basename(f.original)} (${(size / 2 ** 30).toFixed(2)} GiB)`);
+      // The file is back where the library expects it; re-probe so the row
+      // describes what is actually there now, including the added audio track.
+      if (row) {
+        const fresh = await probeOne(f.original);
+        if (!fresh.error) {
+          db.prepare(`UPDATE media_info SET size=?, mtime=?, duration=?, container=?, vcodec=?, width=?, height=?,
+                       pix_fmt=?, hdr=?, vkbps=?, acodec=?, achannels=?, akbps=?, audio_json=?, probed_at=?, probe_error=NULL
+                       WHERE file_kind=? AND file_id=?`)
+            .run(fresh.size, fresh.mtime, fresh.duration, fresh.container, fresh.vcodec, fresh.width, fresh.height,
+              fresh.pix_fmt, fresh.hdr, fresh.vkbps, fresh.acodec, fresh.achannels, fresh.akbps,
+              fresh.audio_json, Date.now(), row.file_kind, row.file_id);
+          const table = row.file_kind === 'episode' ? 'episode_files' : 'movie_files';
+          db.prepare(`UPDATE ${table} SET size = ? WHERE id = ?`).run(fresh.size, row.file_id);
+        }
+      }
+    } catch (e) {
+      refused.push({ ...f, why: 'rename failed: ' + e.message });
+    }
+  }
+
+  return { found: found.length, recovered, refused };
 }
 
 // ---- Giving up, and not giving up too early ----------------------------
@@ -1325,15 +1419,35 @@ async function runJob(db, job, { log, allow4kVideo, allowHdrVideo }) {
   const finalPath = path.extname(src).toLowerCase() === ext.toLowerCase()
     ? src
     : src.replace(/\.[^.]+$/, '') + ext;
+  // Move the original aside, put the new file in, then drop the original.
+  //
+  // Deleting first and renaming second is what it used to do, and on Windows
+  // that pair is unsafe: a delete on a file something else holds open only
+  // marks the name for deletion, so the rename onto it fails EBUSY and the
+  // source is gone. The add-audio path had the identical bug and it cost nine
+  // 4K films their names — recoverable only because the bytes survived under a
+  // temp name. This ordering has no such window: a failure at the first step
+  // changes nothing, and a failure at the second puts the original back.
+  const aside = src + '.replacing';
+  try { fs.rmSync(aside, { force: true }); } catch { /* nothing there */ }
   try {
-    fs.rmSync(src, { force: true });
+    fs.renameSync(src, aside);
+  } catch (e) {
+    fs.rmSync(dst, { force: true });
+    note(`Could not move ${path.basename(src)} aside (${e.message}) — nothing was changed.`);
+    return setState('failed', { error: `could not move the original aside: ${e.message} — nothing was changed`, ended_at: Date.now() });
+  }
+  try {
     fs.renameSync(dst, finalPath);
   } catch (e) {
-    // The source is gone but the rename failed — surface it loudly; the encoded
-    // file is still on disk under its temp name and can be renamed by hand.
-    note(`CRITICAL: ${path.basename(src)} replaced but rename failed: ${e.message}. Encoded file is at ${dst}`);
-    return setState('failed', { error: `replace failed after delete — encoded file is at ${dst}: ${e.message}`, ended_at: Date.now() });
+    try { fs.renameSync(aside, src); } catch { /* reported below */ }
+    fs.rmSync(dst, { force: true });
+    const back = fs.existsSync(src);
+    note(`Could not put the new ${path.basename(src)} in place (${e.message})${back ? ' — original restored.' : ` — ORIGINAL IS AT ${aside}.`}`);
+    return setState('failed', { error: `could not put the new file in place: ${e.message}` +
+      (back ? ' — original restored' : ` — the original is at ${aside}`), ended_at: Date.now() });
   }
+  try { fs.rmSync(aside, { force: true }); } catch { /* Windows defers it; the name is already free */ }
 
   // Repoint the library at the new file.
   const table = job.file_kind === 'episode' ? 'episode_files' : 'movie_files';
@@ -1556,9 +1670,42 @@ export async function addCompatibleAudio(db, kind, fileId, { log = () => {}, dry
     return { ok: true, dryRun: true, sample: keep, beforeHash, afterHash, oldSize: st.size, newSize };
   }
 
-  // Swap in. The original is only removed once everything above passed.
-  fs.rmSync(src, { force: true });
-  fs.renameSync(dst, src);
+  // Swap in, leaving no moment where the library's name resolves to nothing.
+  //
+  // This was `rmSync(src)` then `renameSync(dst, src)`, with no catch, and on
+  // Windows that is not a safe pair. Deleting a file another process holds open
+  // does not remove the name — it MARKS it for deletion and the name survives
+  // until the last handle closes — so the rename onto that name fails EBUSY.
+  // It did, on nine 4K films that the media server happened to have open. The
+  // source was gone, the finished file was still under its temp name, and the
+  // exception went uncaught: the job recorded "file is gone" and the only copy
+  // of each film sat waiting for the temp sweeper to find it. 188 GiB.
+  //
+  // The order below cannot do that. The original is moved aside first; if that
+  // fails, nothing has happened at all. Only once the new file holds the name
+  // is the old one removed, and if putting it in place fails the original goes
+  // straight back.
+  const aside = src + '.replacing';
+  try { fs.rmSync(aside, { force: true }); } catch { /* nothing there */ }
+  try {
+    fs.renameSync(src, aside);
+  } catch (e) {
+    fs.rmSync(dst, { force: true });
+    return { ok: false, error: `could not move the original aside (${e.message}) — nothing was changed` };
+  }
+  try {
+    fs.renameSync(dst, src);
+  } catch (e) {
+    try { fs.renameSync(aside, src); } catch { /* reported below */ }
+    fs.rmSync(dst, { force: true });
+    const back = fs.existsSync(src);
+    return { ok: false, error: `could not put the new file in place (${e.message})` +
+      (back ? ' — original restored' : ` — THE ORIGINAL IS AT ${aside}, rename it back`) };
+  }
+  // Windows defers this while anything still holds a handle, which is fine:
+  // the name is already free and the file goes when the last reader lets go.
+  try { fs.rmSync(aside, { force: true }); } catch { /* deferred */ }
+
   const table = kind === 'episode' ? 'episode_files' : 'movie_files';
   db.prepare(`UPDATE ${table} SET size = ? WHERE id = ?`).run(newSize, fileId);
   const fresh = await probeOne(src);
