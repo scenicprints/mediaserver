@@ -11,6 +11,7 @@ import android.content.pm.ResolveInfo;
 import android.net.Uri;
 import android.os.Build;
 import android.provider.Settings;
+import android.webkit.WebSettings;
 import android.webkit.WebView;
 
 import androidx.core.content.FileProvider;
@@ -45,11 +46,16 @@ final class Device {
     // ------------------------------------------------------------ inspection
 
     /** The engine version is the whole question on this device, and the user
-     *  agent is the one place every Android version states it plainly. */
+     *  agent is the one place every Android version states it plainly.
+     *
+     *  Read it from the static WebSettings accessor, never by constructing a
+     *  WebView: WebView's thread check doesn't throw where you call it, it posts
+     *  the exception to the main thread, so a try/catch here cannot stop it and
+     *  the whole process dies. This is called from the bridge's socket thread. */
     static String webViewSummary(Context c) {
         String ua = null;
         try {
-            ua = new WebView(c).getSettings().getUserAgentString();
+            ua = WebSettings.getDefaultUserAgent(c);
         } catch (Throwable ignored) { /* a broken WebView must not kill the tool */ }
 
         String chrome = null;

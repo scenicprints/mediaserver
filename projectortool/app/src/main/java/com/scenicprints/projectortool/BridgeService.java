@@ -9,6 +9,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.os.Build;
 import android.os.IBinder;
+import android.util.Log;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
@@ -38,8 +39,25 @@ public class BridgeService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        installCrashGuard();
         startForeground(NOTE_ID, buildNotification());
         startServer();
+    }
+
+    /**
+     * A crash here puts a system dialog on the projector's screen, and that
+     * dialog swallows the remote — it once sat on top of the launcher chooser
+     * and blocked the very thing we were trying to do. Log it where /logcat can
+     * still retrieve it, then exit quietly; START_STICKY brings the bridge back
+     * a moment later with nothing on screen.
+     */
+    private void installCrashGuard() {
+        Thread.setDefaultUncaughtExceptionHandler((thread, error) -> {
+            try {
+                Log.e("ProjectorTool", "uncaught on " + thread.getName(), error);
+            } catch (Throwable ignored) { }
+            System.exit(0);
+        });
     }
 
     @Override
