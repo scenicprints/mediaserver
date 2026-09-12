@@ -23,9 +23,12 @@ public class MarqueeActivity extends Activity {
     private static final String URL = "https://marqu33.duckdns.org/?tv=1";
 
     /** Browsers that ship their own engine, best first. Firefox for Fire TV is
-     *  the one built for a D-pad remote; the others are ordinary fallbacks. */
+     *  built for a D-pad remote, so it leads. Samsung Internet is next because
+     *  it's already on this projector and is Chromium 87 — new enough for
+     *  everything the UI uses, where the system WebView is Chrome 52. */
     private static final String[] PREFERRED = {
             "org.mozilla.tv.firefox",
+            "com.sec.android.app.sbrowser",
             "org.mozilla.firefox",
             "org.mozilla.fennec_fdroid",
             "com.android.chrome",
