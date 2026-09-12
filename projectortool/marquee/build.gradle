@@ -1,0 +1,58 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'com.scenicprints.marquee.projector'
+    compileSdk 34
+
+    defaultConfig {
+        // Distinct from com.scenicprints.marquee: this is the projector-only
+        // build, and it must be installable alongside the real app rather than
+        // colliding with it.
+        applicationId 'com.scenicprints.marquee.projector'
+        minSdk 21
+        targetSdk 28
+        versionCode (project.hasProperty('appVersionCode') ? project.appVersionCode.toInteger() : 1)
+        versionName '1.0'
+
+        // The VAVA is 32-bit only. GeckoView ships every ABI, and without this
+        // the APK carries three engines it can never load.
+        ndk { abiFilters 'armeabi-v7a' }
+    }
+
+    signingConfigs {
+        release {
+            def ks = rootProject.file('keystore/tool.jks')
+            if (ks.exists()) {
+                storeFile ks
+                storePassword 'projector'
+                keyAlias 'projector'
+                keyPassword 'projector'
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            if (rootProject.file('keystore/tool.jks').exists()) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        // Sideloaded onto one Android 7.1 projector; never goes near Play.
+        disable 'ExpiredTargetSdkVersion'
+    }
+}
+
+dependencies {
+    // The whole point: our own engine, so the system WebView being Chrome 52
+    // stops mattering. -omni bundles the JS/resources rather than fetching them.
+    implementation 'org.mozilla.geckoview:geckoview-omni:155.0.20260903215306'
+}

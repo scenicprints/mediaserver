@@ -40,7 +40,7 @@
         <activity
             android:name=".MarqueeActivity"
             android:exported="true"
-            android:label="Marquee"
+            android:label="Marquee (browser)"
             android:icon="@mipmap/ic_launcher"
             android:excludeFromRecents="true"
             android:noHistory="true"

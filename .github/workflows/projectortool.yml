@@ -62,4 +62,4 @@ jobs:
         with:
           name: projector-tool-apk
           if-no-files-found: error
-          path: projectortool/app/build/outputs/apk/release/*.apk
+          path: projectortool/*/build/outputs/apk/release/*.apk
