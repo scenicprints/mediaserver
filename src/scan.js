@@ -154,7 +154,24 @@ export async function pruneMissing(db) {
   db.prepare('DELETE FROM episodes WHERE id NOT IN (SELECT DISTINCT episode_id FROM episode_files)').run();
   db.prepare('DELETE FROM shows WHERE id NOT IN (SELECT DISTINCT show_id FROM episodes)').run();
 
-  return { removed };
+  // And the probe rows for those files.
+  //
+  // media_info is keyed on (file_kind, file_id) by convention rather than by a
+  // foreign key, so nothing cascades and this step was simply missing: every
+  // file that ever vanished left its probe row behind for good. Sixty-five had
+  // collected here.
+  //
+  // They are not harmless clutter. The optimizer plans work from media_info,
+  // and so does the pool migration — a row with no file is a phantom entry in
+  // both, and in the migration it is a planned move of something that does not
+  // exist. This inherits the same protection as the deletions above: a file on
+  // an unreachable drive is never counted as missing, so its row survives.
+  const orphanedInfo = db.prepare(`
+    DELETE FROM media_info
+    WHERE (file_kind = 'movie'   AND file_id NOT IN (SELECT id FROM movie_files))
+       OR (file_kind = 'episode' AND file_id NOT IN (SELECT id FROM episode_files))`).run().changes;
+
+  return { removed, orphanedInfo };
 }
 
 // Folders whose contents are another program's output rather than source media.
