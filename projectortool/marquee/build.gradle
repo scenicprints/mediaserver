@@ -9,7 +9,8 @@ android {
         // build, and it must be installable alongside the real app rather than
         // colliding with it.
         applicationId 'com.scenicprints.marquee.projector'
-        minSdk 21
+        // The projector is API 25; 24 clears every transitive library's floor.
+        minSdk 24
         targetSdk 28
         versionCode (project.hasProperty('appVersionCode') ? project.appVersionCode.toInteger() : 1)
         versionName '1.0'
@@ -54,5 +55,9 @@ android {
 dependencies {
     // The whole point: our own engine, so the system WebView being Chrome 52
     // stops mattering. -omni bundles the JS/resources rather than fetching them.
-    implementation 'org.mozilla.geckoview:geckoview-omni:155.0.20260903215306'
+    //
+    // Pinned to 128 (ESR): current GeckoView drags in androidx.core 1.19, which
+    // demands AGP 9.1 and a higher minSdk. 128 uses androidx.core 1.13.1 and is
+    // still Firefox 128 — generations past the Chrome 52 this replaces.
+    implementation 'org.mozilla.geckoview:geckoview-omni:128.0.20240725162350'
 }
