@@ -10,6 +10,10 @@ on:
       - '.github/workflows/projectortool.yml'
   workflow_dispatch:
 
+# Needed once, to commit the generated signing key back to the branch.
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -26,19 +30,36 @@ jobs:
       - name: Install SDK packages
         run: sdkmanager "platforms;android-34" "build-tools;34.0.0"
 
+      # One fixed key for every build. A fresh runner invents a new debug key each
+      # time, and Android then refuses to install the new version over the old —
+      # which forced an uninstall on the first update.
+      - name: Ensure signing keystore (generate + commit once)
+        working-directory: projectortool
+        run: |
+          if [ ! -f keystore/tool.jks ]; then
+            mkdir -p keystore
+            keytool -genkeypair -v -keystore keystore/tool.jks -alias projector \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass projector -keypass projector \
+              -dname "CN=ProjectorTool,O=scenicprints,C=US"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add keystore/tool.jks
+            git commit -m "Add fixed signing key for Projector Tool [skip ci]"
+            git push origin HEAD:${{ github.ref_name }}
+          fi
+
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
 
-      # Debug build on purpose: it is signed with the standard debug key, so it
-      # installs straight off a USB stick with no keystore to manage.
       - name: Build APK
         working-directory: projectortool
-        run: gradle assembleDebug -PappVersionCode=${{ github.run_number }} --no-daemon --stacktrace
+        run: gradle assembleRelease -PappVersionCode=${{ github.run_number }} --no-daemon --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: projector-tool-apk
           if-no-files-found: error
-          path: projectortool/app/build/outputs/apk/debug/*.apk
+          path: projectortool/app/build/outputs/apk/release/*.apk

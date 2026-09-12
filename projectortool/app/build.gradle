@@ -13,8 +13,29 @@ android {
         versionName '1.0'
     }
 
+    // Fixed keystore (generated and committed by CI on first run) so every build
+    // shares one signing key. Without it each CI runner invents a fresh debug key
+    // and the next version refuses to install over the last one — which is
+    // exactly what bit the first sideload.
+    signingConfigs {
+        release {
+            def ks = rootProject.file('keystore/tool.jks')
+            if (ks.exists()) {
+                storeFile ks
+                storePassword 'projector'
+                keyAlias 'projector'
+                keyPassword 'projector'
+            }
+        }
+    }
+
     buildTypes {
-        release { minifyEnabled false }
+        release {
+            minifyEnabled false
+            if (rootProject.file('keystore/tool.jks').exists()) {
+                signingConfig signingConfigs.release
+            }
+        }
     }
 
     compileOptions {
