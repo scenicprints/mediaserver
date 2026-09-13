@@ -1,6 +1,7 @@
 package com.scenicprints.marquee.projector;
 
 import android.app.Activity;
+import android.content.Intent;
 import android.os.Bundle;
 import android.view.KeyEvent;
 import android.view.View;
@@ -58,6 +59,10 @@ public class MainActivity extends Activity {
         setContentView(view);
         view.requestFocus(); // content must hold focus or forwarded keys go nowhere
         goImmersive();
+
+        // The offline library serves itself over loopback; the page finds it
+        // by feature-detecting http://127.0.0.1:8098/ping.
+        startService(new Intent(this, DownloadService.class));
 
         session.loadUri(URL);
     }
