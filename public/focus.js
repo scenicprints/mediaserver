@@ -115,6 +115,23 @@
       vert.sort((a, b) => (dir === 'down' ? a.r.top - b.r.top : b.r.top - a.r.top));
       const anchor = vert[0].r.top;
       const band = vert.filter((x) => Math.abs(x.r.top - anchor) <= 40);
+      // A carousel row is entered at its START, not at whatever card happens to
+      // sit under you. These rows scroll independently, so "aligned with where
+      // you were" lands somewhere arbitrary in the middle of a row that was left
+      // scrolled from an earlier visit — which reads as focus jumping about.
+      // Grids are different and keep column alignment: dropping to the far left
+      // of a grid every time would be its own kind of wrong.
+      const CAROUSEL = '.row-track, .dp-hscroll, .season-cards';
+      const track = band[0].el.closest(CAROUSEL);
+      if (track) {
+        let first = null;
+        for (const { el, r } of band) {
+          if (el.closest(CAROUSEL) !== track) continue;
+          if (!first || r.left < first.r.left) first = { el, r };
+        }
+        if (first) return first.el;
+      }
+
       let pickBest = null, pickD = Infinity;
       for (const { el, r } of band) {
         // Prefer something horizontally overlapping the current item, but rank
