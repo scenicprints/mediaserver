@@ -1,0 +1,96 @@
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Marquee — offline</title>
+<style>
+  :root { --bg:#0b0c10; --panel:#14161d; --line:#2a2d38; --ink:#efeee9; --muted:#8c8c86; --accent:#de5f10; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:16px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+         padding: 5.5vw 5.5vw 4vw; }
+  h1 { font-size:30px; margin:0 0 4px; letter-spacing:1px; }
+  .sub { color:var(--muted); margin:0 0 28px; font-size:15px; }
+  .grid { display:flex; flex-wrap:wrap; gap:16px; }
+  .item { background:var(--panel); border:1px solid var(--line); padding:18px 20px;
+          min-width:260px; max-width:420px; cursor:pointer; }
+  .item.sel { border-color:var(--accent); box-shadow:0 0 0 3px var(--accent); }
+  .t { font-weight:700; font-size:18px; margin-bottom:4px; }
+  .m { color:var(--muted); font-size:13px; }
+  .empty { color:var(--muted); }
+  /* The player is a plain full-screen video: this page exists precisely for the
+     case where nothing else is reachable, so it depends on nothing. */
+  #player { position:fixed; inset:0; background:#000; display:none; }
+  #player.on { display:block; }
+  video { width:100%; height:100%; background:#000; }
+</style>
+
+<h1>Marquee</h1>
+<p class="sub">No connection to the server. These are the titles stored on this projector.</p>
+<div class="grid" id="grid"><span class="empty">Looking…</span></div>
+<div id="player"><video id="v" controls></video></div>
+
+<script>
+  var items = [], sel = 0, playing = false;
+  var grid = document.getElementById('grid');
+  var player = document.getElementById('player');
+  var v = document.getElementById('v');
+
+  function mb(n) { return n > 0 ? Math.round(n / 1048576) + ' MB' : ''; }
+
+  function render() {
+    if (!items.length) {
+      grid.innerHTML = '<span class="empty">Nothing downloaded yet. Connect to the server and use Download on a title.</span>';
+      return;
+    }
+    grid.innerHTML = '';
+    items.forEach(function (e, i) {
+      var d = document.createElement('div');
+      d.className = 'item' + (i === sel ? ' sel' : '');
+      d.innerHTML = '<div class="t"></div><div class="m"></div>';
+      d.querySelector('.t').textContent = e.title || e.id;
+      d.querySelector('.m').textContent = [e.kind === 'episode' ? 'Episode' : 'Film', mb(e.total)]
+        .filter(Boolean).join(' · ');
+      d.addEventListener('click', function () { sel = i; play(); });
+      grid.appendChild(d);
+    });
+  }
+
+  function play() {
+    var e = items[sel];
+    if (!e) return;
+    v.src = '/file/' + encodeURIComponent(e.id);
+    player.className = 'on';
+    playing = true;
+    v.play();
+  }
+
+  function stop() {
+    playing = false;
+    player.className = '';
+    v.pause();
+    v.removeAttribute('src');
+    v.load();
+  }
+
+  document.addEventListener('keydown', function (ev) {
+    var k = ev.key;
+    if (playing) {
+      if (k === 'Backspace' || k === 'Escape' || k === 'GoBack') { ev.preventDefault(); stop(); }
+      else if (k === 'Enter' || k === ' ') { ev.preventDefault(); v.paused ? v.play() : v.pause(); }
+      else if (k === 'ArrowRight') { v.currentTime += 10; }
+      else if (k === 'ArrowLeft') { v.currentTime -= 10; }
+      return;
+    }
+    if (k === 'ArrowRight' || k === 'ArrowDown') { sel = Math.min(sel + 1, items.length - 1); render(); }
+    else if (k === 'ArrowLeft' || k === 'ArrowUp') { sel = Math.max(sel - 1, 0); render(); }
+    else if (k === 'Enter') { ev.preventDefault(); play(); }
+  });
+
+  fetch('/list')
+    .then(function (r) { return r.json(); })
+    .then(function (list) {
+      items = list.filter(function (e) { return e.state === 'done'; });
+      render();
+    })
+    .catch(function () {
+      grid.innerHTML = '<span class="empty">The download service isn\'t running.</span>';
+    });
+</script>

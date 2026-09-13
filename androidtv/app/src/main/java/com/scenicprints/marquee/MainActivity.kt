@@ -95,6 +95,11 @@ class MainActivity : Activity() {
 
         if (savedInstanceState == null) web.loadUrl(startUrl) else web.restoreState(savedInstanceState)
 
+        // Offline library: serves downloaded titles back over loopback. The web
+        // UI finds it by feature-detecting http://127.0.0.1:8098/ping, so this
+        // starting is the whole integration.
+        startService(Intent(this, DownloadService::class.java))
+
         checkForUpdate()
     }
 

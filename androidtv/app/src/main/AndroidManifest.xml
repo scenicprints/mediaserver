@@ -4,6 +4,8 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- For the future in-app self-updater (install a downloaded APK). -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- The offline library keeps serving while you browse and after a reboot. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
 
     <!-- Runs on Android TV / Google TV AND plain-Android devices (e.g. VAVA 4K
          projector, Android 7.1). leanback is optional so non-TV Android installs. -->
@@ -75,5 +77,9 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+        <service
+            android:name=".DownloadService"
+            android:exported="false" />
+
     </application>
 </manifest>
