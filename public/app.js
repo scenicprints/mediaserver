@@ -24,6 +24,96 @@ function withToken(url) {
   return url + (url.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(WEBOS_TOKEN);
 }
 
+// ---- Offline downloads ----
+// The TV clients run a small server on loopback that stores titles and serves
+// them back with range support, so a downloaded film plays in this player like
+// any other URL. Feature-detected: on a device without one, nothing here ever
+// shows up and the UI is exactly as it was.
+const OFFLINE_BASE = 'http://127.0.0.1:8098';
+let offlineReady = false;
+let offlineMap = new Map();
+
+async function offlineProbe() {
+  try {
+    const ctl = new AbortController();
+    const bail = setTimeout(() => ctl.abort(), 1200); // never delay startup
+    const r = await fetch(OFFLINE_BASE + '/ping', { signal: ctl.signal });
+    clearTimeout(bail);
+    offlineReady = r.ok;
+  } catch (_e) {
+    offlineReady = false;
+  }
+  if (offlineReady) await offlineRefresh();
+}
+
+async function offlineRefresh() {
+  if (!offlineReady) return;
+  try {
+    const list = await (await fetch(OFFLINE_BASE + '/list')).json();
+    offlineMap = new Map(list.map((e) => [String(e.id), e]));
+  } catch (_e) { /* helper went away mid-session */ }
+}
+
+function offlineEntry(fileId) {
+  return fileId ? offlineMap.get(String(fileId)) : null;
+}
+
+/** A downloaded copy is only useful if this device could have direct-played it
+ *  anyway — a file that needs transcoding won't play off disk either. */
+async function offlineStart(kind, fileId, title) {
+  let info = null;
+  try { info = await (await fetch('/api/play/' + kind + '/' + fileId)).json(); } catch (_e) {}
+  if (info && info.mode === 'transcode') {
+    alert("This one has to be converted as it plays, so an offline copy wouldn't play either.");
+    return;
+  }
+  let token = null;
+  try { token = (await (await fetch('/api/me/download-token', { method: 'POST' })).json()).token; } catch (_e) {}
+  if (!token) { alert('Could not get permission to download.'); return; }
+  const q = 'id=' + encodeURIComponent(fileId) + '&kind=' + encodeURIComponent(kind)
+    + '&title=' + encodeURIComponent(title || '') + '&token=' + encodeURIComponent(token);
+  try { await fetch(OFFLINE_BASE + '/start?' + q); } catch (_e) {}
+  await offlineRefresh();
+}
+
+async function offlineDelete(fileId) {
+  try { await fetch(OFFLINE_BASE + '/delete?id=' + encodeURIComponent(fileId)); } catch (_e) {}
+  await offlineRefresh();
+}
+
+/** Rendered into the detail action rows. Empty string on any device without the
+ *  helper, which is every browser. */
+function offlineButton(kind, fileId, title) {
+  if (!offlineReady || !fileId) return '';
+  const e = offlineEntry(fileId);
+  let label = '⬇ Download';
+  if (e && e.state === 'done') label = '✓ Downloaded';
+  else if (e && e.state === 'downloading') {
+    const pct = e.total > 0 ? Math.round((e.got / e.total) * 100) : 0;
+    label = 'Downloading ' + pct + '%';
+  } else if (e && e.state === 'failed') label = '↻ Retry download';
+  return '<button class="btn offline-btn" data-kind="' + kind + '" data-file="' + fileId
+    + '" data-title="' + escapeHtml(title || '') + '">' + label + '</button>';
+}
+
+document.addEventListener('click', async (ev) => {
+  const btn = ev.target.closest ? ev.target.closest('.offline-btn') : null;
+  if (!btn) return;
+  ev.preventDefault();
+  const fileId = btn.dataset.file;
+  const e = offlineEntry(fileId);
+  if (e && e.state === 'done') {
+    if (!confirm('Remove the downloaded copy? It will stream from the server again.')) return;
+    await offlineDelete(fileId);
+    btn.textContent = '⬇ Download';
+    return;
+  }
+  btn.textContent = 'Starting…';
+  await offlineStart(btn.dataset.kind, fileId, btn.dataset.title);
+  const now = offlineEntry(fileId);
+  btn.textContent = now && now.state === 'done' ? '✓ Downloaded' : 'Downloading…';
+});
+
 const _fetch = window.fetch.bind(window);
 window.fetch = async (...args) => {
   // webOS app: attach the token as a Bearer header on same-origin API calls.
@@ -1553,6 +1643,7 @@ async function openDetail(id, autoplay = true) {
           ${genres.length ? `<div class="dp-genres">${genres.map((g) => `<span class="dp-genre">${escapeHtml(g)}</span>`).join('')}</div>` : ''}
           <div class="dp-actions">
             <span id="d-playbtns"></span>
+            ${offlineButton('movie', current && current.id, m.title)}
             <button class="btn" id="favBtn">${m.favorite ? '★ Favorited' : '☆ Favorite'}</button>
             <button class="btn" id="watchedBtn">${m.watched ? '✓ Watched' : 'Mark watched'}</button>
             ${(extra.alsoOn || []).map((slug) => { const p = STREAM_PROVIDERS[slug]; return p ? `<button class="btn btn-stream" data-slug="${slug}" style="--c:${p.color}">${escapeHtml(p.name)} ▸</button>` : ''; }).join('')}
@@ -1735,6 +1826,7 @@ async function openEpisodeDetail(show, flat, i) {
           </div>
           <div class="dp-actions">
             <span id="ep-playbtns"></span>
+            ${offlineButton('episode', current && current.id, ep.title)}
             <button class="btn" id="ep-watched">${ep.watched ? '✓ Watched' : 'Mark watched'}</button>
             ${versionControl}
             ${isAdmin() && current ? `<button class="btn btn-danger" id="ep-del-file" title="Delete this file from the server">🗑 Delete file</button>` : ''}
@@ -2482,6 +2574,13 @@ function openPlayer(ctx) {
     play = info && info.mode === 'transcode'
       ? { mode: 'transcode', duration: info.duration || null, url: info.url, reason: null }
       : { mode: 'direct', duration: (info && info.duration) || null, url: ctx.streamBase + f.id, reason: (info && info.reason) || null, size: (info && info.size) || null };
+    // A downloaded copy is served from loopback, so play that instead of
+    // streaming it again. Same shape of URL, so everything below is unchanged.
+    const localCopy = offlineEntry(f.id);
+    if (play.mode === 'direct' && localCopy && localCopy.state === 'done') {
+      play.url = OFFLINE_BASE + '/file/' + f.id;
+      play.offline = true;
+    }
     curEngine = (info && info.engine) || null;
     renderEngineBadge(info && info.engine); // admin-only: shows direct-play vs what's being transcoded
     tele('player', { ev: 'load', title: ctx.title, kind: ctx.searchKind, mode: play.mode, reason: play.reason || undefined, quality: f.quality || undefined, live: ctx.live || undefined, at: Math.round(at || 0) });
@@ -4107,6 +4206,7 @@ function escapeHtml(s) {
   currentUser = me.user;
   document.body.classList.toggle('is-admin', currentUser.role === 'admin');
   hideAuth();
+  await offlineProbe(); // before the first render, so Download buttons appear with it
   await loadAll();
   renderView();
   checkForUpdate();
