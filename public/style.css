@@ -1086,9 +1086,10 @@ body.tv-mode .row { contain: layout paint; }
    so when its text is taller than the box the overflow goes UPWARD and the
    channel badge and title vanish behind the nav — which is what "the Live TV
    banner is cut off" was. At 720p the banner needs ~30% exactly, so a long
-   title tipped it over every time. The guide still takes everything left over;
-   min-height only stops it collapsing when a channel has no synopsis. */
-body.tv-mode .lt-preview { flex: 0 0 auto; min-height: 130px; }
+   title tipped it over every time. So: keep 30% as a FLOOR, not a ceiling. It
+   looks exactly as it did on a channel with little to say, and grows instead of
+   hiding its own top when there is more. The guide takes what's left. */
+body.tv-mode .lt-preview { flex: 0 0 auto; min-height: 30%; }
 body.tv-mode .lt-preview-body { padding: 0 4vw 10px; max-width: 640px; }
 body.tv-mode .lt-chan-badge { margin-bottom: 5px; }
 body.tv-mode .lt-title { font-size: 22px; margin: 0 0 5px; }
