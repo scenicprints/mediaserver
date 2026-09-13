@@ -152,7 +152,7 @@ if (TV_MODE) {
 }
 // TVs get a taller clearance under the nav (overscan inset) and shorter rows —
 // hundreds of cards in one page is what makes a low-power TV WebView feel laggy.
-const PAGE_TOP = TV_MODE ? '96px' : '78px';
+const PAGE_TOP = TV_MODE ? '112px' : '78px'; // tracks body.tv-mode .nav padding
 const ROW_N = TV_MODE ? 12 : 24;
 
 // Flight recorder (telemetry.js, loaded first). Guarded so a stale-cached page
