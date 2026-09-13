@@ -25,6 +25,11 @@
   --line: #cbc9c2;        /* structural hairline */
   --line-2: #dcdad3;      /* divider inside a group */
   --text: #1a1b1d;        /* ink */
+  /* Ink for the surfaces that are dark in EVERY finish — the nav, the glass
+     chips, the auth card. Taking var(--text) on those gave dark ink on a dark
+     box in the White finish, which is the "button is dark and the text stays
+     dark" fault. Not themed, on purpose. */
+  --on-dark: #efeee9;
   --text-2: #75756e;      /* secondary */
   --muted: #a3a29b;       /* labels, units, the quiet layer */
   --accent: #de5f10;      /* SIGNAL. State only, never decoration. */
@@ -129,12 +134,12 @@ button { font-family: inherit; }
    the edge; let search yield first if the bar gets truly tight. */
 .nav .icon-btn, .nav .pill-update { flex-shrink: 0; }
 .nav-search {
-  background: rgba(20, 22, 30, 0.7); border: 1px solid var(--line); color: var(--text);
+  background: rgba(20, 22, 30, 0.7); border: 1px solid var(--line); color: var(--on-dark);
   padding: 9px 15px; border-radius: 0; width: 210px; min-width: 0; flex-shrink: 1; outline: none; transition: border-color 0.15s ease, width 0.2s ease;
 }
 .nav-search:focus { border-color: var(--accent); width: 260px; }
 .icon-btn {
-  background: rgba(20, 22, 30, 0.7); border: 1px solid var(--line); color: var(--text);
+  background: rgba(20, 22, 30, 0.7); border: 1px solid var(--line); color: var(--on-dark);
   width: 40px; height: 40px; border-radius: 50%; cursor: pointer; font-size: 16px;
   display: inline-flex; align-items: center; justify-content: center; transition: border-color 0.15s ease;
 }
@@ -190,7 +195,7 @@ button { font-family: inherit; }
      fixed LIGHT ink. It used to be var(--text), which is near-black in the White
      finish — dark text on a dark button, unreadable. The variants below
      (.btn-play, .btn-grad, .btn-danger) set their own pair and are unaffected. */
-  background: rgba(40, 44, 56, 0.75); color: #efeee9; border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(40, 44, 56, 0.75); color: var(--on-dark); border: 1px solid rgba(255, 255, 255, 0.14);
   padding: 11px 20px; border-radius: 0; font-weight: 600; font-size: 15px; backdrop-filter: blur(6px);
   transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
 }
@@ -470,7 +475,7 @@ button { font-family: inherit; }
 .dp-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .dp-version { display: inline-flex; align-items: center; gap: 8px; margin-left: 4px; }
 .dp-version > span { color: var(--muted); font-size: 12.5px; }
-.dp-select { background: rgba(20, 22, 30, 0.85); color: var(--text); border: 1px solid var(--line);
+.dp-select { background: rgba(20, 22, 30, 0.85); color: var(--on-dark); border: 1px solid var(--line);
   border-radius: 0; padding: 9px 12px; font-size: 13px; font-weight: 600; cursor: pointer; outline: none; }
 .dp-select:focus { border-color: var(--accent); }
 
@@ -539,7 +544,7 @@ button { font-family: inherit; }
   transition: border-color 0.12s ease, background 0.12s ease;
 }
 .episode:hover { border-color: var(--accent); }
-.episode.playing { border-color: var(--accent); background: #1b2130; }
+.episode.playing { border-color: var(--accent); background: #1b2130; color: var(--on-dark); }
 .episode .ethumb { width: 132px; aspect-ratio: 16/9; object-fit: cover; border-radius: 0; flex: 0 0 auto; background: #0d0f15; }
 .episode .enum { color: var(--muted); font-weight: 700; font-variant-numeric: tabular-nums; min-width: 34px; }
 .episode .ebody { flex: 1; min-width: 0; }
@@ -883,7 +888,7 @@ body.tv-nav .card:hover { transform: none; }
   box-shadow: 0 0 0 3px var(--accent), 0 0 0 6px rgba(222, 95, 16, 0.32), 0 0 22px rgba(222, 95, 16, 0.55);
 }
 .src-chip.tv-focus { transform: translateY(-1px); } /* same lift as .btn, visible on colored/enabled chips */
-.nav-link.tv-focus { color: var(--text); background: rgba(222, 95, 16, 0.16); }
+.nav-link.tv-focus { color: var(--on-dark); background: rgba(222, 95, 16, 0.16); }
 .btn.tv-focus { transform: translateY(-1px); }
 .hero-dot.tv-focus { transform: scale(1.5); }
 
@@ -891,7 +896,7 @@ body.tv-nav .card:hover { transform: none; }
   border-color: var(--accent);
   box-shadow: 0 0 0 2px var(--accent), 0 0 20px rgba(222, 95, 16, 0.5);
 }
-.episode.tv-focus { background: #1b2130; }
+.episode.tv-focus { background: #1b2130; color: var(--on-dark); }
 
 /* TVs apply overscan — they clip a few percent off every edge — and render at
    their own CSS width. The default 4vw edge (~51px @ 1280) sits INSIDE that crop
@@ -944,7 +949,7 @@ body.tv-nav .nav-link { font-size: 17px; padding: 9px 12px; }
 }
 .auth-card {
   position: relative; width: min(400px, 92vw);
-  background: rgba(23, 26, 34, 0.92); border: 1px solid var(--line);
+  background: rgba(23, 26, 34, 0.92); border: 1px solid var(--line); color: var(--on-dark);
   border-radius: 0; padding: 36px 30px 26px;
   box-shadow: var(--shadow-pop); display: flex; flex-direction: column; gap: 12px; text-align: center;
 }
