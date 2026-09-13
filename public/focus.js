@@ -72,6 +72,14 @@
     const cur = rectOf(current);
     const cx = cur.left + cur.width / 2, cy = cur.top + cur.height / 2;
     const horizontal = dir === 'left' || dir === 'right';
+    // See all belongs to its row, even though it sits in the header and so has
+    // no horizontal group of its own. Without this it drifts into whichever
+    // card happens to lie beside it, which is worse than not moving.
+    if (horizontal && current.classList.contains('see-all')) {
+      if (dir === 'left') return null;
+      const ownRow = current.closest('.row');
+      return ownRow ? ownRow.querySelector('.row-track .card') : null;
+    }
     const inNav = !!current.closest('.nav');
     const grp = horizontal ? current.closest(HGROUP) : null;
     let best = null, bestScore = Infinity;
@@ -94,6 +102,11 @@
         const score = along + cross * 3;
         if (score < bestScore) { bestScore = score; best = el; }
       } else {
+        // A row's header (its See all) sits between one row's cards and the
+        // next row's, so treating it as a vertical stop made Down appear to
+        // halt in the gap between rows. It's reachable horizontally instead —
+        // see the left-of-the-first-card rule at the end of this function.
+        if (el.closest('.row-head')) continue;
         // Leaving a row is measured against the current item's OWN height, not
         // a centre delta. Cards in one row differ in height and the focused one
         // is scaled up, so two items in the same row can have centres tens of
@@ -145,6 +158,20 @@
         if (d < pickD) { pickD = d; pickBest = el; }
       }
       return pickBest;
+    }
+    // See all lives one step LEFT of its row's first card, now that it's out of
+    // the vertical path. Row wrapping only kicks in when this returns nothing,
+    // so it has to be offered before giving up.
+    if (horizontal && !best) {
+      if (dir === 'left') {
+        const track = current.closest('.row-track');
+        const head = track && track.parentElement ? track.parentElement.querySelector('.see-all') : null;
+        if (head && isVisible(head)) return head;
+      } else if (current.classList.contains('see-all')) {
+        const row = current.closest('.row');
+        const firstCard = row ? row.querySelector('.row-track .card') : null;
+        if (firstCard) return firstCard;
+      }
     }
     return best;
   }
