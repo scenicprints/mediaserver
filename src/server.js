@@ -321,6 +321,22 @@ app.post('/api/logout', async (req, reply) => {
 
 app.get('/api/me', async (req) => ({ user: req.user }));
 
+// ---- Offline downloads: a token for the on-device helper ----
+// The TV clients download a title by fetching /api/stream/<fileId> themselves,
+// which needs auth. The page can't hand over its own credentials — the session
+// cookie is HttpOnly precisely so page JS can't read it — so this mints a
+// SECOND token for the same user, which the helper passes as ?token=.
+//
+// Same shape as the webOS app's token, and revocable the same way: it's an
+// ordinary row in `tokens`, so changing the password drops it with the rest.
+app.post('/api/me/download-token', async (req, reply) => {
+  if (!req.user) return reply.code(401).send({ error: 'sign in first' });
+  const token = newToken();
+  db.prepare('INSERT INTO tokens (token, user_id, created_at, last_used_at) VALUES (?, ?, ?, ?)')
+    .run(token, req.user.id, Date.now(), Date.now());
+  return { token };
+});
+
 // ---- Passwords ----
 // There was no way to change one. The only user routes were list, create and
 // delete, and the hash is one-way, so a forgotten password meant either editing
