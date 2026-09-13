@@ -398,7 +398,13 @@ button { font-family: inherit; }
   background: linear-gradient(0deg, var(--bg-2) 2%, rgba(11,12,16,0.5) 45%, rgba(11,12,16,0.1) 100%),
     linear-gradient(90deg, rgba(11,12,16,0.9) 0%, rgba(11,12,16,0) 62%);
 }
-.lt-preview-body { position: relative; z-index: 2; padding: 0 4vw 22px; max-width: 720px; }
+/* Always sits on a backdrop image under a dark fade, in every finish — so its
+   ink is fixed light, not var(--text). In the White finish the title was
+   near-black on a dark photograph and effectively invisible. */
+.lt-preview-body { position: relative; z-index: 2; padding: 0 4vw 22px; max-width: 720px; color: var(--on-dark); }
+.lt-preview-body .chip { color: var(--on-dark); border-color: rgba(255,255,255,0.35); }
+.lt-times { color: var(--on-dark); }
+.lt-times .muted { color: rgba(239,238,233,0.72); }
 .lt-chan-badge { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
 .lt-num { background: var(--grad); color: #fff; font-weight: 800; font-size: 15px; padding: 3px 12px; border-radius: 0; }
 .lt-name { font-weight: 800; letter-spacing: 2px; font-size: 14px; color: #eaf0ff; }
@@ -423,9 +429,13 @@ button { font-family: inherit; }
 .lt-erow.sel { background: rgba(222, 95, 16, 0.10); }
 .lt-echan {
   width: 168px; flex: 0 0 168px; display: flex; align-items: center; gap: 10px; padding: 0 12px; cursor: pointer;
-  border-right: 1px solid var(--line); background: #10131a;
+  /* Fixed dark cell in both finishes, so fixed light ink with it. */
+  border-right: 1px solid var(--line); background: #10131a; color: var(--on-dark);
 }
-.lt-erow.sel .lt-echan { background: linear-gradient(90deg, rgba(222, 95, 16, 0.3), rgba(222, 95, 16, 0.05)); box-shadow: inset 3px 0 0 var(--accent); }
+/* The wash is translucent, so it has to sit ON the dark cell rather than on
+   whatever is behind the row — over the White finish's light page it turned the
+   cell pale and the light ink vanished into it. */
+.lt-erow.sel .lt-echan { background: linear-gradient(90deg, rgba(222, 95, 16, 0.42), rgba(222, 95, 16, 0.10)), #10131a; box-shadow: inset 3px 0 0 var(--accent); }
 .lt-enum { font-weight: 800; font-size: 18px; color: var(--muted); font-variant-numeric: tabular-nums; }
 /* The selected row's cell is already washed in accent, so an accent-coloured
    number on top of it is orange on orange. The row reads as selected from the
