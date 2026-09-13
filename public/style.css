@@ -1089,7 +1089,7 @@ body.tv-mode .row { contain: layout paint; }
    title tipped it over every time. So: keep 30% as a FLOOR, not a ceiling. It
    looks exactly as it did on a channel with little to say, and grows instead of
    hiding its own top when there is more. The guide takes what's left. */
-body.tv-mode .lt-preview { flex: 0 0 auto; min-height: 42%; }
+body.tv-mode .lt-preview { flex: 0 0 auto; min-height: 54%; }
 body.tv-mode .lt-preview-body { padding: 0 4vw 18px; max-width: 760px; }
 body.tv-mode .lt-chan-badge { margin-bottom: 9px; }
 body.tv-mode .lt-title { font-size: 32px; margin: 0 0 8px; }
@@ -1101,7 +1101,7 @@ body.tv-mode .lt-actions .btn { padding: 8px 16px; font-size: 13px; }
 /* Five channels on screen, not eight. .lt-epg-rows has a definite height, so
    a percentage here is exact at any resolution instead of a pixel guess that
    drifts. min-height keeps them legible if the viewport is tiny. */
-body.tv-mode .lt-erow { height: 20%; min-height: 56px; }
+body.tv-mode .lt-erow { height: 20%; min-height: 40px; }
 body.tv-mode .lt-hint { display: none; }
 
 /* ---------- Diagnostics (admin flight recorder) ---------- */
