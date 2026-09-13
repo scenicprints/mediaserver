@@ -1089,11 +1089,11 @@ body.tv-mode .row { contain: layout paint; }
    title tipped it over every time. So: keep 30% as a FLOOR, not a ceiling. It
    looks exactly as it did on a channel with little to say, and grows instead of
    hiding its own top when there is more. The guide takes what's left. */
-body.tv-mode .lt-preview { flex: 0 0 auto; min-height: 30%; }
-body.tv-mode .lt-preview-body { padding: 0 4vw 10px; max-width: 640px; }
-body.tv-mode .lt-chan-badge { margin-bottom: 5px; }
-body.tv-mode .lt-title { font-size: 22px; margin: 0 0 5px; }
-body.tv-mode .lt-over { display: none; }
+body.tv-mode .lt-preview { flex: 0 0 auto; min-height: 42%; }
+body.tv-mode .lt-preview-body { padding: 0 4vw 18px; max-width: 760px; }
+body.tv-mode .lt-chan-badge { margin-bottom: 9px; }
+body.tv-mode .lt-title { font-size: 32px; margin: 0 0 8px; }
+body.tv-mode .lt-over { font-size: 15px; margin-bottom: 10px; }
 body.tv-mode .lt-meta { margin-bottom: 7px; }
 body.tv-mode .lt-prog { height: 4px; margin-bottom: 5px; }
 body.tv-mode .lt-times { margin-bottom: 8px; font-size: 11.5px; }
