@@ -427,7 +427,10 @@ button { font-family: inherit; }
 }
 .lt-erow.sel .lt-echan { background: linear-gradient(90deg, rgba(222, 95, 16, 0.3), rgba(222, 95, 16, 0.05)); box-shadow: inset 3px 0 0 var(--accent); }
 .lt-enum { font-weight: 800; font-size: 18px; color: var(--muted); font-variant-numeric: tabular-nums; }
-.lt-erow.sel .lt-enum { color: var(--accent-2); }
+/* The selected row's cell is already washed in accent, so an accent-coloured
+   number on top of it is orange on orange. The row reads as selected from the
+   wash and the inset bar; the number just has to stay legible. */
+.lt-erow.sel .lt-enum { color: var(--on-dark); }
 .lt-ename { font-size: 11.5px; font-weight: 800; letter-spacing: 0.5px; color: #c7ccda; line-height: 1.15; }
 .lt-etrack { position: relative; flex: 1; }
 .lt-block {

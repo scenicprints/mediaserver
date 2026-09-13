@@ -225,6 +225,14 @@
   // the primary Play button if there is one, else the first card, else the
   // first candidate at all.
   function firstTarget(root) {
+    // Open at the top. Reaching for .btn-play first meant the very first press
+    // of the remote landed inside the marquee, below the ribbon, with no
+    // indication the tabs were even reachable. Modals and the detail view keep
+    // their own behaviour — this is only the main browse.
+    if (root === document.body) {
+      const tab = document.querySelector('.nav-link.active') || document.querySelector('.nav-link');
+      if (tab && isVisible(tab)) return tab;
+    }
     const play = [...root.querySelectorAll('.btn-play')].find(isVisible);
     if (play) return play;
     const card = [...root.querySelectorAll('.card')].find(isVisible);
