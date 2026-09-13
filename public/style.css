@@ -186,7 +186,11 @@ button { font-family: inherit; }
 /* ---------- Buttons & chips ---------- */
 .btn {
   display: inline-flex; align-items: center; gap: 8px; cursor: pointer;
-  background: rgba(40, 44, 56, 0.75); color: var(--text); border: 1px solid rgba(255, 255, 255, 0.14);
+  /* The background here is a fixed dark glass chip, so the label has to be a
+     fixed LIGHT ink. It used to be var(--text), which is near-black in the White
+     finish — dark text on a dark button, unreadable. The variants below
+     (.btn-play, .btn-grad, .btn-danger) set their own pair and are unaffected. */
+  background: rgba(40, 44, 56, 0.75); color: #efeee9; border: 1px solid rgba(255, 255, 255, 0.14);
   padding: 11px 20px; border-radius: 0; font-weight: 600; font-size: 15px; backdrop-filter: blur(6px);
   transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
 }
@@ -591,7 +595,14 @@ button { font-family: inherit; }
   padding: 8px 16px; border-radius: 0; font-size: 14px; font-weight: 600; opacity: 0.72; transition: opacity 0.12s ease, background 0.12s ease, border-color 0.12s ease; }
 .src-chip:hover { opacity: 1; }
 .src-chip.on { background: var(--chip, var(--accent)); border-color: transparent; color: #fff; opacity: 1; }
-.settings-tabs { display: flex; gap: 4px; margin: 18px 0 0; border-bottom: 1px solid var(--line); }
+/* Settings carries the widest content in the app: seven tabs, folder rows, and
+   account rows with several buttons each. The shared .sheet cap of 560px left it
+   a narrow column on a desktop monitor and pushed the last tab off the strip,
+   with a horizontal scrollbar under the whole dialog. Give it real width, and
+   let the tabs wrap — a tab scrolled out of view is unreachable by pointer and
+   by remote alike. */
+#settings .sheet { max-width: min(980px, 94vw); }
+.settings-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin: 18px 0 0; border-bottom: 1px solid var(--line); }
 .settings-tabs .tab { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 15px; font-weight: 600;
   padding: 10px 18px; border-bottom: 2px solid transparent; margin-bottom: -1px; }
 .settings-tabs .tab:hover { color: var(--text); }
@@ -962,7 +973,9 @@ body.tv-nav .nav-link { font-size: 17px; padding: 9px 12px; }
   border-radius: 0; margin-bottom: 18px;
 }
 .acct-role { color: var(--accent-2); font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; font-weight: 700; }
-.acct-item { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 4px; border-bottom: 1px solid var(--line); }
+/* Wraps because each account row can now carry three controls (subtitles, reset
+   password, remove) and a long username, which overflowed on a narrow window. */
+.acct-item { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 4px; border-bottom: 1px solid var(--line); }
 
 /* Admin: set another account's OpenSubtitles login (they send you the key). */
 .os-admin { padding: 12px; margin-bottom: 8px; background: var(--panel-2); border: 1px solid var(--line); border-top: none; }
@@ -1031,6 +1044,11 @@ body.tv-mode .vp-fs { display: none; }
    up in the nav section; this is the VERTICAL inset so the bar isn't half-eaten
    at the top of the screen. Page top-paddings grow to match (PAGE_TOP, app.js). */
 body.tv-mode .nav { padding-top: calc(14px + 2vh); }
+/* Live TV sets its own top padding in CSS instead of going through PAGE_TOP
+   (app.js), so it never grew to match the taller TV nav — the channel badge and
+   the "now playing" title were sliding underneath it and getting clipped. 96px
+   is PAGE_TOP's TV value; keep the two in step. */
+body.tv-mode .livetv { padding-top: 96px; }
 /* Requests lives in Settings ▸ Requests on TV: with seven tabs the strip
    overflows an overscanned 960–1280px canvas and remote focus lands on clipped,
    invisible tabs (the "can't get to Requests" bug). Six fit. */

@@ -3918,6 +3918,50 @@ async function loadUsers() {
       row.appendChild(subBtn);
     }
 
+    // Set someone's password without knowing the old one. This is the only way
+    // back into an account whose owner is locked out: the hash is one-way, and
+    // removing the account would take its watch history and resume points with
+    // it. Offered for admins too, so the last admin isn't unrecoverable.
+    let pwForm = null;
+    if (!isMe) {
+      pwForm = document.createElement('div');
+      pwForm.className = 'arr-row hidden';
+      const input = document.createElement('input');
+      input.className = 'sa-input';
+      input.type = 'password';
+      input.placeholder = 'New password for ' + u.username;
+      input.autocomplete = 'new-password';
+      const save = document.createElement('button');
+      save.className = 'btn primary';
+      save.textContent = 'Set password';
+      save.addEventListener('click', async () => {
+        if (!input.value) return;
+        save.disabled = true;
+        const r = await fetch('/api/users/' + u.id + '/password', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ newPassword: input.value })
+        });
+        save.disabled = false;
+        const d = await r.json().catch(() => ({}));
+        if (r.ok) {
+          input.value = '';
+          pwForm.classList.add('hidden');
+          alert(u.username + ' can sign in with that now. Their other devices have been signed out.');
+        } else {
+          alert(d.error || 'Could not set the password.');
+        }
+      });
+      pwForm.appendChild(input);
+      pwForm.appendChild(save);
+
+      const pwBtn = document.createElement('button');
+      pwBtn.className = 'btn';
+      pwBtn.textContent = 'Reset password';
+      pwBtn.addEventListener('click', () => pwForm.classList.toggle('hidden'));
+      row.appendChild(pwBtn);
+    }
+
     if (!isMe && u.role !== 'admin') {
       const del = document.createElement('button');
       del.className = 'btn'; del.textContent = 'Remove';
@@ -3930,6 +3974,7 @@ async function loadUsers() {
     }
     list.appendChild(row);
     if (form) list.appendChild(form);
+    if (pwForm) list.appendChild(pwForm);
   }
 }
 
@@ -3945,6 +3990,30 @@ if (nuAdd) nuAdd.addEventListener('click', async () => {
   nuAdd.disabled = false;
   if (r.ok) { u.value = ''; p.value = ''; loadUsers(); }
   else { const d = await r.json().catch(() => ({})); alert(d.error || 'Could not add user.'); }
+});
+
+// Change your own password. Everything here stays ES2017-plain: this file also
+// has to parse on the projector, whose engine is years behind.
+const pwSave = document.getElementById('pw-save');
+if (pwSave) pwSave.addEventListener('click', async () => {
+  const cur = document.getElementById('pw-current');
+  const next = document.getElementById('pw-new');
+  const status = document.getElementById('pw-status');
+  if (!cur.value || !next.value) return;
+  pwSave.disabled = true;
+  const r = await fetch('/api/me/password', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ currentPassword: cur.value, newPassword: next.value })
+  });
+  pwSave.disabled = false;
+  const d = await r.json().catch(() => ({}));
+  if (r.ok) {
+    cur.value = ''; next.value = '';
+    status.textContent = 'Password changed. Your other devices have been signed out.';
+  } else {
+    status.textContent = d.error || 'Could not change the password.';
+  }
 });
 function paintOsStatus(d) {
   osStatus.textContent = d && d.configured
