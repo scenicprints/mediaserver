@@ -1082,7 +1082,13 @@ body.tv-mode .row { contain: layout paint; }
 /* -- Live TV: shrink the preview "marquee" so the guide gets the screen. TV
    viewports can be as short as 540 CSS px; the old 40% + 250px-minimum preview
    left room for barely 1.5 channel rows. -- */
-body.tv-mode .lt-preview { flex: 0 0 30%; min-height: 130px; }
+/* Content-sized, not a fixed 30%. The banner is bottom-aligned inside this box,
+   so when its text is taller than the box the overflow goes UPWARD and the
+   channel badge and title vanish behind the nav — which is what "the Live TV
+   banner is cut off" was. At 720p the banner needs ~30% exactly, so a long
+   title tipped it over every time. The guide still takes everything left over;
+   min-height only stops it collapsing when a channel has no synopsis. */
+body.tv-mode .lt-preview { flex: 0 0 auto; min-height: 130px; }
 body.tv-mode .lt-preview-body { padding: 0 4vw 10px; max-width: 640px; }
 body.tv-mode .lt-chan-badge { margin-bottom: 5px; }
 body.tv-mode .lt-title { font-size: 22px; margin: 0 0 5px; }
