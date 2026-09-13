@@ -94,7 +94,13 @@
         const score = along + cross * 3;
         if (score < bestScore) { bestScore = score; best = el; }
       } else {
-        if (dir === 'down' ? dy <= 1 : dy >= -1) continue;
+        // Leaving a row is measured against the current item's OWN height, not
+        // a centre delta. Cards in one row differ in height and the focused one
+        // is scaled up, so two items in the same row can have centres tens of
+        // pixels apart — which is what made Down walk sideways along the row
+        // you were already in instead of leaving it.
+        const step = Math.max(24, cur.height * 0.5);
+        if (dir === 'down' ? r.top <= cur.top + step : r.top >= cur.top - step) continue;
         vert.push({ el, r });
       }
     }
@@ -111,10 +117,14 @@
       const band = vert.filter((x) => Math.abs(x.r.top - anchor) <= 40);
       let pickBest = null, pickD = Infinity;
       for (const { el, r } of band) {
-        // Anything horizontally overlapping the current item is "lined up";
-        // otherwise fall back to the nearest centre.
+        // Prefer something horizontally overlapping the current item, but rank
+        // WITHIN that by how well it actually lines up. Scoring every
+        // overlapping card as a flat 0 meant they all tied and the first one in
+        // DOM order won — which is why focus kept landing in the middle of the
+        // row instead of directly above or below where you were.
         const overlap = Math.min(cur.right, r.right) - Math.max(cur.left, r.left);
-        const d = overlap > 0 ? 0 : Math.abs(r.left + r.width / 2 - cx);
+        const off = Math.abs(r.left + r.width / 2 - cx);
+        const d = overlap > 0 ? off : 100000 + off;
         if (d < pickD) { pickD = d; pickBest = el; }
       }
       return pickBest;
