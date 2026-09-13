@@ -1075,7 +1075,7 @@ function buildChannels() {
   return channels.map((c, i) => {
     const playlist = seededShuffle(c.items, hashStr(c.name));
     const total = playlist.reduce((s, it) => s + ltDuration(it), 0);
-    return Object.assign({}, c, { number: i + 2, playlist, total });
+    return Object.assign({}, c, { number: i + 1, playlist, total });
   });
 }
 
