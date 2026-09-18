@@ -161,11 +161,17 @@ export async function applyArr(kind, cfg, plan, { fetchImpl = fetch, dryRun = tr
 
   // Old roots go last, and only once nothing refers to them.
   const keep = new Set(plan.groups.map((g) => trimSlash(g.root).toLowerCase()));
-  const after = dryRun ? [] : await api.get(k.list);
+  // A dry run has to answer this question the same way the real run does, so
+  // it reads the same library and simulates the repointing rather than
+  // assuming an empty one. A preview that reports a removal the apply would
+  // refuse is worse than no preview: the preview is what authorises the apply.
+  const movedIds = new Set(plan.groups.flatMap((g) => g.ids));
+  const live = await api.get(k.list);
+  const after = dryRun ? live.filter((it) => !movedIds.has(it.id)) : live;
   for (const r of existingRoots) {
     if (keep.has(trimSlash(r.path).toLowerCase())) continue;
     const stillUsing = after.filter((it) => String(it.path).toLowerCase().startsWith(trimSlash(r.path).toLowerCase() + '\\'));
-    if (!dryRun && stillUsing.length) {
+    if (stillUsing.length) {
       log(`keeping ${r.path} — ${stillUsing.length} record(s) still point into it`);
       continue;
     }

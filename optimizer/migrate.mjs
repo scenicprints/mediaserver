@@ -308,6 +308,12 @@ export function ensureMigrateSchema(db) {
     CREATE UNIQUE INDEX IF NOT EXISTS pool_moves_src ON pool_moves (src);
     CREATE INDEX IF NOT EXISTS pool_moves_state ON pool_moves (state);
   `);
+  // Where the library should point, when that differs from where the file is
+  // written. Copying into a pool needs both: the file goes to a specific
+  // member's PoolPart folder (so the destination drive is chosen, not left to
+  // the balancer) while the library must refer to it through the pool letter.
+  // Null means the two are the same, which is the plain drive-to-drive case.
+  try { db.exec('ALTER TABLE pool_moves ADD COLUMN pool TEXT;'); } catch { /* already there */ }
 }
 
 /**
@@ -328,13 +334,13 @@ export function journalPlan(db, plan, { replace = false } = {}) {
   }
   if (replace) db.exec('DELETE FROM pool_moves');
 
-  const ins = db.prepare("INSERT INTO pool_moves (file_kind, file_id, src, dst, bytes, state) VALUES (?, ?, ?, ?, ?, 'planned')");
+  const ins = db.prepare("INSERT INTO pool_moves (file_kind, file_id, src, dst, pool, bytes, state) VALUES (?, ?, ?, ?, ?, ?, 'planned')");
   db.exec('BEGIN');
   try {
     for (const m of plan.moves) {
       let bytes = 0;
       try { bytes = fs.statSync(m.from).size; } catch { /* re-checked at copy time */ }
-      ins.run(m.kind ?? null, m.fileId ?? null, m.from, m.to, bytes);
+      ins.run(m.kind ?? null, m.fileId ?? null, m.from, m.to, m.pool ?? null, bytes);
     }
     db.exec('COMMIT');
   } catch (e) { db.exec('ROLLBACK'); throw e; }
@@ -450,16 +456,60 @@ export async function migrateOne(db, row, { full = false, copyFn = copyNoClobber
   return { state: 'done', error: null };
 }
 
-/** Rewrite every reference to this file's old path. Runs inside a transaction. */
+/**
+ * Rewrite every reference to this file's old path. Runs inside a transaction.
+ *
+ * `pool` wins over `dst` when it is set: the bytes go to a pool member's
+ * PoolPart folder, but the library has to refer to the file through the pool
+ * letter, or every path it stores would name a physical drive and stop
+ * resolving the moment the balancer moved anything.
+ */
+// Which library owns a destination path, longest root first.
+//
+// A repointed row has to move to it. Left on its old library_id the row sits
+// under a library whose root no longer contains it - and retiring that old
+// library through DELETE /api/libraries/:id deletes every row that still
+// carries its id, which after this migration would be the whole TV library.
+export function libraryFor(db, dst, fileKind) {
+  const sep = path.win32.sep;
+  const trim = (p) => { let s = String(p); while (s.length > 3 && (s.endsWith(sep) || s.endsWith("/"))) s = s.slice(0, -1); return s; };
+  const want = fileKind === "movie" ? "movie" : "tv";
+  const libs = db.prepare("SELECT id, path FROM libraries WHERE type = ?").all(want)
+    .map((l) => ({ id: Number(l.id), root: trim(l.path).toLowerCase() }))
+    .sort((a, b) => b.root.length - a.root.length);
+  const low = String(dst).toLowerCase();
+  for (const l of libs) if (low === l.root || low.startsWith(l.root + sep)) return l.id;
+  return null;
+}
+
+// A show follows its episodes, but only once none of them are left behind in
+// another library - mid-migration a show legitimately straddles two.
+function moveShowIfSettled(db, fileId, libId) {
+  const s = db.prepare(
+    "SELECT e.show_id AS id FROM episode_files ef JOIN episodes e ON e.id = ef.episode_id WHERE ef.id = ?"
+  ).get(fileId);
+  if (!s || s.id == null) return;
+  const stray = Number(db.prepare(
+    "SELECT COUNT(*) n FROM episode_files ef JOIN episodes e ON e.id = ef.episode_id WHERE e.show_id = ? AND ef.library_id IS NOT ?"
+  ).get(s.id, libId).n);
+  if (!stray) db.prepare("UPDATE shows SET library_id = ? WHERE id = ?").run(libId, s.id);
+}
+
 function repointFile(db, row) {
-  const dst = row.dst;
+  const dst = row.pool || row.dst;
   const base = path.win32.basename(dst);
-  if (row.file_kind === 'movie') {
-    db.prepare('UPDATE movie_files SET path = ?, filename = ? WHERE id = ?').run(dst, base, row.file_id);
-  } else if (row.file_kind === 'episode') {
-    db.prepare('UPDATE episode_files SET path = ?, filename = ? WHERE id = ?').run(dst, base, row.file_id);
+  const libId = libraryFor(db, dst, row.file_kind);
+  if (row.file_kind === "movie") {
+    if (libId === null) db.prepare("UPDATE movie_files SET path = ?, filename = ? WHERE id = ?").run(dst, base, row.file_id);
+    else db.prepare("UPDATE movie_files SET path = ?, filename = ?, library_id = ? WHERE id = ?").run(dst, base, libId, row.file_id);
+  } else if (row.file_kind === "episode") {
+    if (libId === null) db.prepare("UPDATE episode_files SET path = ?, filename = ? WHERE id = ?").run(dst, base, row.file_id);
+    else {
+      db.prepare("UPDATE episode_files SET path = ?, filename = ?, library_id = ? WHERE id = ?").run(dst, base, libId, row.file_id);
+      moveShowIfSettled(db, row.file_id, libId);
+    }
   }
-  db.prepare('UPDATE media_info SET path = ? WHERE file_kind = ? AND file_id = ?').run(dst, row.file_kind, row.file_id);
+  db.prepare("UPDATE media_info SET path = ? WHERE file_kind = ? AND file_id = ?").run(dst, row.file_kind, row.file_id);
 }
 
 /**

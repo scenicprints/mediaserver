@@ -71,9 +71,14 @@ test('the more specific root wins', () => {
   assert.equal(arrTarget('H:\\Movies\\Heat (1995)'), 'P:\\Movies\\Heat (1995)');
 });
 
+// This used to rely on P:\ being absent on the machine running the tests, and
+// it started failing the moment the real pool was created at P:. A test that
+// asserts a path does not exist has to own that path, not borrow one.
 test('it refuses to repoint at folders that do not exist yet', async () => {
+  const gone = path.join(os.tmpdir(), 'no-such-pool-' + Math.random().toString(36).slice(2));
+  assert.ok(!fs.existsSync(gone), 'the destination must genuinely not exist');
   const { fetchImpl } = stubArr({ items: [{ id: 1, path: 'F:\\Ahsoka' }], roots: [{ id: 1, path: 'F:\\' }] });
-  const plan = await planArr('sonarr', cfg, { fetchImpl });   // checkDisk defaults on; P:\ is not there
+  const plan = await planArr('sonarr', cfg, { fetchImpl, map: [['F:\\', gone]] });
   assert.ok(plan.problems.length, 'a missing pool must be a problem, not a warning');
   assert.match(plan.problems.join('\n'), /does not exist yet/);
   await assert.rejects(() => applyArr('sonarr', cfg, plan, { fetchImpl, dryRun: false }), /refusing to rewrite/);
@@ -186,6 +191,25 @@ test('an old root still in use is not removed', async () => {
   plan.groups[0].from = plan.groups[0].from.filter((f) => f.id === 1);
   await applyArr('sonarr', cfg, plan, { fetchImpl, dryRun: false });
   assert.ok(state.roots.some((r) => r.path === 'F:\\'), 'F:\\ still holds Andor, so it stays');
+});
+
+// The dry run is what authorises the apply, so it has to reach the same
+// verdict. It used to skip the in-use check entirely and cheerfully report
+// that it would remove a root 145 records still lived in.
+test('a dry run reports keeping a root the apply would keep', async () => {
+  const { fetchImpl, state } = stubArr({
+    items: [{ id: 1, path: 'F:\\Ahsoka' }, { id: 2, path: 'F:\\Andor' }],
+    roots: [{ id: 1, path: 'F:\\' }]
+  });
+  const plan = await planArr('sonarr', cfg, { fetchImpl, checkDisk: false });
+  plan.groups[0].ids = [1];
+  plan.groups[0].from = plan.groups[0].from.filter((f) => f.id === 1);
+
+  const lines = [];
+  const out = await applyArr('sonarr', cfg, plan, { fetchImpl, dryRun: true, log: (m) => lines.push(m) });
+  assert.ok(!out.removedRoots.includes('F:\\'), 'the preview must not offer to remove a root that stays');
+  assert.ok(lines.some((l) => l.startsWith('keeping F:\\')), 'expected a keeping line, got: ' + lines.join(' | '));
+  assert.equal(state.roots.length, 1, 'a dry run still changes nothing');
 });
 
 // Against the real mapping, with the pool actually present.
