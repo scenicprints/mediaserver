@@ -90,10 +90,18 @@ function tidy(s) {
   return s.replace(/[._]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-// Season number hinted by a folder like "Season 2" or "S02".
+// Season number hinted by a folder like "Season 2", "S02", "Season 2003", or a
+// bare year folder like "1940".
+//
+// Some shows are filed by year instead of by season number - MythBusters as
+// "Season 2003", Tom and Jerry as "1940" - and with only \d{1,2} accepted those
+// folders matched nothing, leaving 443 episodes in the pool but invisible to the
+// library. Years are matched explicitly as 19xx/20xx rather than by widening the
+// digit count, which would also swallow things that are not seasons.
 function seasonFromSegments(segs) {
   for (const s of segs) {
-    const m = s.match(/season\s*(\d{1,2})/i) || s.match(/^s(\d{1,2})$/i);
+    const m = s.match(/season\s*(\d{1,2})(?!\d)/i) || s.match(/^s(\d{1,2})$/i)
+      || s.match(/season\s*((?:19|20)\d{2})(?!\d)/i) || s.match(/^((?:19|20)\d{2})$/);
     if (m) return parseInt(m[1], 10);
   }
   return null;
@@ -104,6 +112,13 @@ function seasonFromSegments(segs) {
 export function parseEpisode(filename, segs = []) {
   const base = stripExt(filename);
   let m = base.match(/S(\d{1,2})[\s._-]*E(\d{1,3})/i);
+  if (m) return { season: +m[1], episode: +m[2] };
+
+  // A year used as the season: "MythBusters - 2003x01", "Tom and Jerry - 1940x01".
+  // Checked before the 1-2 digit form, and restricted to 19xx/20xx so a
+  // resolution in a filename cannot be read as an episode - widening the season
+  // to four digits would turn "1280x720" into season 1280, episode 720.
+  m = base.match(/(?:^|[^0-9])((?:19|20)\d{2})x(\d{1,3})(?:[^0-9]|$)/i);
   if (m) return { season: +m[1], episode: +m[2] };
 
   m = base.match(/(?:^|[^0-9])(\d{1,2})x(\d{1,3})(?:[^0-9]|$)/i);
