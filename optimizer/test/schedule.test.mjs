@@ -121,3 +121,24 @@ test('scanning is not gated — only the encoding is', () => {
   assert.ok(scanAt !== -1 && gateAt !== -1);
   assert.ok(scanAt < gateAt, 'the probe scan should happen before the window check, not after it');
 });
+
+// Around the clock has to be a flag, because the times cannot say it. The owner
+// asked for the optimizer to run 24/7 until the backlog is cleared, and the two
+// obvious ways to write that in from/to both fail - silently.
+test('an always-on window is open at every minute of the day', () => {
+  const ALWAYS = { from: '00:00', to: '05:00', always: true };
+  for (let m = 0; m < 24 * 60; m++) {
+    assert.equal(withinWindow(ALWAYS, at(Math.floor(m / 60), m % 60)), true, `closed at minute ${m}`);
+  }
+  assert.equal(minutesUntilOpen(ALWAYS, at(13, 0)), 0, 'nothing to wait for');
+});
+
+test('from/to cannot fake around the clock', () => {
+  // Equal times are an empty window: this never runs at all.
+  assert.equal(withinWindow({ from: '00:00', to: '00:00' }, at(12, 0)), false);
+  // The nearest spelling shuts for a minute a night - long enough to abort a
+  // multi-hour encode and throw its work away.
+  assert.equal(withinWindow({ from: '00:00', to: '23:59' }, at(23, 59)), false);
+  // Only an explicit true counts; a truthy string must not open it.
+  assert.equal(withinWindow({ from: '00:00', to: '05:00', always: 'yes' }, at(12, 0)), false);
+});

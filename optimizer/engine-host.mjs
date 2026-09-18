@@ -6,7 +6,9 @@
 // application and the headless service run the *same* code rather than two
 // copies that drift.
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 
 import * as engine from './engine.mjs';
@@ -43,7 +45,13 @@ function parseHM(s, fallback) {
 }
 
 // Handles a window that crosses midnight, which the default one does.
+//
+// `always: true` opens it around the clock. That needs its own flag: from/to
+// cannot express it. Equal times read as an EMPTY window, and parseHM clamps to
+// 23:59, so the nearest thing - 00:00 to 23:59 - shuts for one minute a night,
+// and a window shutting mid-encode throws away the file in progress.
 function withinWindow(win, now = new Date()) {
+  if (win && win.always === true) return true;
   const from = parseHM(win.from, 0);
   const to = parseHM(win.to, 5 * 60);
   const cur = now.getHours() * 60 + now.getMinutes();
@@ -51,6 +59,7 @@ function withinWindow(win, now = new Date()) {
 }
 
 function minutesUntilOpen(win, now = new Date()) {
+  if (win && win.always === true) return 0;
   const from = parseHM(win.from, 0);
   const cur = now.getHours() * 60 + now.getMinutes();
   return from >= cur ? from - cur : (24 * 60 - cur) + from;
@@ -79,10 +88,44 @@ function alive(pid) {
   try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
 }
 
-function takeEngineLock(lockPath) {
+// What an optimizer process can be called: the desktop app, or node running the
+// headless service or the command line.
+const OPTIMIZER_PROCESS = /^(node|marquee optimizer|electron)(\.exe)?$/i;
+
+function processName(pid) {
+  try {
+    const out = execFileSync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], { windowsHide: true, timeout: 10000 }).toString();
+    const m = /^"([^"]+)"/m.exec(out.trim());
+    return m ? m[1] : null;
+  } catch { return undefined; }   // cannot tell
+}
+
+// Is a lock left over rather than held?
+//
+// "The recorded pid is alive" is not enough, because Windows hands pids out
+// again. After a reboot on 2026-09-17 the lock still named pid 7404 from two
+// days earlier - and 7404 now belonged to Chrome Remote Desktop's
+// remoting_host.exe. The optimizer took that for a running copy of itself and
+// declined to start, every start, silently. So a lock also has to date from
+// this boot, and its pid has to be an optimizer.
+export function lockIsStale(held, { now = Date.now(), uptimeSec = os.uptime(), isAlive = alive, nameOf = processName } = {}) {
+  if (!held || !held.pid) return true;
+  if (!isAlive(held.pid)) return true;
+  const bootedAt = now - uptimeSec * 1000;
+  if (Number(held.at) > 0 && Number(held.at) < bootedAt) return true;   // written before this boot
+  const name = nameOf(held.pid);
+  if (name === undefined) return false;   // cannot tell - respect the lock rather than run twice
+  if (name === null) return true;         // no such process after all
+  return !OPTIMIZER_PROCESS.test(name);
+}
+
+function takeEngineLock(lockPath, { onStale = () => {} } = {}) {
   try {
     const held = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
-    if (held.pid && held.pid !== process.pid && alive(held.pid)) return held;   // someone else has it
+    if (held.pid && held.pid !== process.pid) {
+      if (!lockIsStale(held)) return held;   // someone else has it
+      onStale(held);
+    }
   } catch { /* no lock, or unreadable — ours to take */ }
   try {
     fs.mkdirSync(path.dirname(lockPath), { recursive: true });
@@ -112,8 +155,13 @@ export async function startEngine({ root, port = 8097 } = {}) {
     } catch { /* logging never stops the work */ }
   }
 
-  const held = takeEngineLock(path.join(root, 'data', 'optimizer.lock'));
+  const held = takeEngineLock(path.join(root, 'data', 'optimizer.lock'), {
+    onStale: (h) => log(`Taking over a leftover lock (process ${h.pid}, written ${new Date(Number(h.at)).toLocaleString()}) - that process is not an optimizer.`)
+  });
   if (held) {
+    // Logged, not only thrown: the desktop app turns this into a dialog, and on
+    // a server nobody is looking at a dialog is the same as silence.
+    log(`Not starting: another optimizer holds the lock (process ${held.pid}).`);
     const e = new Error('Another optimizer is already running (process ' + held.pid + ').');
     e.code = 'ALREADY_RUNNING';
     e.holder = held;
@@ -250,7 +298,7 @@ export async function startEngine({ root, port = 8097 } = {}) {
   // Deliberately not awaited: the host has a window to put on screen and must
   // not sit behind a library scan to do it.
   (async () => {
-    log(`Working hours: ${workWindow.from} to ${workWindow.to}.`);
+    log(workWindow.always === true ? 'Working hours: around the clock.' : `Working hours: ${workWindow.from} to ${workWindow.to}.`);
     if (!withinWindow(workWindow)) {
       const mins = minutesUntilOpen(workWindow);
       log(`Outside those hours — next run in ${Math.floor(mins / 60)}h ${mins % 60}m. The window and the duplicate finder work regardless.`);
