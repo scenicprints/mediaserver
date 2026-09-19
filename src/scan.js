@@ -28,7 +28,13 @@ export async function scanLibraries(db) {
   const libs = db.prepare('SELECT id, path, type FROM libraries').all();
 
   // Movie statements
-  const fileExists = db.prepare('SELECT id FROM movie_files WHERE path = ?');
+  // An already-known path is not skipped blindly: the file behind it can change.
+  // When a damaged copy was replaced by a surviving smaller one at the same path,
+  // the row kept the old size - Ready Player One read 78.2 GB for a 6.8 GB file -
+  // and everything that trusts the size (the optimizer's savings, gap reports)
+  // was wrong. The size is refreshed whenever it no longer matches the disk.
+  const fileExists = db.prepare('SELECT id, size FROM movie_files WHERE path = ?');
+  const setMovieSize = db.prepare('UPDATE movie_files SET size = ? WHERE id = ?');
   const findMovie = db.prepare('SELECT id FROM movies WHERE group_key = ?');
   const insMovie = db.prepare('INSERT INTO movies (group_key, title, year, added_at) VALUES (?, ?, ?, ?)');
   const insFile = db.prepare(
@@ -37,7 +43,8 @@ export async function scanLibraries(db) {
   );
 
   // TV statements
-  const epFileExists = db.prepare('SELECT id FROM episode_files WHERE path = ?');
+  const epFileExists = db.prepare('SELECT id, size FROM episode_files WHERE path = ?');
+  const setEpSize = db.prepare('UPDATE episode_files SET size = ? WHERE id = ?');
   const findShow = db.prepare('SELECT id FROM shows WHERE group_key = ?');
   const insShow = db.prepare('INSERT INTO shows (group_key, title, library_id, added_at) VALUES (?, ?, ?, ?)');
   const findEp = db.prepare('SELECT id FROM episodes WHERE show_id = ? AND season = ? AND episode = ?');
@@ -49,7 +56,7 @@ export async function scanLibraries(db) {
 
   const SEASON_FOLDER = /^(season\s*\d+|s\d{1,2}|specials)$/i;
 
-  let added = 0, seen = 0;
+  let added = 0, seen = 0, refreshed = 0;
   for (const lib of libs) {
     const root = path.resolve(lib.path);
 
@@ -58,7 +65,11 @@ export async function scanLibraries(db) {
         const name = path.basename(full);
         if (!isVideo(name)) return;
         seen++;
-        if (fileExists.get(full)) return;
+        const had = fileExists.get(full);
+        if (had) {
+          if (Number(had.size) !== stat.size) { setMovieSize.run(stat.size, had.id); refreshed++; }
+          return;
+        }
         let { title, year } = parseMovie(name);
         // If the filename lacked a year (often a generic file inside a nicely
         // named folder like "Inception (2010)\movie.mkv"), use the folder name.
@@ -80,7 +91,11 @@ export async function scanLibraries(db) {
         const name = path.basename(full);
         if (!isVideo(name)) return;
         seen++;
-        if (epFileExists.get(full)) return;
+        const hadEp = epFileExists.get(full);
+        if (hadEp) {
+          if (Number(hadEp.size) !== stat.size) { setEpSize.run(stat.size, hadEp.id); refreshed++; }
+          return;
+        }
 
         const rel = path.relative(root, full);
         const segs = rel.split(path.sep).slice(0, -1); // folder segments only
@@ -109,7 +124,7 @@ export async function scanLibraries(db) {
     }
   }
   const { removed } = await pruneMissing(db);
-  return { added, seen, removed };
+  return { added, seen, removed, refreshed };
 }
 
 // Remove DB rows for files that were deleted or replaced on disk, then drop any
@@ -166,7 +181,12 @@ export async function pruneMissing(db) {
   // both, and in the migration it is a planned move of something that does not
   // exist. This inherits the same protection as the deletions above: a file on
   // an unreachable drive is never counted as missing, so its row survives.
-  const orphanedInfo = db.prepare(`
+  //
+  // media_info belongs to the optimizer and only exists once it has run, so on a
+  // fresh install this cleanup has nothing to clean - and must not take the scan
+  // down with "no such table", which it did.
+  const hasInfo = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'media_info'").get();
+  const orphanedInfo = !hasInfo ? 0 : db.prepare(`
     DELETE FROM media_info
     WHERE (file_kind = 'movie'   AND file_id NOT IN (SELECT id FROM movie_files))
        OR (file_kind = 'episode' AND file_id NOT IN (SELECT id FROM episode_files))`).run().changes;
@@ -186,6 +206,13 @@ export async function pruneMissing(db) {
 // "Plex Versions Documentary" would still be scanned.
 const GENERATED_DIRS = new Set(['plex versions']);
 
+// Files that exist only while another job is working on them: the optimizer's
+// output before it replaces the original, the original parked aside during that
+// swap, and a copy still in flight. A scan that lands mid-encode indexed one as
+// a real episode - "...S01E02 From The Underground to The Mainstream.marquee-opt.tmp.21360.mu7pwufu.mkv" -
+// and the entry was left pointing at nothing once the encode finished.
+const WORKING_FILE = /\.marquee-opt\.tmp\.|\.replacing$|\.partial$/i;
+
 async function walk(dir, cb) {
   let entries;
   try {
@@ -199,6 +226,7 @@ async function walk(dir, cb) {
       if (GENERATED_DIRS.has(e.name.toLowerCase())) continue;
       await walk(full, cb);
     } else if (e.isFile()) {
+      if (WORKING_FILE.test(e.name)) continue;
       let stat;
       try { stat = await fs.promises.stat(full); } catch { continue; }
       cb(full, stat);
