@@ -865,11 +865,16 @@ app.get('/api/check-update', async () => {
     // "What's new": the subject line of each incoming commit, so the update
     // splash can tell the user what the update actually does.
     let notes = [];
-    if (current !== latest) {
+    if (behind > 0) {
       const log = await git(['log', '--format=%s', 'HEAD..origin/main']).catch(() => '');
       notes = log.split('\n').map((s) => s.trim()).filter(Boolean).slice(0, 20);
     }
-    return { current: current.slice(0, 7), latest: latest.slice(0, 7), updateAvailable: current !== latest, behind, notes };
+    // An update exists only when there is something to PULL. This used to be
+    // `current !== latest`, which also fired whenever this box was AHEAD of
+    // GitHub - local commits not yet pushed, or a branch checked out - and
+    // since the update can only pull, applying it changed nothing and the
+    // offer came straight back, for ever.
+    return { current: current.slice(0, 7), latest: latest.slice(0, 7), updateAvailable: behind > 0, behind, notes };
   } catch {
     return { updateAvailable: false, error: 'offline or updates not enabled' };
   }
