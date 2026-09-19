@@ -76,3 +76,26 @@ test("the optimizer's working files are never indexed", async () => {
   assert.deepEqual(eps, ['Hip-Hop Evolution S01E02 From The Underground.mkv']);
   assert.equal(Number(w.db.prepare('SELECT COUNT(*) n FROM movie_files').get().n), 0);
 });
+
+test('an already-indexed working file is removed even though it still exists', async () => {
+  // The 2026-09-18 case: an optimizer run stopped mid-encode left its temp output
+  // on disk, and an earlier scan had indexed it. Pruning missing files cannot
+  // catch that - the file is there - so it has to be removed by name.
+  const w = world();
+  const folder = path.join(w.tv, 'Hip-Hop Evolution', '01');
+  const real = path.join(folder, 'Hip-Hop Evolution S01E02.mkv');
+  const temp = path.join(folder, 'Hip-Hop Evolution S01E02.marquee-opt.tmp.21360.mu7pwufu.mkv');
+  fs.writeFileSync(real, Buffer.alloc(100));
+  fs.writeFileSync(temp, Buffer.alloc(100));
+  await scanLibraries(w.db);
+  const epId = w.db.prepare('SELECT episode_id FROM episode_files WHERE path = ?').get(real).episode_id;
+  const libId = w.db.prepare("SELECT id FROM libraries WHERE type = 'tv'").get().id;
+  // Plant the stale entry the old scanner would have made.
+  w.db.prepare('INSERT INTO episode_files (episode_id, library_id, path, filename, size, added_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(epId, libId, temp, path.basename(temp), 100, Date.now());
+
+  await scanLibraries(w.db);
+  const paths = w.db.prepare('SELECT path FROM episode_files').all().map((r) => r.path);
+  assert.deepEqual(paths, [real], 'the temp entry is gone, the real episode stays');
+  assert.ok(fs.existsSync(temp), 'the scanner removes the entry, never the file');
+});

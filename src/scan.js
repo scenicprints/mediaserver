@@ -163,6 +163,14 @@ export async function pruneMissing(db) {
     delEpFile.run(id); removed++;
   }
 
+  // Entries for working files indexed before the scan learned to skip them.
+  // These are not caught above, because the file can still be on disk: an
+  // optimizer run stopped mid-encode leaves its temp output behind, and an
+  // entry for it plays a half-written file.
+  const delWorking = (table) => db.prepare(`DELETE FROM ${table}
+    WHERE path LIKE '%.marquee-opt.tmp.%' OR path LIKE '%.replacing' OR path LIKE '%.partial'`).run().changes;
+  removed += delWorking('movie_files') + delWorking('episode_files');
+
   // Drop logical rows that no longer have any files (same cleanup the
   // library-delete handler uses).
   db.prepare('DELETE FROM movies WHERE id NOT IN (SELECT DISTINCT movie_id FROM movie_files)').run();
