@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- One HTTP request, off the render thread (roUrlTransfer is not allowed on it).
+     Set the inputs, then control = "RUN"; `result` fires once with
+     { code, data (parsed JSON or invalid), text, error }. -->
+<component name="Http" extends="Task">
+    <interface>
+        <field id="url" type="string" />
+        <field id="method" type="string" value="GET" />
+        <field id="body" type="string" />
+        <field id="token" type="string" />
+        <field id="raw" type="boolean" value="false" />
+        <field id="timeoutMs" type="integer" value="20000" />
+        <field id="outFile" type="string" />
+        <field id="uploadFile" type="string" />
+        <field id="digestUser" type="string" />
+        <field id="digestPass" type="string" />
+        <field id="result" type="assocarray" />
+    </interface>
+    <script type="text/brightscript" uri="Http.brs" />
+</component>

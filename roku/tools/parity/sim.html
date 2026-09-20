@@ -1,0 +1,21 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Roku sim</title>
+<style>body{margin:0;background:#000;color:#ccc;font:12px monospace}#display{width:960px;height:540px;display:block}#log{height:200px;overflow:auto;white-space:pre-wrap}</style></head>
+<body><canvas id="display" width="1920" height="1080"></canvas><video id="player" style="display:none" crossorigin="anonymous"></video><div id="log"></div>
+<script src="lib/brs.api.js"></script>
+<script>
+window.__log=[];
+const logEl=document.getElementById('log');
+function L(t){window.__log.push(t); if(window.__log.length>2000) window.__log.shift(); logEl.textContent+=t+'\n'; logEl.scrollTop=1e9;}
+(async()=>{
+  const params=new URLSearchParams(location.search);
+  brs.subscribe('sim',(ev,data)=>{ if(ev==='message'||ev==='warning'||ev==='error'||ev==='debug') L(ev+': '+(typeof data==='string'?data:JSON.stringify(data))); else if(ev!=='fps'&&ev!=='frame') L('['+ev+'] '+(typeof data==='string'?data:'')); });
+  const assets=await (await fetch('assets/common.zip')).arrayBuffer();
+  await brs.initialize({assets, displayMode:'1080p', locale:'en_US', extensions: new Map([[brs.SupportedExtension.SceneGraph, './brs-sg.js']])}, {debugToConsole:false});
+  const r=await fetch('shell.zip'); const buf=await r.arrayBuffer();
+  const dl=new Map(); if(params.get('token')) dl.set('mqtoken', params.get('token')); if(params.get('debug')) dl.set('mqdebug','1'); if(params.get('seed')) dl.set('mqseed', params.get('seed')); if(params.get('freeze')) dl.set('mqfreeze','1');
+  brs.execute('shell.zip', buf, {clearDisplayOnExit:false}, dl);
+  window.key=(k)=>brs.sendKeyPress(k, 80);
+  // Save the Roku frame (1920x1080) at half size to the harness folder.
+  window.shot=async(n)=>{ const img=brs.getScreenshot(); if(!img) return 'no frame'; const c=document.createElement('canvas'); c.width=img.width; c.height=img.height; c.getContext('2d').putImageData(img,0,0); const h=document.createElement('canvas'); h.width=960; h.height=540; h.getContext('2d').drawImage(c,0,0,960,540); await fetch('save?n='+(n||'shot'),{method:'POST',body:h.toDataURL('image/png')}); return img.width+'x'+img.height; };
+})();
+</script></body></html>

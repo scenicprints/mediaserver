@@ -1,0 +1,21 @@
+title=Marquee
+major_version=1
+minor_version=0
+# The shell's version. The app reinstalls a newer shell over itself when the
+# server's copy (served from this folder) has a higher build_version.
+build_version=1
+
+ui_resolutions=fhd
+mm_icon_focus_fhd=pkg:/images/poster_fhd.png
+mm_icon_focus_hd=pkg:/images/poster_hd.png
+splash_screen_fhd=pkg:/images/splash_fhd.jpg
+splash_screen_hd=pkg:/images/splash_hd.jpg
+splash_color=#141416
+splash_min_time=0
+
+# Where the app lives. Everything but this file comes from here, over the air.
+marquee_server=https://marqu33.duckdns.org
+
+# The Developer Mode password set on install day. The app uses it to install a
+# newer shell over this one through the Roku's own developer installer.
+dev_password=marquee

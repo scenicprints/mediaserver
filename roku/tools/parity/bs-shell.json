@@ -1,0 +1,1 @@
+{ "rootDir": "../../shell", "files": ["manifest", "source/**/*", "components/**/*", "images/**/*", "fonts/**/*"], "createPackage": false, "stagingDir": "out/stage-shell" }

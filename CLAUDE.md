@@ -55,6 +55,8 @@ node C:\Users\jkevi\mediaserver\src\server.js
 | `src/translate.js` | Subtitle translation (LibreTranslate if `config.translateUrl`, else Google) for non-English AI subs |
 | `src/fsbrowse.js` | Server-side folder browser for the in-app picker |
 | `src/scan-cli.js`, `src/enrich-cli.js` | Standalone CLI helpers (`npm run scan` / `enrich`) |
+| `src/roku.js` | Roku: serves the OTA zips (`/roku/marquee.zip`, `/roku/shell.zip`, `/roku/version.json`) and `/api/roku/*` (rows, see-all, library, search, guide). The rows and Live TV channels are a line-for-line port of app.js; `test/roku-parity.test.mjs` fails if they drift, so change both together |
+| `roku/` | The Roku app: `shell/` (sideloaded once), `lib/` (the real app, a ComponentLibrary fetched every launch), `tools/build_assets.py` (fonts/emoji/glows), `PARITY.md` (the 1:1 checklist), `INSTALL.md` |
 | `public/index.html` | UI markup (grids, modals, player, overlays) |
 | `public/app.js` | All front-end logic (plain DOM, no framework) |
 | `public/style.css` | Styles (dark theme, CSS variables) |

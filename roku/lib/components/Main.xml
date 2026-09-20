@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The whole app: one component, so the focus engine sees every screen the way
+     focus.js sees one DOM. Created by the shell as MarqueeLib:Main. -->
+<component name="Main" extends="Group">
+    <interface>
+        <field id="base" type="string" onChange="onBase" />
+        <field id="shellVersion" type="integer" />
+        <field id="launchArgs" type="assocarray" />
+        <field id="inputArgs" type="assocarray" />
+    </interface>
+    <script type="text/brightscript" uri="core/Util.brs" />
+    <script type="text/brightscript" uri="core/Theme.brs" />
+    <script type="text/brightscript" uri="core/Ui.brs" />
+    <script type="text/brightscript" uri="core/Net.brs" />
+    <script type="text/brightscript" uri="core/Tele.brs" />
+    <script type="text/brightscript" uri="core/Focus.brs" />
+    <script type="text/brightscript" uri="core/Widgets.brs" />
+    <script type="text/brightscript" uri="app/App.brs" />
+    <script type="text/brightscript" uri="app/Nav.brs" />
+    <script type="text/brightscript" uri="app/Cards.brs" />
+    <script type="text/brightscript" uri="app/Browse.brs" />
+    <script type="text/brightscript" uri="app/Library.brs" />
+    <script type="text/brightscript" uri="app/Collections.brs" />
+    <script type="text/brightscript" uri="app/Detail.brs" />
+    <script type="text/brightscript" uri="app/Show.brs" />
+    <script type="text/brightscript" uri="app/LiveTv.brs" />
+    <script type="text/brightscript" uri="app/Settings.brs" />
+    <script type="text/brightscript" uri="app/Requests.brs" />
+    <script type="text/brightscript" uri="app/Login.brs" />
+    <script type="text/brightscript" uri="app/Player.brs" />
+    <script type="text/brightscript" uri="app/Streaming.brs" />
+    <script type="text/brightscript" uri="app/ShellUpdate.brs" />
+</component>

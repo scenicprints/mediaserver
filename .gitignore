@@ -15,3 +15,9 @@ sample-tv/
 *.zip
 appletv/ci-fixtures/
 backups/
+# `tools/` above matches at any depth; the Roku asset builder is source. Its
+# downloaded source fonts are not.
+!roku/tools/
+roku/tools/.cache/
+roku/tools/parity/out/
+__pycache__/

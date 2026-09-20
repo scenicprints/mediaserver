@@ -1,0 +1,17 @@
+{
+  "name": "marquee-roku-parity",
+  "private": true,
+  "description": "Roku simulator + side-by-side comparison against the Android TV web UI. Local dev tooling only.",
+  "type": "module",
+  "scripts": {
+    "sim": "node sim-server.mjs",
+    "compare": "node scenarios.mjs",
+    "check": "bsc --project bs-lib.json && bsc --project bs-shell.json"
+  },
+  "dependencies": {
+    "brighterscript": "^0.73.5",
+    "brs-engine": "^2.6.0",
+    "brs-scenegraph": "^0.6.0",
+    "puppeteer-core": "^23.11.1"
+  }
+}

@@ -5,6 +5,27 @@ for "what's next." See [../CLAUDE.md](../CLAUDE.md) for how the project works.
 
 Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed)
 
+## 📺 Roku app (STARTED 2026-09-18 — owner requirement: an exact 1:1 of the Android TV app)
+Must look and behave exactly like the Android TV app (the `?tv=1` web app + libVLC player).
+The line-by-line checklist is [../roku/PARITY.md](../roku/PARITY.md); nothing ships until
+every box is ticked and checked on a real Roku. Delivery: a one-time sideloaded shell that
+loads the real app as a SceneGraph ComponentLibrary from the server (`/roku/marquee.zip`),
+so updates ride the normal push + Dell Update. The shell updates itself too (it reinstalls
+a newer `roku/shell` through the Roku's own developer installer).
+
+**Status 2026-09-19: built, running in the brs-engine simulator, not committed.** Every
+screen runs in the simulator: Home/Movies/TV rows + hero, detail, show + episodes, player
+HUD + subtitles, Live TV guide, Library, Collections, Settings, Requests, sign-in. Rows and
+channels come from `src/roku.js` (port of app.js); `test/roku-parity.test.mjs` proves they
+match the real app.js output. Not yet seen on a real Roku: video decode + HLS fallback,
+library asset loading from `pkg:/`, streaming ECP launches, the shell self-update.
+Install-day steps: [../roku/INSTALL.md](../roku/INSTALL.md) (includes a test shell update).
+Side-by-side parity harness: [../roku/tools/parity/](../roku/tools/parity/) drives the web TV
+UI and the simulator with the same remote keys and diffs every screen; run it after any
+change to `public/` that the TV app shows.
+
+---
+
 ---
 
 ## 💾 Storage optimizer (NEW — built 2026-09-07, not yet run on real media)

@@ -1,0 +1,1 @@
+{ "rootDir": "../../lib", "files": ["manifest", "components/**/*"], "createPackage": false, "stagingDir": "out/stage-lib", "diagnosticFilters": [] }

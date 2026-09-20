@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<component name="ShellScene" extends="Scene">
+    <interface>
+        <field id="launchArgs" type="assocarray" />
+        <field id="inputArgs" type="assocarray" />
+    </interface>
+    <script type="text/brightscript" uri="ShellScene.brs" />
+    <children>
+        <Rectangle id="bg" width="1920" height="1080" color="0x141416FF" />
+        <Group id="app" />
+        <Group id="splash">
+            <Label id="brand" width="1920" height="80" translation="[0,468]" horizAlign="center" vertAlign="center" color="0xEFEEE9FF" text="MARQUEE" />
+            <Label id="status" width="1920" height="40" translation="[0,580]" horizAlign="center" vertAlign="center" color="0x8C8C86FF" text="LOADING…" />
+        </Group>
+    </children>
+</component>
