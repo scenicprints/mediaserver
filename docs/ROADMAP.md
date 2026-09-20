@@ -13,7 +13,8 @@ loads the real app as a SceneGraph ComponentLibrary from the server (`/roku/marq
 so updates ride the normal push + Dell Update. The shell updates itself too (it reinstalls
 a newer `roku/shell` through the Roku's own developer installer).
 
-**Status 2026-09-19: built, running in the brs-engine simulator, not committed.** Every
+**Status 2026-09-20: pushed, so the Dell serves it after an Update; never run on a real
+Roku.** Every
 screen runs in the simulator: Home/Movies/TV rows + hero, detail, show + episodes, player
 HUD + subtitles, Live TV guide, Library, Collections, Settings, Requests, sign-in. Rows and
 channels come from `src/roku.js` (port of app.js); `test/roku-parity.test.mjs` proves they
