@@ -903,6 +903,21 @@ function freeSpaceOn(filePath) {
   } catch { return Infinity; } // if we can't tell, let the encode fail loudly instead
 }
 
+// Attachment streams (embedded subtitle fonts) are left out of every job.
+//
+// ffmpeg 7.1.5's matroska muxer cannot handle one while a track is being
+// encoded: it reports "Received a packet for an attachment stream", then
+// "Error submitting a packet to the muxer: Invalid argument", and ABORTS the
+// mux part-written. The Empire Strikes Back produced 600 KB instead of 60 GB
+// that way, and the wreckage then set off two different alarms - "output is not
+// larger, something was removed" and "VIDEO BITSTREAM CHANGED" - which made it
+// look like two faults rather than one. `-c:t copy` does not help; only leaving
+// the attachment out does.
+//
+// The cost is embedded fonts, which matter solely for styled ASS/SSA subtitles.
+// The files that hit this carry PGS (image) subtitles, where fonts do nothing.
+const DROP_ATTACHMENTS = ['-map', '-0:t?'];
+
 // Build the ffmpeg command for a profile.
 //
 // Audio profile: `-map 0 -c copy` keeps every stream — video, subtitles, chapters,
@@ -917,7 +932,7 @@ function buildArgs(info, plan, src, dst, { audioMode = 'convert', crf = null } =
   // times realtime. Uncapped it will pull as hard as the drive allows, which is
   // what these USB disks did not enjoy.
   if (throttle.readRate > 0) args.push('-readrate', String(throttle.readRate));
-  args.push('-i', src, '-map', '0', '-map', '-0:d?', '-max_interleave_delta', '0');
+  args.push('-i', src, '-map', '0', '-map', '-0:d?', ...DROP_ATTACHMENTS, '-max_interleave_delta', '0');
   const doVideo = plan.profile === 'video' || plan.profile === 'both';
   const doAudio = plan.profile === 'audio' || plan.profile === 'both';
   if (doAudio && audioMode === 'drop') {
@@ -1614,7 +1629,7 @@ export async function addCompatibleAudio(db, kind, fileId, { log = () => {}, dry
     '-hide_banner', '-nostdin', '-y',
     ...(throttle.readRate > 0 ? ['-readrate', String(throttle.readRate)] : []),
     '-i', src,
-    '-map', '0', '-map', `0:a:${plan.srcIndex}`, '-map', '-0:d?',
+    '-map', '0', '-map', `0:a:${plan.srcIndex}`, '-map', '-0:d?', ...DROP_ATTACHMENTS,
     '-max_interleave_delta', '0',
     '-c', 'copy',                                 // everything copied, including video
     `-c:a:${n}`, AUDIO_CODEC, `-b:a:${n}`, `${plan.channels > 2 ? AUDIO_KBPS : 320}k`,
