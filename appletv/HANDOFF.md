@@ -13,6 +13,16 @@ UI rewrite was built against superseded versions of half these files. The push
 was rejected and the work had to be redone. **Check `git log HEAD..origin/main`
 before you touch a file, not after.**
 
+## Back button (2026-09-22)
+The 9/10 Back fix (commit 4c7c52f) was committed an hour AFTER the last
+TestFlight build, so the owner never had it and reported the bug again. Now:
+one `onExitCommand` on the whole shell (rail + content). Pushed page -> pop,
+even if focus is on the rail. Tab root in content -> focus to the rail. Rail
+with nothing pushed -> handler is nil, so tvOS takes the press and exits.
+Picking a tab on the rail resets that tab's stack to its root (Home -> film ->
+Library -> Home shows Home). Unverified on-device until the owner tests it.
+**Lesson: after a fix lands, check it actually made a TestFlight build.**
+
 ## The Braun edition (2026-08-28)
 The app's look was rebuilt on Rams' principles at the owner's request (he gave a
 Braun-panel reference image and approved a mockup first — `appletv/design/braun.html`,

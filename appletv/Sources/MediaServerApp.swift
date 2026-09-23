@@ -6,7 +6,7 @@ import SwiftUI
 // There is no TabView. tvOS's tab bar can't be restyled, and Marquee's rail is
 // part of the design: wordmark left, tabs centred under a signal underline,
 // clock and settings right, one hairline under the lot. Replacing it also
-// retires the "Back exits the app from a show page" bug — Back now walks the
+// retires the "Back exits the app from a show page" bug: Back now walks the
 // NavigationStack, and at a tab's root it moves focus up to the rail.
 // ============================================================================
 
@@ -91,23 +91,40 @@ struct ContentView: View {
 
     private var shell: some View {
         VStack(spacing: 0) {
-            TopRail(tab: $tab, railFocus: $railFocus)
+            TopRail(tab: selectTab, railFocus: $railFocus)
                 .focusSection()
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .focusSection()
-                // Back pops a pushed page, and only walks focus up to the rail
-                // once you're at a tab's root.
-                //
-                // This used to just set railFocus and trust "the NavigationStack's
-                // own handler wins and pops when you're deeper in". It doesn't: an
-                // onExitCommand on an ancestor takes the press for its whole
-                // subtree, so Back on a film's page never popped — it moved focus
-                // to the rail, and the next press, with nothing left to intercept
-                // it, quit the app. Handle both cases here, explicitly.
-                .onExitCommand { goBack() }
         }
         .ignoresSafeArea(edges: .bottom)
+        // Back pops a pushed page, and only walks focus up to the rail once
+        // you're at a tab's root. It sits on the whole shell, not just the
+        // content, so Back still pops a detail page after focus has wandered up
+        // to the rail. The only time it hands the press to the system (which
+        // quits the app) is on the rail with nothing pushed.
+        //
+        // An onExitCommand on an ancestor takes the press for its whole subtree,
+        // so the NavigationStack never pops on its own. That is why an earlier
+        // version that only moved focus to the rail made Back on a film's page
+        // quit the app on the second press.
+        .onExitCommand(perform: exitAction)
+    }
+
+    /// nil = let tvOS have the press (exit to the Apple TV home screen).
+    private var exitAction: (() -> Void)? {
+        let pushed = !(paths[tab.rawValue] ?? []).isEmpty
+        if !pushed && railFocus != nil { return nil }
+        return { goBack() }
+    }
+
+    /// Picking a tab on the rail always lands on that tab's top level, so
+    /// Home -> a film -> Library -> Home shows Home, not the film again.
+    private var selectTab: Binding<Tab> {
+        Binding(get: { tab }, set: { t in
+            paths[t.rawValue] = []
+            tab = t
+        })
     }
 
     @ViewBuilder private var content: some View {
