@@ -21,6 +21,7 @@ import { runIntroDetection, introForFile, fpcalcReady } from './introdetect.js';
 import { hashPassword, verifyPassword, newToken, tokenFromReq, cookieHeader } from './auth.js';
 import { PROVIDERS, providersList, refreshCatalog, catalogFor, catalogProviderMap, titleProviders, watchLink, status as streamingStatus } from './streaming.js';
 import { registerHls } from './hls.js';
+import { registerArtCache, rewriteJson, originOf, warm as warmArtCache } from './artcache.js';
 import { registerRoku } from './roku.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -54,6 +55,9 @@ const config = JSON.parse(configText);
 // through untouched.
 const mediaRoots = (config.mediaRoots || []).map((r) => path.resolve(ROOT, r));
 const db = openDb(path.resolve(ROOT, config.dbPath));
+
+// Artwork cache lives beside the library db (same place as subcache).
+const ART_DIR = path.resolve(path.dirname(path.resolve(ROOT, config.dbPath)), 'artcache');
 
 const MIME = {
   '.mp4': 'video/mp4', '.m4v': 'video/mp4', '.webm': 'video/webm',
@@ -105,6 +109,19 @@ app.register(fastifyStatic, {
   root: path.join(ROOT, 'public'),
   prefix: '/',
   index: false
+});
+
+// Artwork: serve posters/backdrops/stills from our own disk, and rewrite the
+// TMDB URLs in every JSON response to point at that copy. One chokepoint, so
+// routes added later are covered without remembering to do anything. Without
+// this the whole UI is placeholders the moment the WAN drops.
+registerArtCache(app, ART_DIR);
+app.addHook('onSend', async (req, reply, payload) => {
+  const ct = String(reply.getHeader('content-type') || '');
+  if (!ct.includes('application/json') || typeof payload !== 'string') return payload;
+  const out = rewriteJson(payload, originOf(req));
+  if (out !== payload) reply.header('content-length', Buffer.byteLength(out));
+  return out;
 });
 
 // Serve index.html with cache-busted asset URLs (?v=<file mtime>) so a redeploy's
@@ -2065,6 +2082,11 @@ async function start() {
       await backfillMovieDetails(db, config.tmdbApiKey, { log: (x) => console.log(x) });
       await backfillCompanies(db, config.tmdbApiKey, { log: (x) => console.log(x) });
     }
+
+    // Pull every referenced poster/backdrop/still to disk so browsing works with
+    // the internet out, not just the titles someone happened to open while it was
+    // up. Anything that fails is retried next boot, or fetched on first view.
+    await warmArtCache(db, ART_DIR, { log: (x) => console.log(x) });
   })().catch((e) => console.error('Startup scan/enrich error:', e.message));
 
   // Streaming services (admin-only feature): pull each service's popular catalog
