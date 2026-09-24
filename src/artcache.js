@@ -19,6 +19,7 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+import { netFetch, isOnline } from './online.js';
 
 const TMDB_PREFIX = 'https://image.tmdb.org/t/p/';
 const LOCAL_PREFIX = '/art/';
@@ -65,16 +66,31 @@ export function originOf(req) {
   return `${proto}://${host}`;
 }
 
+// Two screens asking for the same uncached poster at once share one download,
+// rather than racing two writes onto the same temp file.
+const inflight = new Map();
+
 /** Fetch one image into the cache if it isn't there. Returns true if it's on disk after. */
-export async function fetchOne(dir, rel) {
-  if (!SAFE.test(rel)) return false;
+export function fetchOne(dir, rel) {
+  if (!SAFE.test(rel)) return Promise.resolve(false);
+  const key = path.join(dir, rel);
+  if (!inflight.has(key)) inflight.set(key, fetchOneNow(dir, rel).finally(() => inflight.delete(key)));
+  return inflight.get(key);
+}
+
+async function fetchOneNow(dir, rel) {
   const dest = path.join(dir, rel);
   try { await fsp.access(dest); return true; } catch { /* not cached yet */ }
 
-  let res;
-  try { res = await fetch(TMDB_PREFIX + rel); } catch { return false; }
-  if (!res || !res.ok) return false;
-  const buf = Buffer.from(await res.arrayBuffer());
+  // netFetch fails at once while the internet is known to be down, so a screen
+  // full of uncached posters costs a screen full of instant 404s, not a
+  // screen full of timeouts.
+  let res, buf;
+  try {
+    res = await netFetch(TMDB_PREFIX + rel, { timeout: 15e3 });
+    if (!res.ok) return false;
+    buf = Buffer.from(await res.arrayBuffer());
+  } catch { return false; }
   if (!buf.length) return false;
 
   await fsp.mkdir(path.dirname(dest), { recursive: true });
@@ -134,31 +150,56 @@ export function artUrlsInDb(db) {
   return [...out];
 }
 
+/** Every file already in the cache, as "size/name" — one listing per size folder. */
+function cachedSet(dir) {
+  const have = new Set();
+  let sizes = [];
+  try { sizes = fs.readdirSync(dir, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name); } catch { return have; }
+  for (const size of sizes) {
+    let files = [];
+    try { files = fs.readdirSync(path.join(dir, size)); } catch { continue; }
+    for (const f of files) if (!f.endsWith('.part')) have.add(`${size}/${f}`);
+  }
+  return have;
+}
+
+let warming = false;
+
 /**
  * Pull down everything the library references, so browsing works offline even
- * for titles nobody has opened yet. Best-effort and interruptible: anything that
- * fails is simply retried on the next run (or fetched on demand when viewed).
+ * for titles nobody has opened yet. Idempotent and resumable: what is already
+ * on disk is skipped using one directory listing (not a stat per title), and
+ * anything that fails is simply picked up on the next pass, or fetched on
+ * demand when someone views it.
+ *
+ * Deliberately slow. The Dell streams and runs the storage optimizer around the
+ * clock, so this takes two images at a time with a pause between them, and it
+ * stops the moment the internet goes: a first backfill of a big library takes a
+ * while, and that is fine.
  */
-export async function warm(db, dir, { concurrency = 6, log = () => {} } = {}) {
-  const rels = artUrlsInDb(db);
-  let done = 0, fetched = 0, failed = 0, i = 0;
+export async function warm(db, dir, { concurrency = 2, pauseMs = 150, log = () => {} } = {}) {
+  if (warming) return { skipped: true };
+  warming = true;
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const have = cachedSet(dir);
+    const todo = artUrlsInDb(db).filter((rel) => !have.has(rel));
+    if (!todo.length) return { total: have.size, fetched: 0, failed: 0 };
+    if (!isOnline()) { log(`[art] ${todo.length} image(s) not cached yet; waiting for the internet`); return { total: have.size, fetched: 0, failed: 0, pending: todo.length }; }
 
-  const worker = async () => {
-    while (i < rels.length) {
-      const rel = rels[i++];
-      const dest = path.join(dir, rel);
-      let had = true;
-      try { await fsp.access(dest); } catch { had = false; }
-      if (!had) {
-        const ok = await fetchOne(dir, rel);
-        if (ok) fetched++; else failed++;
+    let fetched = 0, failed = 0, i = 0;
+    const worker = async () => {
+      while (i < todo.length && isOnline()) {
+        const rel = todo[i++];
+        if (await fetchOne(dir, rel)) fetched++; else failed++;
+        await new Promise((r) => setTimeout(r, pauseMs));
       }
-      done++;
-    }
-  };
-
-  fs.mkdirSync(dir, { recursive: true });
-  await Promise.all(Array.from({ length: Math.max(1, concurrency) }, worker));
-  log(`[art] cache warm: ${done} referenced, ${fetched} newly cached, ${failed} unavailable`);
-  return { total: rels.length, fetched, failed };
+    };
+    await Promise.all(Array.from({ length: Math.max(1, concurrency) }, worker));
+    const left = todo.length - fetched;
+    log(`[art] cache: ${fetched} newly cached${left ? `, ${left} still to fetch${isOnline() ? '' : ' (internet went away)'}` : ''}`);
+    return { total: have.size + fetched, fetched, failed };
+  } finally {
+    warming = false;
+  }
 }

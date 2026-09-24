@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { rewriteJson, originOf, relFor, artUrlsInDb, fetchOne } from '../src/artcache.js';
+import { rewriteJson, originOf, relFor, artUrlsInDb, fetchOne, warm } from '../src/artcache.js';
 
 test('rewriteJson swaps every TMDB image URL for a local one', () => {
   const body = JSON.stringify({
@@ -104,6 +104,34 @@ test('artUrlsInDb collects and dedupes across all art columns', () => {
   const db = { prepare: (sql) => ({ all: () => rows[sql] || [] }) };
   const got = artUrlsInDb(db).sort();
   assert.deepEqual(got, ['w1280/b.jpg', 'w300/e.jpg', 'w500/a.jpg', 'w500/c.jpg', 'w500/d.jpg']);
+});
+
+// The backfill runs on the production box next to streams and the optimizer:
+// it must only ever fetch what is missing, and a second pass must be free.
+test('warm fetches only what is missing, and a second pass fetches nothing', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'artcache-'));
+  await fsp.mkdir(path.join(dir, 'w500'), { recursive: true });
+  await fsp.writeFile(path.join(dir, 'w500', 'a.jpg'), 'already');
+  const rows = {
+    'SELECT poster, backdrop, collection_poster FROM movies': [
+      { poster: 'https://image.tmdb.org/t/p/w500/a.jpg', backdrop: 'https://image.tmdb.org/t/p/w1280/b.jpg', collection_poster: null }
+    ],
+    'SELECT still FROM episodes': [{ still: 'https://image.tmdb.org/t/p/w300/e.jpg' }]
+  };
+  const db = { prepare: (sql) => ({ all: () => rows[sql] || [] }) };
+  const asked = [];
+  const real = globalThis.fetch;
+  globalThis.fetch = async (u) => { asked.push(String(u)); return { ok: true, arrayBuffer: async () => new TextEncoder().encode('IMG').buffer }; };
+  try {
+    const first = await warm(db, dir, { pauseMs: 0 });
+    assert.equal(first.fetched, 2);
+    assert.deepEqual(asked.sort(), ['https://image.tmdb.org/t/p/w1280/b.jpg', 'https://image.tmdb.org/t/p/w300/e.jpg']);
+    asked.length = 0;
+    const second = await warm(db, dir, { pauseMs: 0 });
+    assert.equal(second.fetched, 0);
+    assert.deepEqual(asked, []);
+  } finally { globalThis.fetch = real; }
+  assert.equal(fs.readFileSync(path.join(dir, 'w500', 'a.jpg'), 'utf8'), 'already');
 });
 
 test('artUrlsInDb survives a table that is not there yet', () => {

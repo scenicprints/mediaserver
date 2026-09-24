@@ -69,17 +69,23 @@ async function translateTexts(texts, target, { config = {}, onProgress } = {}) {
   }
   // Google fallback: small concurrency, keep original on failure.
   const CONC = 5;
-  let done = 0, idx = 0;
+  let done = 0, idx = 0, failed = 0;
   async function worker() {
     while (idx < texts.length) {
       const i = idx++;
       try { out[i] = await googleOne(texts[i], target); }
-      catch { out[i] = texts[i]; }
+      catch { out[i] = texts[i]; failed++; }
       done++;
       if (onProgress) onProgress(done / texts.length);
     }
   }
   await Promise.all(Array.from({ length: CONC }, worker));
+  // Every cue failing means Google was never reached (the connection dropped
+  // mid-job). Writing the untranslated text would save it as the finished
+  // translation, and the cache check above would serve that for ever.
+  if (texts.length && failed === texts.length) {
+    throw new Error('Translation could not reach the internet. The English subtitles are ready; try the translation again when the connection is back.');
+  }
   return out;
 }
 

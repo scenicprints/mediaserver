@@ -10,6 +10,8 @@
 //
 // Admin-only for now (gated in server.js): the owner tests it, then ships wider.
 
+import { netFetch, OfflineError } from './online.js';
+
 const BASE = 'https://api.themoviedb.org/3';
 const POSTER = 'https://image.tmdb.org/t/p/w500';
 const BACKDROP = 'https://image.tmdb.org/t/p/w1280';
@@ -34,7 +36,7 @@ async function tmdbGet(apiKey, path, params = {}) {
   const url = new URL(BASE + path);
   url.searchParams.set('api_key', apiKey);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, String(v));
-  const res = await fetch(url);
+  const res = await netFetch(url);
   if (!res.ok) throw new Error(`${path} -> ${res.status}`);
   return res.json();
 }
@@ -74,6 +76,9 @@ export async function refreshCatalog(apiKey, { region = 'US', pages = 2, log = (
     }
     if (Object.keys(gm).length) genreMap = gm;
 
+    // An offline refresh used to finish "successfully" with every list empty
+    // and replace a good catalog with nothing. Now it gives up and keeps the
+    // one it has; the 12-hourly refresh tries again.
     const next = { movie: new Map(), tv: new Map() };
     for (const p of PROVIDERS) {
       for (const kind of ['movie', 'tv']) {
@@ -86,7 +91,9 @@ export async function refreshCatalog(apiKey, { region = 'US', pages = 2, log = (
             });
             for (const r of d.results || []) if (r.poster_path) items.push(norm(kind, r, p.id));
             if (page >= (d.total_pages || 1)) break;
-          } catch {}
+          } catch (e) {
+            if (e instanceof OfflineError) { log('Streaming catalog: no internet, keeping the last one.'); return; }
+          }
           await sleep(80);
         }
         next[kind].set(p.id, items);
@@ -150,7 +157,9 @@ export async function titleProviders(apiKey, kind, tmdbId, region = 'US') {
       const d = await tmdbGet(apiKey, `/${type}/${tmdbId}/watch/providers`);
       const ids = new Set((d.results?.[region]?.flatrate || []).map((p) => p.provider_id));
       slugs = PROVIDERS.filter((p) => ids.has(p.tmdb)).map((p) => p.id);
-    } catch {}
+    } catch {
+      return slugs; // not an answer, so don't remember it as one
+    }
   }
   provCache.set(key, slugs);
   return slugs;
@@ -172,14 +181,15 @@ export async function watchLink(apiKey, kind, tmdbId, region = 'US') {
   const type = kind === 'tv' ? 'tv' : 'movie';
   const key = `${type}:${tmdbId}:${region}`;
   if (linkCache.has(key)) return linkCache.get(key);
-  let link = null;
+  let link = null, answered = !apiKey;
   if (apiKey) {
     try {
       const d = await tmdbGet(apiKey, `/${type}/${tmdbId}/watch/providers`);
       link = d.results?.[region]?.link || null;
+      answered = true;
     } catch {}
   }
   const url = link || `https://www.themoviedb.org/${type}/${tmdbId}/watch?locale=${region}`;
-  linkCache.set(key, url);
+  if (answered) linkCache.set(key, url);
   return url;
 }

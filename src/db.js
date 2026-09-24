@@ -248,5 +248,16 @@ export function openDb(dbPath) {
   db.exec('CREATE INDEX IF NOT EXISTS idx_tele_ts ON telemetry(ts);');
   db.exec('CREATE INDEX IF NOT EXISTS idx_tele_dev ON telemetry(device, id);');
 
+  // ---- Last good TMDB detail per title (cast, crew, seasons) ----
+  // Detail pages fetch these live. Keeping the last answer means a page opened
+  // with the internet down still shows who is in it instead of an empty cast.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS extra_cache (
+      key  TEXT PRIMARY KEY,
+      json TEXT NOT NULL,
+      at   INTEGER NOT NULL
+    );
+  `);
+
   return db;
 }

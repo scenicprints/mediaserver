@@ -1,5 +1,13 @@
 // Minimal TMDB client. Uses Node's global fetch (no dependency).
 // Get a free API key at https://www.themoviedb.org/settings/api
+//
+// Every call goes through netFetch (src/online.js): with the internet down it
+// fails at once with an OfflineError instead of waiting on a timeout. The
+// per-title helpers turn that into "no data"; the enrichment loops let it
+// escape, so a pass stops at the first title instead of logging a failure for
+// every one, and nothing is written down as a permanent answer.
+
+import { netFetch, OfflineError } from './online.js';
 
 const BASE = 'https://api.themoviedb.org/3';
 const POSTER = 'https://image.tmdb.org/t/p/w500';
@@ -13,7 +21,7 @@ export async function showExtra(apiKey, tmdbId) {
   const url = new URL(`${BASE}/tv/${tmdbId}`);
   url.searchParams.set('api_key', apiKey);
   let res;
-  try { res = await fetch(url); } catch { return null; }
+  try { res = await netFetch(url); } catch { return null; }
   if (!res.ok) return null;
   const d = await res.json();
   return {
@@ -34,7 +42,7 @@ export async function episodeExtra(apiKey, showTmdbId, season, episode) {
   url.searchParams.set('api_key', apiKey);
   url.searchParams.set('append_to_response', 'credits');
   let res;
-  try { res = await fetch(url); } catch { return null; }
+  try { res = await netFetch(url); } catch { return null; }
   if (!res.ok) return null;
   const d = await res.json();
 
@@ -64,7 +72,7 @@ export async function movieExtra(apiKey, tmdbId) {
   url.searchParams.set('append_to_response', 'credits,videos,recommendations');
 
   let res;
-  try { res = await fetch(url); } catch { return null; }
+  try { res = await netFetch(url); } catch { return null; }
   if (!res.ok) return null;
   const d = await res.json();
 
@@ -86,7 +94,7 @@ export async function movieExtra(apiKey, tmdbId) {
     try {
       const cu = new URL(`${BASE}/collection/${d.belongs_to_collection.id}`);
       cu.searchParams.set('api_key', apiKey);
-      const cr = await fetch(cu);
+      const cr = await netFetch(cu);
       if (cr.ok) {
         const cd = await cr.json();
         collection = {
@@ -217,7 +225,7 @@ async function tmdbSearch(apiKey, kind, query, year) {
   url.searchParams.set('query', query);
   if (year) url.searchParams.set('year', String(year));
   let res;
-  try { res = await fetch(url); } catch { return []; }
+  try { res = await netFetch(url); } catch (e) { if (e instanceof OfflineError) throw e; return []; }
   if (!res.ok) return [];
   const data = await res.json().catch(() => null);
   return (data && data.results) || [];
@@ -301,10 +309,11 @@ export async function enrichEpisodes(db, apiKey, { log = () => {} } = {}) {
       try {
         const url = new URL(`${BASE}/tv/${show.tmdb_id}/season/${season}`);
         url.searchParams.set('api_key', apiKey);
-        const res = await fetch(url);
+        const res = await netFetch(url);
         if (!res.ok) continue;
         data = await res.json();
-      } catch {
+      } catch (e) {
+        if (e instanceof OfflineError) throw e;
         continue;
       }
       for (const e of data.episodes || []) {
@@ -327,11 +336,12 @@ async function genresFor(apiKey, type, id) {
   try {
     const url = new URL(`${BASE}/${type}/${id}`);
     url.searchParams.set('api_key', apiKey);
-    const r = await fetch(url);
+    const r = await netFetch(url);
     if (!r.ok) return null;
     const d = await r.json();
     return (d.genres || []).map((g) => g.name);
-  } catch {
+  } catch (e) {
+    if (e instanceof OfflineError) throw e;
     return null;
   }
 }
@@ -375,14 +385,24 @@ export async function backfillMovieDetails(db, apiKey, { log = () => {} } = {}) 
   );
   let n = 0;
   for (const m of rows) {
-    let d = null;
+    // Only TMDB saying "no such movie" is a final answer. A rate limit, a
+    // server error or no internet at all used to be recorded as col_checked
+    // too, so one offline boot silently cost every unchecked movie its
+    // collection and runtime for good.
+    let d = null, gone = false;
     try {
       const url = new URL(`${BASE}/movie/${m.tmdb_id}`);
       url.searchParams.set('api_key', apiKey);
-      const r = await fetch(url);
+      const r = await netFetch(url);
       if (r.ok) d = await r.json();
-    } catch {}
-    if (!d) { db.prepare('UPDATE movies SET col_checked = 1 WHERE id = ?').run(m.id); continue; }
+      else gone = r.status === 404;
+    } catch (e) {
+      if (e instanceof OfflineError) throw e;
+    }
+    if (!d) {
+      if (gone) db.prepare('UPDATE movies SET col_checked = 1 WHERE id = ?').run(m.id);
+      continue;
+    }
     const col = d.belongs_to_collection;
     upd.run(
       col ? col.id : null,
@@ -408,8 +428,17 @@ export async function backfillCompanies(db, apiKey, { log = () => {} } = {}) {
   const upd = db.prepare('UPDATE movies SET companies = ? WHERE id = ?');
   let n = 0;
   for (const m of rows) {
-    let d = null;
-    try { const url = new URL(`${BASE}/movie/${m.tmdb_id}`); url.searchParams.set('api_key', apiKey); const r = await fetch(url); if (r.ok) d = await r.json(); } catch {}
+    // Same rule as backfillMovieDetails: an empty list is only written when
+    // TMDB answered, never because it could not be asked.
+    let d = null, gone = false;
+    try {
+      const url = new URL(`${BASE}/movie/${m.tmdb_id}`); url.searchParams.set('api_key', apiKey);
+      const r = await netFetch(url);
+      if (r.ok) d = await r.json(); else gone = r.status === 404;
+    } catch (e) {
+      if (e instanceof OfflineError) throw e;
+    }
+    if (!d && !gone) continue;
     upd.run(JSON.stringify(d && d.production_companies ? d.production_companies.map((c) => c.id) : []), m.id);
     n++;
     await new Promise((r) => setTimeout(r, 60));

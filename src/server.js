@@ -23,6 +23,7 @@ import { PROVIDERS, providersList, refreshCatalog, catalogFor, catalogProviderMa
 import { registerHls } from './hls.js';
 import { registerArtCache, rewriteJson, originOf, warm as warmArtCache } from './artcache.js';
 import { registerRoku } from './roku.js';
+import { isOnline, onChange as onInternetChange, startWatching as watchInternet, netFetch } from './online.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -57,7 +58,8 @@ const mediaRoots = (config.mediaRoots || []).map((r) => path.resolve(ROOT, r));
 const db = openDb(path.resolve(ROOT, config.dbPath));
 
 // Artwork cache lives beside the library db (same place as subcache).
-const ART_DIR = path.resolve(path.dirname(path.resolve(ROOT, config.dbPath)), 'artcache');
+const DATA_DIR = path.dirname(path.resolve(ROOT, config.dbPath));
+const ART_DIR = path.resolve(DATA_DIR, 'artcache');
 
 const MIME = {
   '.mp4': 'video/mp4', '.m4v': 'video/mp4', '.webm': 'video/webm',
@@ -487,6 +489,10 @@ function withStreaming(req, kind, local) {
     const also = catalogProviderMap(kind, src.enabled);
     for (const it of base) { const on = also.get(it.tmdb_id); if (on && on.length) it.alsoOn = on; }
   }
+  // With the internet down a streaming title can't be opened (it deep-links out
+  // to the service) and its poster was never cached, so it would be a row of
+  // dead placeholders. Owned titles only until the internet is back.
+  if (!isOnline()) return base;
   const owned = new Set(local.map((x) => x.tmdb_id).filter(Boolean));
   const extra = catalogFor(kind, src.enabled).filter((t) => !owned.has(t.tmdb_id)).map(streamItem);
   return [...base, ...extra];
@@ -587,17 +593,39 @@ app.get('/api/collections/:id', async (req) => {
   return { name: meta && meta.name, poster: meta && meta.poster, backdrop: meta && meta.backdrop, items };
 });
 
+// The live TMDB detail for a page, or the last one we got if TMDB can't be
+// asked right now. Only a real answer is stored, so an outage never overwrites
+// a good copy with nothing.
+async function lastGood(key, fetchFresh) {
+  const fresh = await fetchFresh();
+  if (fresh) {
+    db.prepare('INSERT INTO extra_cache (key, json, at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET json = excluded.json, at = excluded.at')
+      .run(key, JSON.stringify(fresh), Date.now());
+    return fresh;
+  }
+  const row = db.prepare('SELECT json FROM extra_cache WHERE key = ?').get(key);
+  if (!row) return null;
+  try { return JSON.parse(row.json); } catch { return null; }
+}
+
 // Rich TMDB detail (genres, cast, director, trailer, recommendations). Owned
 // recommendations get a localId so the UI can make them playable.
 app.get('/api/movies/:id/extra', async (req, reply) => {
   const m = db.prepare('SELECT tmdb_id FROM movies WHERE id = ?').get(req.params.id);
   if (!m) return reply.code(404).send({ error: 'not found' });
-  const extra = await movieExtra(config.tmdbApiKey, m.tmdb_id);
+  const extra = m.tmdb_id ? await lastGood(`movie:${m.tmdb_id}`, () => movieExtra(config.tmdbApiKey, m.tmdb_id)) : null;
   if (!extra) return { genres: [], runtime: null, cast: [], directors: [], trailer: null, recommendations: [], alsoOn: await alsoOnFor(req, 'movie', m.tmdb_id) };
   const owned = db.prepare('SELECT id, tmdb_id FROM movies WHERE tmdb_id IS NOT NULL').all();
   const byTmdb = new Map(owned.map((o) => [o.tmdb_id, o.id]));
   for (const r of extra.recommendations) r.localId = byTmdb.get(r.tmdb_id) || null;
   if (extra.collection) for (const p of extra.collection.parts) p.localId = byTmdb.get(p.tmdb_id) || null;
+  if (!isOnline()) {
+    // A trailer is a YouTube video and a recommendation you don't own can only
+    // be requested, and both need the internet. Hide them rather than offer a
+    // button that fails; owned recommendations still play.
+    extra.trailer = null;
+    extra.recommendations = extra.recommendations.filter((r) => r.localId);
+  }
   extra.alsoOn = await alsoOnFor(req, 'movie', m.tmdb_id); // enabled services that also carry it
   return extra;
 });
@@ -652,15 +680,59 @@ app.post('/api/scan', async (req, reply) => {
   if (!requireAdmin(req, reply)) return;
   const result = await scanLibraries(db);
   if (config.introDetection !== false) runIntroJob(); // analyze any new episodes (background)
+  if (result && result.added) runEnrichment('scan'); // new titles: metadata + art (background)
   return result;
 });
+
+// ---- Enrichment: one runner, retried until it finishes ----
+// Metadata and artwork come from the internet; the library does not. A scan
+// adds files with their parsed titles whether or not TMDB can be reached, and
+// this fills in the rest when it can: at boot, after a scan or a new library,
+// when the internet comes back after an outage, and hourly as a backstop. One
+// run at a time; a request while one is going queues exactly one more.
+let enrichRunning = null, enrichAgain = false;
+let enrichInterrupted = false; // the last run stopped for want of internet
+function runEnrichment(reason) {
+  if (enrichRunning) { enrichAgain = true; return enrichRunning; }
+  enrichRunning = (async () => {
+    const log = (x) => console.log(x);
+    const totals = { movies: 0, shows: 0, episodes: 0 };
+    try {
+      if (config.tmdbApiKey) {
+        totals.movies = await enrichLibrary(db, config.tmdbApiKey, { log });
+        totals.shows = await enrichShows(db, config.tmdbApiKey, { log });
+        totals.episodes = await enrichEpisodes(db, config.tmdbApiKey, { log });
+        await backfillGenres(db, config.tmdbApiKey, { log });
+        await backfillMovieDetails(db, config.tmdbApiKey, { log });
+        await backfillCompanies(db, config.tmdbApiKey, { log });
+        enrichInterrupted = false;
+        if (totals.movies || totals.shows || totals.episodes) {
+          console.log(`TMDB enrichment (${reason}): ${totals.movies} movie(s), ${totals.shows} show(s), ${totals.episodes} episode(s) updated.`);
+        }
+      }
+    } catch (e) {
+      // OfflineError lands here once, instead of a "no match" per title. The
+      // rows are still unmatched, so the next run picks them straight up.
+      if (e && e.offline) enrichInterrupted = true;
+      console.log(e && e.offline ? `TMDB enrichment (${reason}): paused, no internet; will resume when it is back.` : `Enrichment error: ${e && e.message}`);
+    }
+    // Pull every referenced poster/backdrop/still to disk so browsing works with
+    // the internet out, not just the titles someone happened to open while it was
+    // up. Anything that fails is retried next run, or fetched on first view.
+    try { await warmArtCache(db, ART_DIR, { log }); } catch (e) { console.error('Art cache error:', e.message); }
+    return totals;
+  })().finally(() => {
+    enrichRunning = null;
+    if (enrichAgain) { enrichAgain = false; runEnrichment('queued'); }
+  });
+  return enrichRunning;
+}
 
 // Trigger TMDB enrichment on demand (movies + shows) — admin only.
 app.post('/api/enrich', async (req, reply) => {
   if (!requireAdmin(req, reply)) return;
-  const movies = await enrichLibrary(db, config.tmdbApiKey);
-  const shows = await enrichShows(db, config.tmdbApiKey);
-  const episodes = await enrichEpisodes(db, config.tmdbApiKey);
+  if (!isOnline()) return reply.code(503).send({ error: 'No internet connection: metadata comes from TMDB. It will fill in by itself when the connection is back.' });
+  const { movies, shows, episodes } = await runEnrichment('manual');
   return { movies, shows, episodes };
 });
 
@@ -720,28 +792,33 @@ app.get('/api/episodes/:id/extra', async (req, reply) => {
     'SELECT e.season, e.episode, s.tmdb_id FROM episodes e JOIN shows s ON s.id = e.show_id WHERE e.id = ?'
   ).get(req.params.id);
   if (!row) return reply.code(404).send({ error: 'not found' });
-  return (await episodeExtra(config.tmdbApiKey, row.tmdb_id, row.season, row.episode)) || {};
+  if (!row.tmdb_id) return {};
+  return (await lastGood(`ep:${row.tmdb_id}:${row.season}:${row.episode}`,
+    () => episodeExtra(config.tmdbApiKey, row.tmdb_id, row.season, row.episode))) || {};
 });
 
 app.get('/api/shows/:id/extra', async (req, reply) => {
   const s = db.prepare('SELECT tmdb_id FROM shows WHERE id = ?').get(req.params.id);
   if (!s) return reply.code(404).send({ error: 'not found' });
-  const extra = (await showExtra(config.tmdbApiKey, s.tmdb_id)) || { seasons: [] };
-  extra.alsoOn = await alsoOnFor(req, 'tv', s.tmdb_id); // enabled services that also carry it
-  // Cast for the show detail page (movies get theirs via movieExtra) — the
-  // Apple TV's show "description window" renders it like the movie page.
-  if (config.tmdbApiKey && s.tmdb_id && !extra.cast) {
+  // Seasons plus cast for the show detail page (movies get cast via movieExtra)
+  // — the Apple TV's show "description window" renders it like the movie page.
+  // Fetched together and kept together, so an offline visit gets both back.
+  const extra = (s.tmdb_id && await lastGood(`show:${s.tmdb_id}`, async () => {
+    const x = await showExtra(config.tmdbApiKey, s.tmdb_id);
+    if (!x) return null;
     try {
-      const cr = await fetch(`https://api.themoviedb.org/3/tv/${s.tmdb_id}/credits?api_key=${config.tmdbApiKey}`);
+      const cr = await netFetch(`https://api.themoviedb.org/3/tv/${s.tmdb_id}/credits?api_key=${config.tmdbApiKey}`);
       if (cr.ok) {
         const c = await cr.json();
-        extra.cast = (c.cast || []).slice(0, 16).map((p) => ({
+        x.cast = (c.cast || []).slice(0, 16).map((p) => ({
           name: p.name, character: p.character || null,
           profile: p.profile_path ? `https://image.tmdb.org/t/p/w300${p.profile_path}` : null
         }));
       }
     } catch { /* cast is optional enrichment */ }
-  }
+    return x;
+  })) || { seasons: [] };
+  extra.alsoOn = await alsoOnFor(req, 'tv', s.tmdb_id); // enabled services that also carry it
   return extra;
 });
 
@@ -880,6 +957,9 @@ const git = (args) => new Promise((resolve, reject) => {
 });
 
 app.get('/api/check-update', async () => {
+  // Offline there is nothing to fetch; answer at once instead of making the
+  // update pill wait out git's timeout.
+  if (!isOnline()) return { updateAvailable: false, offline: true, error: 'offline' };
   try {
     await git(['fetch', 'origin', 'main', '--quiet']);
     const current = await git(['rev-parse', 'HEAD']);
@@ -931,13 +1011,7 @@ app.post('/api/libraries', async (req, reply) => {
 
   // Scan straight away so new titles show up, then enrich in the background.
   const scan = await scanLibraries(db);
-  if (config.tmdbApiKey) {
-    enrichLibrary(db, config.tmdbApiKey)
-      .then(() => enrichShows(db, config.tmdbApiKey))
-      .then(() => enrichEpisodes(db, config.tmdbApiKey))
-      .then(() => backfillGenres(db, config.tmdbApiKey))
-      .catch((e) => console.error('Enrichment error:', e.message));
-  }
+  runEnrichment('new library');
   if (config.introDetection !== false) runIntroJob(); // fingerprint the new show's intros (background)
   return { library: lib, scan };
 });
@@ -1750,6 +1824,12 @@ async function runSubJob(job, kind, fileId, target) {
     });
     let vttPath = baseVtt;
     if (twoPhase) {
+      // Whisper only speaks English; anything else is translated afterwards,
+      // by LibreTranslate if one is configured (on this network) or else by
+      // Google, which needs the internet. Say so rather than fail quietly.
+      if (!config.translateUrl && !isOnline()) {
+        throw new Error('No internet connection, so the English subtitles were made but could not be translated. They are in the subtitle list; translation needs the internet, or a LibreTranslate server set as translateUrl in config.json.');
+      }
       job.phase = 'translating';
       const outPath = row.path.replace(/\.[^.]+$/, '') + `.${target}-ai.vtt`;
       vttPath = await translateVttFile(baseVtt, outPath, target, {
@@ -1796,9 +1876,14 @@ app.get('/api/requests/status', async () => ({
   sonarr: await testConn(config.sonarr)
 }));
 
+// Radarr and Sonarr are on this network, but searching and downloading both go
+// out to the internet, so say that plainly instead of returning an empty list.
+const REQUESTS_OFFLINE = 'No internet connection. Requests search and download from the internet, so they will work again when it is back.';
+
 app.get('/api/requests/search', async (req, reply) => {
   const q = (req.query.q || '').trim();
   if (!q) return [];
+  if (!isOnline()) return reply.code(503).send({ error: REQUESTS_OFFLINE });
   const tasks = [];
   if (radarrEnabled(config.radarr)) tasks.push(radarrSearch(config.radarr, q).catch(() => []));
   if (sonarrEnabled(config.sonarr)) tasks.push(sonarrSearch(config.sonarr, q).catch(() => []));
@@ -1811,6 +1896,7 @@ app.get('/api/requests/search', async (req, reply) => {
 
 app.post('/api/requests/add', async (req, reply) => {
   const { type, tmdbId, tvdbId, qualityProfileId } = req.body || {};
+  if (!isOnline()) return reply.code(503).send({ error: REQUESTS_OFFLINE });
   try {
     if (type === 'movie') {
       if (!radarrEnabled(config.radarr)) return reply.code(400).send({ error: 'Radarr is not configured.' });
@@ -1924,9 +2010,14 @@ app.get('/api/subtitle/:fileId', (req, reply) => {
 
 // ---- Subtitle search + download (OpenSubtitles) ----
 
+// OpenSubtitles is on the internet. Subtitles already on disk, embedded ones and
+// AI subtitles (whisper runs here) all keep working without it.
+const SUBS_OFFLINE = 'No internet connection, so subtitle search is unavailable. Subtitles already on the server and AI subtitles still work.';
+
 app.get('/api/subtitles/search', async (req, reply) => {
   const os = userOS(req.user.id);
   if (!osEnabled(os)) return reply.code(400).send({ error: 'OpenSubtitles isn’t set up in your Settings yet — add your API key.' });
+  if (!isOnline()) return reply.code(503).send({ error: SUBS_OFFLINE });
   const { kind, fileId } = req.query;
   let params;
   if (kind === 'episode') {
@@ -1952,6 +2043,7 @@ app.post('/api/subtitles/download', async (req, reply) => {
   const table = kind === 'episode' ? 'episode_files' : 'movie_files';
   const row = db.prepare(`SELECT path FROM ${table} WHERE id = ?`).get(fileId);
   if (!row) return reply.code(404).send({ error: 'not found' });
+  if (!isOnline()) return reply.code(503).send({ error: SUBS_OFFLINE });
 
   const srt = await downloadSubtitle(os, file_id);
   if (!srt) return reply.code(502).send({ error: 'Download failed — check your login, or you may have hit the daily limit.' });
@@ -2070,24 +2162,21 @@ async function start() {
     await new Promise((r) => setTimeout(r, 500)); // let the first page load paint before the scan
     const scan = await scanLibraries(db);
     console.log(`Scan complete: ${scan.added} new file(s), ${scan.seen} video file(s) seen${scan.removed ? `, ${scan.removed} stale file(s) pruned` : ''}.`);
-
-    if (config.tmdbApiKey) {
-      const m = await enrichLibrary(db, config.tmdbApiKey, { log: (x) => console.log(x) });
-      console.log(`TMDB enrichment: ${m} movie(s) updated.`);
-      const s = await enrichShows(db, config.tmdbApiKey, { log: (x) => console.log(x) });
-      console.log(`TMDB enrichment: ${s} show(s) updated.`);
-      const ep = await enrichEpisodes(db, config.tmdbApiKey, { log: (x) => console.log(x) });
-      console.log(`TMDB enrichment: ${ep} episode(s) updated.`);
-      await backfillGenres(db, config.tmdbApiKey, { log: (x) => console.log(x) });
-      await backfillMovieDetails(db, config.tmdbApiKey, { log: (x) => console.log(x) });
-      await backfillCompanies(db, config.tmdbApiKey, { log: (x) => console.log(x) });
-    }
-
-    // Pull every referenced poster/backdrop/still to disk so browsing works with
-    // the internet out, not just the titles someone happened to open while it was
-    // up. Anything that fails is retried next boot, or fetched on first view.
-    await warmArtCache(db, ART_DIR, { log: (x) => console.log(x) });
+    await runEnrichment('boot');
   })().catch((e) => console.error('Startup scan/enrich error:', e.message));
+
+  // Offline -> online: finish whatever the outage interrupted. Hourly, fetch
+  // any artwork still missing (a poster that failed, a title opened while TMDB
+  // was down). Not a full enrichment hourly: titles TMDB simply can't match
+  // stay unmatched, and asking again every hour would only repeat the question.
+  const warmArt = () => warmArtCache(db, ART_DIR, { log: (x) => console.log(x) }).catch((e) => console.error('Art cache error:', e.message));
+  onInternetChange((up) => {
+    if (!up) return;
+    if (enrichInterrupted) runEnrichment('internet back');
+    else warmArt();
+  });
+  setInterval(() => { if (isOnline()) warmArt(); }, 3600e3).unref();
+  watchInternet();
 
   // Streaming services (admin-only feature): pull each service's popular catalog
   // from TMDB so it can merge into browse, then refresh every 12h. Fully async —
