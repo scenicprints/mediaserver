@@ -9,8 +9,32 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import Fastify from 'fastify';
 import { proofFor, lanAddrs, isDirectLan, loadIdentity, registerLan } from '../src/lan.js';
+
+// A stand-in for the Fastify app: just enough to register routes and call them.
+// CI runs `npm test` without installing dependencies, so the tests can't
+// import fastify itself.
+function fakeApp() {
+  const routes = {};
+  const app = {
+    get: (p, h) => { routes['GET ' + p] = h; },
+    post: (p, h) => { routes['POST ' + p] = h; },
+    async inject({ method, url, payload, headers = {}, remoteAddress = '127.0.0.1' }) {
+      const [p, qs] = url.split('?');
+      const req = { method, url, headers, body: payload, query: Object.fromEntries(new URLSearchParams(qs || '')), socket: { remoteAddress } };
+      const res = { statusCode: 200, headers: {}, body: undefined };
+      const reply = {
+        header(k, v) { res.headers[k.toLowerCase()] = v; return reply; },
+        code(c) { res.statusCode = c; return reply; },
+        send(b) { res.body = b; return reply; }
+      };
+      const out = await routes[method + ' ' + p](req, reply);
+      const body = out === reply ? res.body : out;
+      return { statusCode: res.statusCode, headers: res.headers, json: () => body };
+    }
+  };
+  return app;
+}
 
 // The clients (Swift, Kotlin, BrightScript, the webOS shell) all implement this
 // by hand. A fixed vector is the only way to know they agree with the server.
@@ -49,7 +73,7 @@ async function harness() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lan-'));
   const file = path.join(dir, 'lan.json');
   const tokens = new Set(['good-token']);
-  const app = Fastify();
+  const app = fakeApp();
   const tok = (req) => {
     const a = req.headers.authorization || '';
     return a.startsWith('Bearer ') ? a.slice(7) : null;
@@ -61,7 +85,6 @@ async function harness() {
     tokenValid: (t) => tokens.has(t),
     internet: () => false
   });
-  await app.ready();
   return { app, file, tokens };
 }
 
