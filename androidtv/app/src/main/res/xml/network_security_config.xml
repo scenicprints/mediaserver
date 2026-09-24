@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- The server's LAN address is plain http://<ip>:8096 (there is no
+         certificate for a bare IP), and Android 9+ blocks cleartext in both the
+         WebView and HttpURLConnection by default. ServerResolver only trusts a
+         LAN base after it proves itself with the HMAC check in docs/LAN.md, so
+         allowing cleartext here doesn't mean trusting whoever answers on it. -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

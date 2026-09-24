@@ -61,7 +61,7 @@ import java.util.concurrent.Executors
 class PlayerActivity : Activity() {
 
     // ---- spec (from the web app) ----
-    private lateinit var base: String          // e.g. https://marqu33.duckdns.org
+    private lateinit var base: String          // the page's origin: public https or the LAN http://ip:port
     private var token: String? = null          // session token (from the shared cookie jar)
     private lateinit var spec: JSONObject
     private var live = false
@@ -152,7 +152,9 @@ class PlayerActivity : Activity() {
         }
     }
 
-    /** The WebView's cookie jar is process-wide; the session cookie IS the token. */
+    /** The WebView's cookie jar is process-wide; the session cookie IS the token.
+     *  On the LAN origin the cookie is the one MainActivity handed over when it
+     *  switched there, so the same read works whichever origin the page is on. */
     private fun extractToken(): String? = try {
         val cookies = CookieManager.getInstance().getCookie(base) ?: ""
         Regex("(?:^|;\\s*)mstoken=([^;]+)").find(cookies)?.groupValues?.get(1)

@@ -46,5 +46,15 @@ so this sideload is a one-time cost per device.
 - **Verify on the real remote:** D-pad navigation (arrows/Enter should drive the web
   focus engine), the **Back** button (mapped to the web app's Back), and video playback.
   If arrows don't navigate, we translate D-pad → arrow keydowns in `MainActivity`.
-- The server URL is hardcoded in `MainActivity.kt` (`startUrl`). A settings screen to
-  change it can come later.
+- The public URL is hardcoded in `ServerResolver.kt` (`PUBLIC_BASE`). A settings
+  screen to change it can come later.
+- **LAN fallback** (`ServerResolver.kt`, protocol in `docs/LAN.md`): while online the
+  app learns the server's LAN address, proof key and session token (through a random
+  pair id the web app registers). At launch, on a network change, after a failed page
+  load, and on return to the app it races the LAN address (HMAC proof required)
+  against the public name, prefers the LAN, and hands the session over by setting the
+  `mstoken` cookie on the new origin. A switch never reloads under the native player;
+  it waits until playback ends. Cleartext HTTP is allowed by
+  `res/xml/network_security_config.xml` because the LAN address is a bare IP.
+  `MarqueeTV.serverUnreachable()` exists for the web app to call when its fetches
+  start failing mid-session (not wired on the web side yet).
