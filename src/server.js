@@ -981,6 +981,23 @@ app.get('/api/check-update', async () => {
     const current = await git(['rev-parse', 'HEAD']);
     const latest = await git(['rev-parse', 'origin/main']);
     const behind = parseInt(await git(['rev-list', '--count', 'HEAD..origin/main']).catch(() => '0'), 10) || 0;
+    // run.bat updates with `git pull --ff-only`, which refuses (quietly) when
+    // this box has commits GitHub doesn't, or edits to tracked files. Offering
+    // the update then meant a restart onto the same old code and the same
+    // offer, for ever: exactly what happened on 2026-09-23, when a local
+    // optimizer commit was never pushed. Say it is blocked instead.
+    if (behind > 0) {
+      const ahead = parseInt(await git(['rev-list', '--count', 'origin/main..HEAD']).catch(() => '0'), 10) || 0;
+      const dirty = (await git(['status', '--porcelain', '--untracked-files=no']).catch(() => '')).trim();
+      if (ahead > 0 || dirty) {
+        return {
+          current: current.slice(0, 7), latest: latest.slice(0, 7), updateAvailable: false, behind, blocked: true,
+          error: ahead > 0
+            ? `update blocked: this server has ${ahead} commit(s) that are not on GitHub; push them first`
+            : 'update blocked: files in the server folder were edited by hand'
+        };
+      }
+    }
     // "What's new": the subject line of each incoming commit, so the update
     // splash can tell the user what the update actually does.
     let notes = [];
