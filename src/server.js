@@ -15,6 +15,7 @@ import { osEnabled, searchSubtitles, downloadSubtitle, clearAuth } from './opens
 import { detectFfmpeg, status as ffmpegStatus, installFfmpeg, playInfo, transcodeStream, ffmpegBin, sourceTiming, probe, keyframeBefore, keyframeAtOrAfter, embeddedSubtitles, extractSubtitle } from './ffmpeg.js';
 import { detectWhisper, status as whisperStatus, installWhisper, generate as generateSubs } from './whisper.js';
 import { translateVttFile } from './translate.js';
+import { listSubtitles, readSubtitleFile, sidecarToVtt, clearSubtitleCache } from './subtitles.js';
 import { radarrEnabled, sonarrEnabled, testConn, radarrSearch, radarrAdd, sonarrSearch, sonarrAdd, getProfiles, radarrQueue, sonarrQueue } from './arr.js';
 import { runIntroDetection, introForFile, fpcalcReady } from './introdetect.js';
 import { hashPassword, verifyPassword, newToken, tokenFromReq, cookieHeader } from './auth.js';
@@ -755,8 +756,12 @@ app.get('/api/shows/:id', async (req, reply) => {
     if (!seasonsMap.has(s)) seasonsMap.set(s, []);
     seasonsMap.get(s).push(e);
   }
+  // Specials (season 0) go LAST, not first. Every client takes this order as
+  // it comes: it is the season the picker opens on, and it is the order Play
+  // and Up Next walk. Sorted numerically, a show with specials would open on
+  // them and play 36 Impractical Jokers specials before episode one.
   show.seasons = [...seasonsMap.entries()]
-    .sort((a, b) => a[0] - b[0])
+    .sort((a, b) => (a[0] === 0) - (b[0] === 0) || a[0] - b[0])
     .map(([season, episodes]) => ({ season, episodes }));
   show.episodeCount = eps.length;
   return show;
@@ -994,7 +999,7 @@ app.delete('/api/file/:kind/:fileId', async (req, reply) => {
   } else {
     db.prepare('DELETE FROM movies WHERE id NOT IN (SELECT DISTINCT movie_id FROM movie_files)').run();
   }
-  dirListCache.clear(); // subtitle-discovery listings for that folder are now stale
+  clearSubtitleCache(); // subtitle-discovery listings for that folder are now stale
   return { ok: true, deleted: row.path };
 });
 
@@ -1836,62 +1841,7 @@ app.post('/api/settings/arr', async (req, reply) => {
   return { radarr: await testConn(config.radarr), sonarr: await testConn(config.sonarr) };
 });
 
-// ---- Subtitles: .srt sidecars served as WebVTT ----
-
-// Short-TTL folder-listing cache for subtitle discovery. A show page asks for
-// the subtitles of every episode file, and episodes share season folders — with
-// up to 6 readdirs per file that was hundreds of synchronous disk hits per view
-// (stuttering active streams on the Dell's HDDs). Cached, a 200-episode show
-// costs a handful of reads. 10s TTL so a freshly downloaded .srt still appears
-// on the next open.
-const dirListCache = new Map(); // folder -> { t, files|null }
-function cachedDirList(folder) {
-  const now = Date.now();
-  const hit = dirListCache.get(folder);
-  if (hit && now - hit.t < 10e3) return hit.files;
-  let files = null;
-  try { files = fs.readdirSync(folder); } catch { /* missing/unreadable */ }
-  if (dirListCache.size > 500) dirListCache.clear(); // tiny + self-limiting
-  dirListCache.set(folder, { t: now, files });
-  return files;
-}
-
-// Find external .srt subtitles for a video: next to it (loose name match, either
-// direction) and in a Subs/Subtitles subfolder. Returns [{ path, label }].
-function listSubtitles(videoPath) {
-  const dir = path.dirname(videoPath);
-  const stem = path.basename(videoPath, path.extname(videoPath));
-  const norm = (s) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
-  const nstem = norm(stem);
-  const out = [];
-
-  const consider = (folder, loose) => {
-    const files = cachedDirList(folder);
-    if (!files) return;
-    for (const f of files) {
-      if (!/\.(srt|vtt)$/i.test(f)) continue;
-      const b = path.basename(f, path.extname(f));
-      const nb = norm(b);
-      const match = loose || nb === nstem || nb.startsWith(nstem) || nstem.startsWith(nb) || nb.includes(nstem) || nstem.includes(nb);
-      if (!match) continue;
-      // AI-generated tracks are tagged "<lang>-ai" or "orig-ai" by whisper.js.
-      const ai = b.match(/[.\-_ ](orig|[a-z]{2,3})-ai$/i);
-      let label;
-      if (ai) label = (ai[1].toLowerCase() === 'orig' ? 'Auto' : ai[1].toUpperCase()) + ' (AI)';
-      else {
-        const lang = (b.toLowerCase().match(/[.\-_ ]([a-z]{2,3})(\.forced|\.sdh)?$/) || [])[1];
-        const extra = b.length > stem.length ? b.slice(stem.length).replace(/[.\-_]+/g, ' ').trim() : '';
-        label = lang ? lang.toUpperCase() : (extra || 'Subtitles');
-      }
-      out.push({ path: path.join(folder, f), label });
-    }
-  };
-  consider(dir, false);
-  for (const sub of ['Subs', 'Subtitles', 'subs', 'subtitles', 'Sub']) consider(path.join(dir, sub), true);
-
-  const seen = new Set();
-  return out.filter((s) => (seen.has(s.path) ? false : seen.add(s.path)));
-}
+// ---- Subtitles: sidecar files served as WebVTT ----
 
 // The full track list for one file: sidecar files first (same order the detail
 // endpoints use), then text subtitles embedded in the container (mkv rips).
@@ -1927,14 +1877,6 @@ async function embeddedVtt(videoPath, sIndex) {
   return fs.promises.readFile(cached, 'utf8');
 }
 
-function srtToVtt(srt) {
-  const body = srt
-    .replace(/^﻿/, '')
-    .replace(/\r+/g, '')
-    .replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2');
-  return 'WEBVTT\n\n' + body;
-}
-
 async function serveSubtitle(videoPath, idx, reply) {
   const subs = videoPath ? await allSubtitleTracks(videoPath) : [];
   const sub = subs[idx] || subs[0];
@@ -1947,9 +1889,10 @@ async function serveSubtitle(videoPath, idx, reply) {
     return reply.send(vtt);
   }
   let text;
-  try { text = fs.readFileSync(sub.path, 'utf8'); } catch { return reply.code(404).send({ error: 'unreadable' }); }
-  // .vtt sidecars (e.g. AI-generated) are already WebVTT; .srt needs converting.
-  return reply.send(/\.vtt$/i.test(sub.path) ? text.replace(/^﻿/, '') : srtToVtt(text));
+  try { text = readSubtitleFile(sub.path); } catch { return reply.code(404).send({ error: 'unreadable' }); }
+  // Every sidecar format reaches the player as WebVTT — a browser renders
+  // nothing else, and SubStation Alpha least of all.
+  return reply.send(sidecarToVtt(sub.path, text));
 }
 
 app.get('/api/subtitle/episode/:fileId', (req, reply) => {
@@ -2002,7 +1945,7 @@ app.post('/api/subtitles/download', async (req, reply) => {
   } catch (e) {
     return reply.code(500).send({ error: 'Could not save subtitle: ' + e.message });
   }
-  dirListCache.clear(); // a new sidecar exists — folder listings are stale
+  clearSubtitleCache(); // a new sidecar exists — folder listings are stale
   return { ok: true };
 });
 

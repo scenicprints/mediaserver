@@ -47,6 +47,7 @@ node C:\Users\jkevi\mediaserver\src\server.js
 | `src/scan.js` | Recursive scanner: movie libs → movies+files; tv libs → shows+episodes+files |
 | `src/parse.js` | Filename parsing: `parseMovie`, `parseEpisode`, `detectQuality`, `scrubTitle`, group keys |
 | `src/tmdb.js` | TMDB: `enrichLibrary` (movies), `enrichShows`, `enrichEpisodes` |
+| `src/subtitles.js` | Sidecar subtitles: which extensions count, which sidecar belongs to which video, and srt/ass/ssa/smi → WebVTT |
 | `src/opensubtitles.js` | OpenSubtitles: `searchSubtitles`, `downloadSubtitle`, login/token |
 | `src/ffmpeg.js` | Playback engine: FFmpeg detect + one-click install (→ `tools/`, git-ignored), ffprobe probing, direct-vs-transcode decision, live fMP4 transcode |
 | `src/whisper.js` | AI subtitles: whisper.cpp detect + one-click install (→ `tools/whisper/`), ffmpeg audio extract → transcribe/translate → WebVTT sidecar |
@@ -57,6 +58,7 @@ node C:\Users\jkevi\mediaserver\src\server.js
 | `src/scan-cli.js`, `src/enrich-cli.js` | Standalone CLI helpers (`npm run scan` / `enrich`) |
 | `src/roku.js` | Roku: serves the OTA zips (`/roku/marquee.zip`, `/roku/shell.zip`, `/roku/version.json`) and `/api/roku/*` (rows, see-all, library, search, guide). The rows and Live TV channels are a line-for-line port of app.js; `test/roku-parity.test.mjs` fails if they drift, so change both together |
 | `roku/` | The Roku app: `shell/` (sideloaded once), `lib/` (the real app, a ComponentLibrary fetched every launch), `tools/build_assets.py` (fonts/emoji/glows), `PARITY.md` (the 1:1 checklist), `INSTALL.md` |
+| `src/subaudit-cli.js` | `npm run subaudit` — READ-ONLY: runs the old and new sidecar matchers over the whole library and prints the difference. Run it before a rescan, never as part of one |
 | `public/index.html` | UI markup (grids, modals, player, overlays) |
 | `public/app.js` | All front-end logic (plain DOM, no framework) |
 | `public/style.css` | Styles (dark theme, CSS variables) |
@@ -83,7 +85,7 @@ node C:\Users\jkevi\mediaserver\src\server.js
 - **TV:** `GET /shows`, `GET /shows/:id` (seasons→episodes→files), `POST /episodes/:id/progress`, `/watched`
 - **Home:** `GET /continue` (in-progress movies + episodes)
 - **Streaming (HTTP Range / seeking):** `GET /stream/:fileId`, `GET /stream/episode/:fileId`
-- **Subtitles:** `GET /subtitle/:fileId` & `/subtitle/episode/:fileId` (serves a sidecar `.srt` as WebVTT); `GET /subtitles/search`, `POST /subtitles/download` (OpenSubtitles)
+- **Subtitles:** `GET /subtitle/:fileId` & `/subtitle/episode/:fileId` (serves a sidecar as WebVTT — `.srt`, `.vtt`, `.ssa`/`.ass`, `.smi`; VobSub `.sub`/`.idx` is bitmap and deliberately not listed); `GET /subtitles/search`, `POST /subtitles/download` (OpenSubtitles)
 - **Libraries/setup:** `GET/POST/DELETE /libraries`, `GET /fs` (folder browser), `POST /scan`, `POST /enrich`
 - **Delete a file (admin):** `DELETE /file/:kind/:fileId` — permanently removes the physical file from disk + its DB row, then prunes the now-empty logical movie/episode/show. Admin-only, by file id (never an arbitrary path). The 🗑 button in the movie/episode detail (admin-only) confirms first.
 - **Settings:** `GET /settings`, `POST /settings/opensubtitles`

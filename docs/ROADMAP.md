@@ -5,6 +5,8 @@ for "what's next." See [../CLAUDE.md](../CLAUDE.md) for how the project works.
 
 Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed)
 
+---
+
 ## 📺 Roku app (STARTED 2026-09-18 — owner requirement: an exact 1:1 of the Android TV app)
 Must look and behave exactly like the Android TV app (the `?tv=1` web app + libVLC player).
 The line-by-line checklist is [../roku/PARITY.md](../roku/PARITY.md); nothing ships until
@@ -24,8 +26,6 @@ Install-day steps: [../roku/INSTALL.md](../roku/INSTALL.md) (includes a test she
 Side-by-side parity harness: [../roku/tools/parity/](../roku/tools/parity/) drives the web TV
 UI and the simulator with the same remote keys and diffs every screen; run it after any
 change to `public/` that the TV app shows.
-
----
 
 ---
 
@@ -142,6 +142,35 @@ filters, instant scrolling, 12-card rows, per-row layout+paint containment); nat
 ---
 
 ## ✅ Done
+- **Subtitle sidecars beyond .srt, and the episodes the parser could not see (2026-09-15).**
+  Two gaps found while migrating the library into the DrivePool pool, both with real files
+  behind them. **Sidecars:** discovery accepted `.srt`/`.vtt` only, while *embedded* tracks
+  already accepted ass/ssa — the same SubStation Alpha subtitle was readable inside an mkv and
+  invisible beside it. `.ssa`/`.ass` (2 files) and `.smi`/SAMI (1) are now read and converted to
+  WebVTT server-side in `src/subtitles.js`, so every client gets them without changing: web,
+  webOS, Android TV's libVLC, and the Apple TV app (including its offline downloads, which save
+  whatever the endpoint returns as `.vtt`). **VobSub `.sub`/`.idx` (37+34) is deliberately still
+  excluded** — it is an index plus a stream of subtitle *images*, so listing it would offer a
+  track that renders nothing; the only way to show one is burning it in during transcode, which
+  is not built. The name matcher was also tightened: it used to accept a hit *anywhere* inside
+  either name, so the orphan `English.srt` loose in the movies folder attached itself to *The
+  English Patient*. It now needs a prefix (or near-equal lengths) and refuses bare language
+  names. And `listSubtitles` deduped on the exact path, so on Windows — where `Subs` and `subs`
+  are the same folder — every sidecar in a Subs folder was listed **twice**. **Parser:** season
+  folders can now be bare numbers (`Rick and Morty\02\`, which is how this library is actually
+  laid out — those episodes only indexed because their filenames also carried `2x01`),
+  `Specials`/`00` and `Special NN` are season 0 (21 Impractical Jokers files), and a bare
+  `0106.mp4` inside a folder called `01` is S01E06 (1 file). Every new rule is tried *after* the
+  ones that already worked and only ever turns a null into an answer — a differential test
+  against a frozen copy of the old parser pins that, because re-bucketing one of the 20,622
+  indexed episodes would be worse than the 22 it rescues. Specials sort **last** in
+  `/api/shows/:id`, so a show with them does not open on them or play 36 specials before
+  episode one. **`npm run subaudit`** (`src/subaudit-cli.js`, read-only) runs both matchers
+  over the whole library and prints the difference — the sidecars that stop attaching, which
+  of those now attach to nothing at all, what the new formats gained, and the duplicate
+  listings removed. Run it before a rescan. While drives are moving it reports how many
+  folders it could not read, because an empty result there means "not checked", not "nothing
+  lost".
 - **Browse rows rotate, and the seasonal row follows the actual calendar (2026-09-10).**
   Home/Movies/TV used to emit *every* row every time — one per genre, one per decade, plus the
   staples — so the shuffle at the end reordered ~35 rows that were always the same 35 rows, under

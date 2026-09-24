@@ -8,7 +8,8 @@
     "scan": "node src/scan-cli.js",
     "enrich": "node src/enrich-cli.js",
     "test": "node --test \"test/*.test.mjs\"",
-    "test:optimizer": "node --test \"optimizer/test/*.test.mjs\""
+    "test:optimizer": "node --test \"optimizer/test/*.test.mjs\"",
+    "subaudit": "node src/subaudit-cli.js"
   },
   "dependencies": {
     "@fastify/static": "^8.0.0",

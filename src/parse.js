@@ -90,25 +90,44 @@ function tidy(s) {
   return s.replace(/[._]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-// Season number hinted by a folder like "Season 2", "S02", "Season 2003", or a
-// bare year folder like "1940".
+// Season number hinted by a folder like "Season 2", "S02", "Specials",
+// "Season 2003", a bare year folder like "1940", or a bare "02".
 //
 // Some shows are filed by year instead of by season number - MythBusters as
 // "Season 2003", Tom and Jerry as "1940" - and with only \d{1,2} accepted those
 // folders matched nothing, leaving 443 episodes in the pool but invisible to the
 // library. Years are matched explicitly as 19xx/20xx rather than by widening the
 // digit count, which would also swallow things that are not seasons.
+//
+// The bare-number form is how this library is actually laid out
+// (P:\TV Shows\Rick and Morty\02\), and those episodes only indexed at all
+// because their filenames happened to carry "2x01" as well. Where a filename
+// had no pattern of its own, the file was invisible.
+//
+// It is deliberately narrow, because a bare number is also a plausible SHOW
+// name. Only the LAST segment counts — a season folder is the video's own
+// parent, never its grandparent — and only when something sits above it, so
+// "TV Shows\24\ep.mkv" reads 24 as the show it is and not as season 24.
 function seasonFromSegments(segs) {
   for (const s of segs) {
     const m = s.match(/season\s*(\d{1,2})(?!\d)/i) || s.match(/^s(\d{1,2})$/i)
       || s.match(/season\s*((?:19|20)\d{2})(?!\d)/i) || s.match(/^((?:19|20)\d{2})$/);
     if (m) return parseInt(m[1], 10);
+    if (/^specials?$/i.test(s)) return 0;
   }
+  const last = segs[segs.length - 1];
+  if (segs.length >= 2 && /^\d{1,2}$/.test(last)) return parseInt(last, 10);
   return null;
 }
 
 // Extract season/episode from a filename (and optional folder segments).
-// Handles S01E02, 1x02, and "Exx" / bare "NN" inside a Season folder.
+// Handles S01E02, 1x02, "Exx" / bare "NN" / bare "SSEE" inside a season folder,
+// and "Special NN".
+//
+// The rules are tried in order and every one of them is narrower than the last,
+// because a looser parser that re-buckets an episode already on the shelf is
+// worse than the files it rescues. Nothing here changes what an existing rule
+// already matched.
 export function parseEpisode(filename, segs = []) {
   const base = stripExt(filename);
   let m = base.match(/S(\d{1,2})[\s._-]*E(\d{1,3})/i);
@@ -130,7 +149,24 @@ export function parseEpisode(filename, segs = []) {
     if (m) return { season: seasonHint, episode: +m[1] };
     m = base.match(/^(\d{1,3})(?:\D|$)/); // "02 - Title"
     if (m) return { season: seasonHint, episode: +m[1] };
+    // Bare "SSEE": "0106.mp4" in a folder called "01" is S01E06. The old bare
+    // rule could never reach it — it takes "010", demands a non-digit, finds
+    // "6", and every backtrack fails the same way.
+    //
+    // Four digits is also what a year looks like, so the folder has to agree
+    // with the first two: "2012 (2009).mkv" is a film and an episode called
+    // "1917" is anyone's guess, and neither sits in a season 20 or 19 folder.
+    m = base.match(/^(\d{2})(\d{2})(?:\D|$)/);
+    if (m && +m[1] === seasonHint) return { season: seasonHint, episode: +m[2] };
   }
+
+  // "Special 10" — season 0 is the standard specials season, the one Sonarr and
+  // TMDB both use. Last, so an episode whose TITLE ends in "... Special 2" is
+  // still read as the episode its folder and numbering say it is. The digits
+  // are required, so "Special Delivery" is not a special.
+  m = base.match(/(?:^|[^a-z0-9])Special\s*(\d{1,3})(?:[^0-9]|$)/i);
+  if (m) return { season: 0, episode: +m[1] };
+
   return null;
 }
 
