@@ -19,10 +19,137 @@
        already uses. `app=webos` is a flag UNIQUE to this LG app: the front-end
        uses it to keep the session in a readable cookie (the webOS runtime drops
        the HttpOnly one). Nothing else sends app=webos, so TCL and web are
-       unaffected. A token can be appended (&token=…) for zero-typing sign-in. -->
+       unaffected. A token can be appended (&token=…) for zero-typing sign-in.
+
+       Before opening it, the shell picks WHERE to open it (docs/LAN.md): the
+       public address, or the server's own LAN address when that answers and
+       proves it is our server. That is what keeps the TV working on the home
+       network when the internet is down. The session travels with it as
+       &token=, learned from /api/lan with this TV's pair id, so switching
+       address never means signing in again. -->
   <script>
     try { if (window.webOSSystem && typeof webOSSystem.hideCursor === 'function') webOSSystem.hideCursor(); } catch (e) {}
-    window.location.replace('https://marqu33.duckdns.org/?tv=1&app=webos');
+
+    var PUBLIC = 'https://marqu33.duckdns.org';
+    var LAN_TIMEOUT = 2500, PUBLIC_TIMEOUT = 6000;
+
+    function load(k) { try { return JSON.parse(localStorage.getItem(k)); } catch (e) { return null; } }
+    function save(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+
+    function randomId(n) {
+      var abc = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789', out = '', b;
+      try { b = new Uint8Array(n); window.crypto.getRandomValues(b); } catch (e) { b = null; }
+      for (var i = 0; i < n; i++) out += abc.charAt((b ? b[i] : Math.floor(Math.random() * 256)) % abc.length);
+      return out;
+    }
+
+    // SHA-256 / HMAC-SHA256 over UTF-8 strings. Built in rather than WebCrypto:
+    // older webOS engines don't reliably offer crypto.subtle to a packaged app.
+    function utf8(s) {
+      var e = unescape(encodeURIComponent(s)), a = [];
+      for (var i = 0; i < e.length; i++) a.push(e.charCodeAt(i));
+      return a;
+    }
+    var K = [0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
+    function sha256(bytes) {
+      var H = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+      var m = bytes.slice(), bitLen = bytes.length * 8;
+      m.push(0x80);
+      while (m.length % 64 !== 56) m.push(0);
+      for (var s = 56; s >= 0; s -= 8) m.push(s >= 32 ? Math.floor(bitLen / Math.pow(2, s)) & 0xff : (bitLen >>> s) & 0xff);
+      var w = new Array(64);
+      for (var off = 0; off < m.length; off += 64) {
+        for (var t = 0; t < 16; t++) w[t] = (m[off + 4 * t] << 24) | (m[off + 4 * t + 1] << 16) | (m[off + 4 * t + 2] << 8) | m[off + 4 * t + 3];
+        for (t = 16; t < 64; t++) {
+          var x = w[t - 15], y = w[t - 2];
+          var s0 = ((x >>> 7) | (x << 25)) ^ ((x >>> 18) | (x << 14)) ^ (x >>> 3);
+          var s1 = ((y >>> 17) | (y << 15)) ^ ((y >>> 19) | (y << 13)) ^ (y >>> 10);
+          w[t] = (w[t - 16] + s0 + w[t - 7] + s1) | 0;
+        }
+        var a = H[0], b = H[1], c = H[2], d = H[3], e = H[4], f = H[5], g = H[6], h = H[7];
+        for (t = 0; t < 64; t++) {
+          var S1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
+          var t1 = (h + S1 + ((e & f) ^ (~e & g)) + K[t] + w[t]) | 0;
+          var S0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
+          var t2 = (S0 + ((a & b) ^ (a & c) ^ (b & c))) | 0;
+          h = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;
+        }
+        H[0] = (H[0] + a) | 0; H[1] = (H[1] + b) | 0; H[2] = (H[2] + c) | 0; H[3] = (H[3] + d) | 0;
+        H[4] = (H[4] + e) | 0; H[5] = (H[5] + f) | 0; H[6] = (H[6] + g) | 0; H[7] = (H[7] + h) | 0;
+      }
+      var out = [];
+      for (var i = 0; i < 8; i++) out.push((H[i] >>> 24) & 0xff, (H[i] >>> 16) & 0xff, (H[i] >>> 8) & 0xff, H[i] & 0xff);
+      return out;
+    }
+    function hmacHex(key, msg) {
+      var k = utf8(key), m = utf8(msg), i;
+      if (k.length > 64) k = sha256(k);
+      while (k.length < 64) k.push(0);
+      var ipad = [], opad = [];
+      for (i = 0; i < 64; i++) { ipad.push(k[i] ^ 0x36); opad.push(k[i] ^ 0x5c); }
+      var inner = sha256(ipad.concat(m)), outer = sha256(opad.concat(inner)), hex = '';
+      for (i = 0; i < outer.length; i++) hex += (outer[i] < 16 ? '0' : '') + outer[i].toString(16);
+      return hex;
+    }
+
+    // GET a URL as JSON. cb(status, json) — status 0 means no answer at all.
+    function getJson(url, timeout, cb) {
+      var done = false, x = new XMLHttpRequest();
+      function finish(st, body) { if (done) return; done = true; var j = null; try { j = JSON.parse(body); } catch (e) {} cb(st, j); }
+      try {
+        x.open('GET', url, true);
+        x.timeout = timeout;
+        x.onload = function () { finish(x.status, x.responseText); };
+        x.onerror = x.ontimeout = function () { finish(0, null); };
+        x.send();
+      } catch (e) { finish(0, null); }
+      setTimeout(function () { try { x.abort(); } catch (e) {} finish(0, null); }, timeout + 200);
+    }
+
+    var pair = load('mq.pair');
+    if (!pair) { pair = randomId(40); save('mq.pair', pair); }
+    var lan = load('mq.lan') || {}; // { lan:[...], id, key, token }
+
+    function open(base, token) {
+      var url = base + '/?tv=1&app=webos&pair=' + encodeURIComponent(pair);
+      if (token) url += '&token=' + encodeURIComponent(token);
+      window.location.replace(url);
+    }
+
+    // The race (docs/LAN.md): a LAN address that proves itself wins at once;
+    // otherwise the public address, once every LAN probe has had its chance.
+    var chosen = false, lanLeft = 0, publicOk = null;
+    function choose(base) { if (chosen) return; chosen = true; open(base, lan.token); }
+    function maybePublic() { if (!chosen && lanLeft === 0 && publicOk !== null) choose(PUBLIC); }
+
+    // Public probe. It is HTTPS, so it is safe to carry the pair id, and the
+    // answer refreshes everything the LAN side needs for next time.
+    getJson(PUBLIC + '/api/lan?pair=' + encodeURIComponent(pair), PUBLIC_TIMEOUT, function (st, j) {
+      if (j && j.app === 'marquee' && j.id) {
+        lan.id = j.id;
+        if (j.lan && j.lan.length) lan.lan = j.lan;
+        if (j.key) lan.key = j.key;
+        if (j.token) lan.token = j.token;
+        save('mq.lan', lan);
+      }
+      publicOk = st > 0 && st < 500;
+      // Nothing on the LAN proved itself and the public address is down too:
+      // open it anyway, which is what this shell always did.
+      if (!chosen && lanLeft === 0) choose(PUBLIC);
+      else maybePublic();
+    });
+
+    if (lan.key && lan.id && lan.lan && lan.lan.length) {
+      lanLeft = lan.lan.length;
+      for (var i = 0; i < lan.lan.length; i++) (function (base) {
+        var nonce = randomId(24);
+        getJson(base + '/api/lan?nonce=' + nonce, LAN_TIMEOUT, function (st, j) {
+          lanLeft--;
+          if (st === 200 && j && j.app === 'marquee' && j.id === lan.id && j.proof === hmacHex(lan.key, 'marquee-lan:' + nonce)) choose(base);
+          else maybePublic();
+        });
+      })(lan.lan[i]);
+    }
   </script>
 </body>
 </html>

@@ -123,7 +123,19 @@ window.fetch = async (...args) => {
     if (!h.has('Authorization')) h.set('Authorization', 'Bearer ' + WEBOS_TOKEN);
     init.headers = h;
   }
-  const res = await _fetch(...args);
+  let res;
+  try {
+    res = await _fetch(...args);
+  } catch (e) {
+    // No answer at all from our own server: the Android TV shell may be on an
+    // address that stopped working (left the house, internet dropped with the
+    // public name in use). Tell it, so it can re-pick; it throttles itself.
+    const u = typeof args[0] === 'string' ? args[0] : '';
+    if ((u.startsWith('/') || u.startsWith(location.origin)) && window.MarqueeTV && typeof window.MarqueeTV.serverUnreachable === 'function') {
+      try { window.MarqueeTV.serverUnreachable(); } catch (_e) {}
+    }
+    throw e;
+  }
   const url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';
   if (res.status === 401 && url.includes('/api/') && !/\/api\/(login|register|auth\/status)/.test(url)) {
     showAuth();
@@ -4198,6 +4210,27 @@ function escapeHtml(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+// ---------- Home-network handover for the TV shells (docs/LAN.md) ----------
+// The Android TV and webOS shells can't read this page's HttpOnly session, so
+// they can't carry it when they switch between the public address and the
+// server's LAN address. Each launches us with a `pair` id of its own; once we
+// are signed in we register it, and the shell trades it for the session at
+// /api/lan. The id is a credential, so it comes off the address bar once used.
+// Before sign-in it stays, because a successful sign-in reloads this URL.
+function registerShellPair() {
+  const q = new URLSearchParams(location.search);
+  const pair = q.get('pair');
+  if (!pair) return;
+  fetch('/api/lan/pair', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pair }) })
+    .then((r) => {
+      if (!r.ok) return;
+      q.delete('pair');
+      const rest = q.toString();
+      history.replaceState(history.state, '', location.pathname + (rest ? '?' + rest : '') + location.hash);
+    })
+    .catch(() => {});
+}
+
 // ---------- Boot ----------
 (async function init() {
   setupAuth();
@@ -4206,6 +4239,7 @@ function escapeHtml(s) {
   currentUser = me.user;
   document.body.classList.toggle('is-admin', currentUser.role === 'admin');
   hideAuth();
+  registerShellPair();
   await offlineProbe(); // before the first render, so Download buttons appear with it
   await loadAll();
   renderView();
