@@ -23,6 +23,7 @@ import { PROVIDERS, providersList, refreshCatalog, catalogFor, catalogProviderMa
 import { registerHls } from './hls.js';
 import { registerArtCache, rewriteJson, originOf, warm as warmArtCache } from './artcache.js';
 import { registerRoku } from './roku.js';
+import { registerLan } from './lan.js';
 import { isOnline, onChange as onInternetChange, startWatching as watchInternet, netFetch } from './online.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -57,7 +58,8 @@ const config = JSON.parse(configText);
 const mediaRoots = (config.mediaRoots || []).map((r) => path.resolve(ROOT, r));
 const db = openDb(path.resolve(ROOT, config.dbPath));
 
-// Artwork cache lives beside the library db (same place as subcache).
+// Artwork cache lives beside the library db (same place as subcache), and so
+// does the LAN identity (server id, LAN key, pair ids).
 const DATA_DIR = path.dirname(path.resolve(ROOT, config.dbPath));
 const ART_DIR = path.resolve(DATA_DIR, 'artcache');
 
@@ -157,7 +159,10 @@ const HTTPS = !!config.https; // set once we're behind TLS, to mark cookies Secu
 // that needs it, the optimizer, is a separate program with no account here, and
 // it went to work during other people's films for want of being able to ask.
 // It returns a count and nothing else: no titles, no users, no addresses.
-const AUTH_PUBLIC = new Set(['/api/auth/status', '/api/register', '/api/login', '/api/local/activity']);
+// '/api/lan' is how a TV finds this server on the home network (docs/LAN.md).
+// Without a session it says only what the public name already says, plus the
+// LAN address; the LAN key and any token need a session or a registered pair id.
+const AUTH_PUBLIC = new Set(['/api/auth/status', '/api/register', '/api/login', '/api/local/activity', '/api/lan']);
 
 function currentUser(req) {
   const tok = tokenFromReq(req);
@@ -341,6 +346,17 @@ app.post('/api/logout', async (req, reply) => {
 });
 
 app.get('/api/me', async (req) => ({ user: req.user }));
+
+// ---- Home network: GET /api/lan, POST /api/lan/pair (see src/lan.js) ----
+registerLan(app, {
+  file: path.join(DATA_DIR, 'lan.json'),
+  port: config.port,
+  lanOverride: config.lanAddrs,
+  currentUser,
+  tokenOf: tokenFromReq,
+  tokenValid: (t) => !!db.prepare('SELECT 1 FROM tokens WHERE token = ?').get(t),
+  internet: isOnline
+});
 
 // ---- Offline downloads: a token for the on-device helper ----
 // The TV clients download a title by fetching /api/stream/<fileId> themselves,
