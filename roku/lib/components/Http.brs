@@ -50,6 +50,9 @@ sub httpRun()
     if not m.top.raw and text <> "" then data = ParseJson(text)
     err = ""
     if code <= 0 then err = msg.GetFailureReason()
+    ' A failed transfer reports a negative curl code; every caller reads 0 as
+    ' "no HTTP answer" (can't reach the server), so that is what it gets.
+    if code < 0 then code = 0
     m.top.result = { code: code, data: data, text: text, error: err }
 end sub
 

@@ -3,7 +3,7 @@ major_version=1
 minor_version=0
 # The shell's version. The app reinstalls a newer shell over itself when the
 # server's copy (served from this folder) has a higher build_version.
-build_version=1
+build_version=2
 
 ui_resolutions=fhd
 mm_icon_focus_fhd=pkg:/images/poster_fhd.png

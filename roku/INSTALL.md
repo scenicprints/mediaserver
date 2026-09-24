@@ -49,7 +49,7 @@ Roku reports there with model and version.
 
 A shell update has never been tested on a real Roku. So test it while you're there:
 
-1. On the desktop, raise `build_version` in `roku/shell/manifest` by one (1 → 2), push,
+1. On the desktop, raise `build_version` in `roku/shell/manifest` by one (for example 2 → 3), push,
    and run Update on the Dell.
 2. On the Roku, press Home and launch Marquee again.
 3. Within a few seconds the Roku should reinstall Marquee and relaunch it by itself.
@@ -65,5 +65,7 @@ Claude.
 - A Roku holds only **one** sideloaded channel. Installing another one replaces Marquee.
 - Turning Developer Mode off, or a factory reset, removes Marquee. Then repeat this
   guide.
+- Once a viewer has signed in, the Roku also knows the Dell's address on the home Wi-Fi.
+  If the internet goes down but the Dell is up, Marquee still starts and plays from it.
 - App changes need nothing on the Roku: push, run Update on the Dell, and every Roku
   has the new app the next time it's launched.

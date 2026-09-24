@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- One HTTP request, off the render thread (roUrlTransfer is not allowed on it).
      Set the inputs, then control = "RUN"; `result` fires once with
-     { code, data (parsed JSON or invalid), text, error }. -->
+     { code (0 = no HTTP answer), data (parsed JSON or invalid), text, error }. -->
 <component name="Http" extends="Task">
     <interface>
         <field id="url" type="string" />

@@ -44,6 +44,8 @@ sub onHttpResult(ev as object)
     m.pending.Delete(id)
     res = ev.getData()
     if isT(m.debug) then print "[net] "; res.code; " "; p.path; " "; res.error
+    ' Only calls to the active base say anything about whether it is still there.
+    if Left(p.path, 4) <> "http" then lanNote(res.code)
     ' telemetry.js: failed / slow API calls (never the telemetry post itself).
     path = p.path
     if Left(path, 5) = "/api/" and Left(path, 14) <> "/api/telemetry"

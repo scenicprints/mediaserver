@@ -5,6 +5,9 @@
     <interface>
         <field id="base" type="string" onChange="onBase" />
         <field id="shellVersion" type="integer" />
+        <!-- Set (before base) by a shell that already raced the LAN against the
+             public name, so the app does not race again at startup. -->
+        <field id="lanResolved" type="boolean" />
         <field id="launchArgs" type="assocarray" />
         <field id="inputArgs" type="assocarray" />
     </interface>
@@ -12,6 +15,7 @@
     <script type="text/brightscript" uri="core/Theme.brs" />
     <script type="text/brightscript" uri="core/Ui.brs" />
     <script type="text/brightscript" uri="core/Net.brs" />
+    <script type="text/brightscript" uri="core/Lan.brs" />
     <script type="text/brightscript" uri="core/Tele.brs" />
     <script type="text/brightscript" uri="core/Focus.brs" />
     <script type="text/brightscript" uri="core/Widgets.brs" />

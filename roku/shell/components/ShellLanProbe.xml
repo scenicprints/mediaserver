@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The LAN race of docs/LAN.md, off the render thread. Set the inputs, then
+     control = "RUN"; `result` fires once with { base } (the winner, or "" when
+     nothing answered). publicBase "" skips the public probe; no key, id or LAN
+     bases skips the LAN probes. The app has its own copy (LanProbe, in roku/lib):
+     keep the two the same. -->
+<component name="ShellLanProbe" extends="Task">
+    <interface>
+        <field id="publicBase" type="string" />
+        <field id="lanBases" type="array" />
+        <field id="serverId" type="string" />
+        <field id="key" type="string" />
+        <field id="lanTimeoutMs" type="integer" value="2500" />
+        <field id="publicTimeoutMs" type="integer" value="6000" />
+        <field id="result" type="assocarray" />
+    </interface>
+    <script type="text/brightscript" uri="ShellLanProbe.brs" />
+</component>

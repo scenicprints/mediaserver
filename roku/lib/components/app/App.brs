@@ -17,6 +17,7 @@ sub init()
     m.remoteCap = { height: 1080, kbps: 6000 }
     themeInit()
     netInit()
+    lanInit()
     focusInit()
     teleInit()
 
@@ -54,6 +55,14 @@ sub onBase()
     la = m.top.launchArgs
     if la <> invalid and la.mqseed <> invalid then m.rotationSeed = Int(Val(str0(la.mqseed)))
     if la <> invalid and la.mqfreeze <> invalid then m.freezeHero = true
+    m.publicBase = lanPublicBase()
+    if lanStartup() then return
+    bootGo()
+end sub
+
+' Everything from here on uses m.base, so it runs once that is settled
+' (lanStartup may move it to the LAN first).
+sub bootGo()
     tele("nav", { view: "boot" })
     teleBoot()
     teleVitalsInit()
@@ -84,6 +93,7 @@ sub onMe(res as object, ctx as dynamic)
         m.user = res.data.user
         hideAuth()
         startApp()
+        lanLearn()
     else if res.code = 0
         ' Server unreachable: say so on the sign-in card rather than a blank page.
         showAuth()

@@ -28,6 +28,13 @@ app changes, this file changes with it and the Roku app follows.
       shell, it downloads `/roku/shell.zip` and installs it through the Roku's own developer
       installer (`http://127.0.0.1/plugin_install`, digest auth `rokudev` + the install-day
       password). **Unverified on a real Roku: install day includes a test update.**
+- [ ] **LAN fallback** ([docs/LAN.md](../docs/LAN.md)): once signed in, the app learns the
+      server's LAN address and key (`/api/lan`, registry section `MarqueeLan`). The shell
+      races the LAN against the public name at launch and before every retry and loads
+      from the winner; the app races again after two calls in a row get no answer, and
+      at startup when an older shell loaded it from the public name. A LAN base is only
+      used after its HMAC proof checks out. Invisible when online; the app still starts
+      and plays with the internet down and the Dell up.
 
 ## Look (tokens from style.css — Braun edition)
 
