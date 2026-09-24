@@ -33,8 +33,7 @@ art) and plays; away from home nothing changes.
 - **LAN discovery** (`GET /api/lan`, `src/lan.js`, protocol in [LAN.md](LAN.md)):
   clients learn the LAN address while online and later race it against the public name;
   a LAN answer only counts with the HMAC proof, and the proof is never given through
-  Caddy. The webOS shell's race was run in a browser: it chose the proven LAN address and
-  carried the session; with a wrong key it refused the LAN server.
+  Caddy.
 
 **Written but not proven on hardware (compile-checked in CI only where noted):**
 - Apple TV: `Store.activeBase`, `LAN.swift`, NWPathMonitor, TopShelf `activeURL`, ATS
@@ -44,16 +43,14 @@ art) and plays; away from home nothing changes.
 - Roku: app learns into registry `MarqueeLan`; shell build 2 races before loading the
   app. The app reaches Rokus on the Dell's next Update; the shell tries to self-update
   (untested on a real Roku; fall back to re-sideloading `shell.zip`).
-- webOS: the IPK (`webos/*.ipk`) was NOT rebuilt; the new `index.html` needs packaging
-  and installing on the LG.
 
 **Online-only by nature (hidden or explained while offline):** trailers (YouTube),
 "where to stream" links, streaming rows, Requests (Radarr/Sonarr search the internet),
 OpenSubtitles, Google translation of AI subtitles (LibreTranslate via `translateUrl`
 would work offline; not installed), the in-app updater, metadata for new titles.
 
-**Next:** Update on the Dell (server + Roku app) → install the TestFlight build → webOS
-repackage + install → sign in on each TV once online, then pull the WAN and check each
+**Next:** Update on the Dell (server + Roku app) → install the TestFlight build →
+sign in on each TV once online, then pull the WAN and check each
 TV. No mDNS; the fixed IP makes it unnecessary.
 
 ---
