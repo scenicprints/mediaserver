@@ -7,6 +7,56 @@ Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed
 
 ---
 
+## 🏠 The house works with the internet down (BUILT 2026-09-23, branch `lan-fallback`, NOT on main)
+An outage on 2026-09-23 stopped the Apple TV reaching a Dell on the same LAN: every
+client knew only `https://marqu33.duckdns.org`, and the UDM Pro answered that name with
+the public IP. Goal: with the WAN unplugged, every client still signs in, browses (with
+art) and plays; away from home nothing changes.
+
+**Done and verified:**
+- **Router (live now).** UniFi Policy Table → DNS → Host (A) `marqu33.duckdns.org` →
+  `192.168.1.103`; `nslookup marqu33.duckdns.org 192.168.1.1` returns .103 and HTTPS
+  by name verifies against Caddy's cert. The Dell ("Plex Server", DESKTOP-9V1SLIR) now
+  has a **fixed IP** reservation of .103; before this it was a plain DHCP lease. This alone
+  covers every client that uses the router for DNS, with no app builds. Caddy's cert only
+  needs the internet to renew (DNS-01, about every 60 days).
+- **Server offline behaviour** (`src/online.js`, tested on a copy of the server with all
+  outbound traffic sent to a dead proxy): every endpoint answers in milliseconds;
+  enrichment stops with one log line and resumes on its own when the internet returns;
+  detail pages keep cast/seasons from `extra_cache`; trailers, unowned recommendations
+  and streaming rows are hidden; Requests, subtitle search, updates and translation give
+  a plain "no internet" answer. Two TMDB backfills used to record "no data" for good on
+  a network error (an offline boot cost every unchecked movie its collection); fixed.
+- **Art cache** (`src/artcache.js`): throttled backfill, one directory listing per pass,
+  instant 404 for an uncached poster offline. Web UI checked offline: every image came
+  from the server, none from outside.
+- **LAN discovery** (`GET /api/lan`, `src/lan.js`, protocol in [LAN.md](LAN.md)):
+  clients learn the LAN address while online and later race it against the public name;
+  a LAN answer only counts with the HMAC proof, and the proof is never given through
+  Caddy. The webOS shell's race was run in a browser: it chose the proven LAN address and
+  carried the session; with a wrong key it refused the LAN server.
+
+**Written but not proven on hardware (compile-checked in CI only where noted):**
+- Apple TV: `Store.activeBase`, `LAN.swift`, NWPathMonitor, TopShelf `activeURL`, ATS
+  `NSAllowsLocalNetworking`. Settings shows "Connected over". Needs a TestFlight build.
+- Android TV: `ServerResolver.kt`, session cookie handover, cleartext allowed. Ships by
+  itself when `androidtv/` reaches main (self-update), so merging IS releasing.
+- Roku: app learns into registry `MarqueeLan`; shell build 2 races before loading the
+  app. The app reaches Rokus on the Dell's next Update; the shell tries to self-update
+  (untested on a real Roku; fall back to re-sideloading `shell.zip`).
+- webOS: the IPK (`webos/*.ipk`) was NOT rebuilt; the new `index.html` needs packaging
+  and installing on the LG.
+
+**Online-only by nature (hidden or explained while offline):** trailers (YouTube),
+"where to stream" links, streaming rows, Requests (Radarr/Sonarr search the internet),
+OpenSubtitles, Google translation of AI subtitles (LibreTranslate via `translateUrl`
+would work offline; not installed), the in-app updater, metadata for new titles.
+
+**Next:** owner approves → merge to main → Update on the Dell → TestFlight / webOS
+install → pull the WAN and check each TV. No mDNS; the fixed IP makes it unnecessary.
+
+---
+
 ## 📺 Roku app (STARTED 2026-09-18 — owner requirement: an exact 1:1 of the Android TV app)
 Must look and behave exactly like the Android TV app (the `?tv=1` web app + libVLC player).
 The line-by-line checklist is [../roku/PARITY.md](../roku/PARITY.md); nothing ships until

@@ -55,6 +55,9 @@ node C:\Users\jkevi\mediaserver\src\server.js
 | `src/introdetect.js` | Skip Intro: Chromaprint `fpcalc` (auto-install → `tools/fpcalc/`), per-season audio-fingerprint theme detection → `intro_start/end` + episode duration; background job on boot |
 | `src/translate.js` | Subtitle translation (LibreTranslate if `config.translateUrl`, else Google) for non-English AI subs |
 | `src/fsbrowse.js` | Server-side folder browser for the in-app picker |
+| `src/online.js` | One answer to "is the internet up". `netFetch()` fails at once while it's down (OfflineError); a probe notices it coming back and `onChange` fires. Use it for every outside call |
+| `src/artcache.js` | Art served from `data/artcache/` at `/art/<size>/<file>`; an onSend hook rewrites TMDB image URLs in every JSON response to ABSOLUTE URLs on the request's own host. Throttled backfill after enrichment |
+| `src/lan.js` | `GET /api/lan` + `POST /api/lan/pair`: how the TVs find the Dell on the home network with the internet down. Identity/key in `data/lan.json`. Protocol: [docs/LAN.md](docs/LAN.md), implemented in every client |
 | `src/scan-cli.js`, `src/enrich-cli.js` | Standalone CLI helpers (`npm run scan` / `enrich`) |
 | `src/roku.js` | Roku: serves the OTA zips (`/roku/marquee.zip`, `/roku/shell.zip`, `/roku/version.json`) and `/api/roku/*` (rows, see-all, library, search, guide). The rows and Live TV channels are a line-for-line port of app.js; `test/roku-parity.test.mjs` fails if they drift, so change both together |
 | `roku/` | The Roku app: `shell/` (sideloaded once), `lib/` (the real app, a ComponentLibrary fetched every launch), `tools/build_assets.py` (fonts/emoji/glows), `PARITY.md` (the 1:1 checklist), `INSTALL.md` |
@@ -94,6 +97,8 @@ node C:\Users\jkevi\mediaserver\src\server.js
   `sd:<fileId>:<trackIdx>` caption delay, `pq` last quality. **Never store these in
   localStorage — it's per-browser and the owner watches from multiple devices.**
 - **Self-update:** `GET /version`, `GET /check-update`, `POST /update` (exits 42 → `run.bat` pulls & restarts)
+- **Home network (public, see docs/LAN.md):** `GET /lan` (`app`, `id`, `lan[]`, `internet`; `proof` for `?nonce=` on a direct LAN request only; `key` with a session; `token` for a registered `?pair=`), `POST /lan/pair {pair}`
+- **Art (outside `/api`, no auth):** `GET /art/<size>/<file>` — cached TMDB image, fetched once on a miss while online
 - **Collections:** `GET /collections` (owned movies grouped by TMDB franchise), `GET /collections/:id`
 - **Playback engine:** `GET /play/:kind/:fileId` (direct vs transcode + duration + chapters + fingerprinted `intro` for episodes), `GET /transcode/:kind/:fileId?start=&snapped=1`, `GET /seekpoint/:kind/:fileId?start=` (where a copied-video stream will REALLY start — the keyframe at/before `start`; the player uses it as its timeline base. Skipping this was the "audio lags after resume/seek" lip-sync bug), `GET /diagnose/:kind/:fileId` (admin: source timing + start-0 AND mid-file-seek transcode samples), `GET/POST /ffmpeg[/install]`
 - **Subtitle tracks:** `GET /subtitles/list/:kind/:fileId` — full track list for the player (sidecar files first, then text subtitles **embedded** in the container, extracted to WebVTT on demand and cached in git-ignored `data/subcache/`)
@@ -122,6 +127,16 @@ and let a rescan rebuild them — **the files on disk are the source of truth**,
 `libraries` table is preserved so the owner never has to re-add folders. Losing watch-state
 on a migration is acceptable (it's minimal). This runs automatically on the next boot after
 an update.
+
+## Running with no internet (the house must keep working)
+- The UDM Pro answers `marqu33.duckdns.org` with `192.168.1.103` inside the house (Policy
+  Table → DNS), and the Dell has a fixed IP reservation. Keep both.
+- Every client also knows the LAN address itself (docs/LAN.md), for devices that don't
+  use the router's DNS. Changing the protocol means changing all five clients.
+- Outside calls go through `netFetch` (src/online.js). Never record "TMDB had no answer"
+  as a permanent fact after a network error; only a real 404 is final.
+- Features that need the internet are hidden or answer "no internet" at once; nothing on
+  the home screen or the player may wait on the internet.
 
 ## Conventions
 - ESM (`"type": "module"`).
