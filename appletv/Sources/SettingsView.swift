@@ -243,6 +243,12 @@ struct SettingsView: View {
             }
             .padding(.top, 26)
             note("Leave it empty to go back to \(Store.defaultServer).").padding(.top, 22)
+            // Which address is actually in use. At home it is the server's LAN
+            // address, which keeps working when the internet is down.
+            rows {
+                ControlRow(name: "Connected over", value: store.connectionLabel)
+            }
+            .padding(.top, 30)
         }
     }
 

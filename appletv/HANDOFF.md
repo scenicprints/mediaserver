@@ -13,6 +13,32 @@ UI rewrite was built against superseded versions of half these files. The push
 was rejected and the work had to be redone. **Check `git log HEAD..origin/main`
 before you touch a file, not after.**
 
+## Home-network fallback (2026-09-23) — UNVERIFIED, never compiled
+During an internet outage the Apple TV couldn't reach the Dell on its own LAN,
+because `https://marqu33.duckdns.org` was the only address it knew. It now
+implements `docs/LAN.md` (read that; every client does the same thing):
+- `Store.serverURL` is still the configured address Settings edits. Requests
+  and every built URL (streams, HLS, subtitles, pre-roll, downloads) go to
+  `Store.activeBase` instead, via `cleanBase` / `send`.
+- `Sources/LAN.swift` (`LANResolver`) races cached LAN bases (HMAC-proved,
+  2.5 s) against the public `/api/lan` (6 s, any status < 500). A LAN base
+  never gets the token until it passes the proof.
+- Resolve runs from `Store.launch()` (the first load waits at most 3 s for it),
+  on an `NWPathMonitor` change, and after a request fails with no answer at all
+  (throttled to one per 20 s; the failed request is retried once if the base
+  moved). Learning (`learnLAN`, Bearer `GET /api/lan`) runs after login, after
+  `/api/me`, and after a switch; a 401 from an older server is ignored, never
+  a sign-out. Changing the server in Settings forgets the LAN cache.
+- The app mirrors `activeURL` into the app group; Top Shelf tries it first,
+  then `serverURL`, 4 s each.
+- ATS `NSAllowsLocalNetworking` + `NSLocalNetworkUsageDescription`: in
+  `Resources/Info.plist` for the app, in `project.yml` for the Top Shelf.
+- Settings > Server shows "Connected over: Home network (192.168.1.103)" or
+  "Internet (marqu33.duckdns.org)".
+**Test on-device:** unplug the modem, relaunch, and check it lands on the LAN
+address and plays; check the local-network permission prompt (if tvOS shows
+one) and that Top Shelf still fills.
+
 ## Back button (2026-09-22)
 The 9/10 Back fix (commit 4c7c52f) was committed an hour AFTER the last
 TestFlight build, so the owner never had it and reported the bug again. Now:

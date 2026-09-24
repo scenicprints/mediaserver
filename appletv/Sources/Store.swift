@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import Network
 
 // ---- API models (the same /api/* JSON the web UI consumes) ----
 // Posters/backdrops are full https://image.tmdb.org URLs, so AsyncImage loads
@@ -388,12 +389,27 @@ final class Store: ObservableObject {
     // (a separate process) can call /api/continue with the same session.
     static let appGroup = "group.com.scenicprints.marqueetv"
 
+    // The CONFIGURED address: what Settings shows and edits, and the public
+    // side of the LAN race. Requests don't go here directly; they go to
+    // `activeBase`, which is either this or a LAN address that proved itself.
     @Published var serverURL: String {
         didSet {
             UserDefaults.standard.set(serverURL, forKey: "serverURL")
             UserDefaults(suiteName: Store.appGroup)?.set(serverURL, forKey: "serverURL")
+            // A different server: whatever we learned about the old one's LAN
+            // address would otherwise keep winning the race (it would still
+            // prove itself, it is a real Marquee server), so forget it.
+            guard Store.clean(serverURL) != Store.clean(oldValue) else { return }
+            forgetLAN()
+            setActive(configuredBase)
+            if lanEnabled { Task { await learnLAN() } }
         }
     }
+    // Where requests actually go, without a trailing slash. Starts as the
+    // configured address and only ever becomes a LAN address after that address
+    // answered the HMAC proof (see LAN.swift and docs/LAN.md), so the session
+    // token is never sent to a LAN host that might not be ours.
+    @Published private(set) var activeBase: String
     @Published var token: String? {
         didSet {
             let shared = UserDefaults(suiteName: Store.appGroup)
@@ -429,11 +445,28 @@ final class Store: ObservableObject {
     @Published var finish: Finish { didSet { UserDefaults.standard.set(finish.rawValue, forKey: "finish") } }
 
     var previewMode = false   // CI screenshot mode: keep the session alive
+
+    // What we know about the server's home-network address, learned from
+    // GET /api/lan while signed in. Kept across launches, because the day it
+    // matters is the day the internet is down and it can't be learned.
+    private var lanBases: [String] = UserDefaults.standard.stringArray(forKey: "lan.bases") ?? []
+    private var serverId: String? = UserDefaults.standard.string(forKey: "lan.serverId")
+    private var lanKey: String? = UserDefaults.standard.string(forKey: "lan.key")
+    // Off until launch() turns it on, so the CI preview never starts probing.
+    private var lanEnabled = false
+    private var resolveTask: Task<Void, Never>?
+    private var lastFailResolve = Date.distantPast
+    private var lastPathSig: String?
+    private let pathMonitor = NWPathMonitor()
     var isLoggedIn: Bool { previewMode || token != nil }
     var isAdmin: Bool { user?.role == "admin" }
 
     init() {
         serverURL = UserDefaults.standard.string(forKey: "serverURL") ?? Store.defaultServer
+        // Always start on the configured address. A LAN address from last time
+        // has to prove itself again before it gets the token; the launch
+        // resolve does that within a couple of seconds.
+        activeBase = Store.clean(UserDefaults.standard.string(forKey: "serverURL") ?? Store.defaultServer)
         token = UserDefaults.standard.string(forKey: "authToken")
         // Default to what this Apple TV is actually plugged into rather than
         // assuming stereo. The old `?? "stereo"` meant a projector wired to a
@@ -449,6 +482,7 @@ final class Store: ObservableObject {
         // app group explicitly so the Top Shelf extension has it from first run.
         let shared = UserDefaults(suiteName: Store.appGroup)
         shared?.set(serverURL, forKey: "serverURL")
+        shared?.set(activeBase, forKey: "activeURL")
         if let t = token { shared?.set(t, forKey: "authToken") }
         // Verify the round-trip: if the app-group entitlement isn't actually
         // active, the write above silently goes nowhere — breadcrumb the truth.
@@ -595,10 +629,27 @@ final class Store: ObservableObject {
 
     // The server accepts the session token as an Authorization: Bearer header
     // (also as a cookie or ?token=), so a native client just attaches it here.
+    //
+    // If the server can't be reached at all (not an HTTP error: no answer), the
+    // address may be the wrong one for this network right now, e.g. the public
+    // name during an internet outage. Re-resolve and, if that moved us, try the
+    // request once more on the new base.
     private func request(_ path: String, method: String = "GET",
-                         body: [String: Any]? = nil, auth: Bool = true) async throws -> (Data, HTTPURLResponse) {
-        guard let base = URL(string: serverURL.trimmingCharacters(in: .whitespaces)),
-              let url = URL(string: path, relativeTo: base) else { throw URLError(.badURL) }
+                         body: [String: Any]? = nil, auth: Bool = true,
+                         recover: Bool = true) async throws -> (Data, HTTPURLResponse) {
+        let base = activeBase
+        do {
+            return try await send(path, base: base, method: method, body: body, auth: auth)
+        } catch let e as URLError where recover && Store.isUnreachable(e) {
+            guard await recoverBase(from: base) else { throw e }
+            return try await send(path, base: activeBase, method: method, body: body, auth: auth)
+        }
+    }
+
+    private func send(_ path: String, base: String, method: String,
+                      body: [String: Any]?, auth: Bool) async throws -> (Data, HTTPURLResponse) {
+        guard let root = URL(string: base + "/"),
+              let url = URL(string: path, relativeTo: root) else { throw URLError(.badURL) }
         var req = URLRequest(url: url)
         req.httpMethod = method
         if let body = body {
@@ -639,6 +690,7 @@ final class Store: ObservableObject {
             let res = try decoder().decode(LoginResponse.self, from: data)
             token = res.token
             user = res.user
+            Task { await learnLAN() }
             await loadHome()
         } catch {
             self.error = "Couldn't reach the server. Check the address in Settings."
@@ -650,6 +702,7 @@ final class Store: ObservableObject {
             let (data, http) = try await request("api/me")
             if http.statusCode == 401 { token = nil; user = nil; return }
             user = try decoder().decode(MeResponse.self, from: data).user
+            Task { await learnLAN() }
             await loadHome()
         } catch { /* offline — keep the stored token, retry later */ }
     }
@@ -658,6 +711,151 @@ final class Store: ObservableObject {
         token = nil; user = nil
         movies = []; continueItems = []; shows = []; collections = []
         if old != nil { Task { _ = try? await request("api/logout", method: "POST") } }
+    }
+
+    // ---- Home network vs internet (docs/LAN.md) ----
+
+    nonisolated static func clean(_ s: String) -> String {
+        let t = s.trimmingCharacters(in: .whitespaces)
+        return t.hasSuffix("/") ? String(t.dropLast()) : t
+    }
+    var configuredBase: String { Store.clean(serverURL) }
+    var onHomeNetwork: Bool { activeBase != configuredBase }
+    // For Settings: which address this Apple TV is using right now.
+    var connectionLabel: String {
+        let host = URL(string: activeBase)?.host ?? activeBase
+        return onHomeNetwork ? "Home network (\(host))" : "Internet (\(host))"
+    }
+
+    // App start: find the best address, then sign in and load. The first load
+    // waits for the race at most a few seconds; a LAN answer comes back well
+    // inside that, and if the race is still going the configured address is
+    // used, which is exactly what the race would fall back to anyway.
+    func launch() async {
+        if !lanEnabled && !previewMode {
+            lanEnabled = true
+            watchNetwork()
+            resolve()
+            let deadline = Date().addingTimeInterval(3)
+            while resolveTask != nil && Date() < deadline {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
+        await checkSession()
+    }
+
+    // One resolve at a time; anyone asking while one is running gets that one.
+    @discardableResult
+    private func resolve() -> Task<Void, Never> {
+        if let t = resolveTask { return t }
+        let t = Task { [weak self] in
+            guard let self else { return }
+            await self.runResolve()
+            self.resolveTask = nil
+        }
+        resolveTask = t
+        return t
+    }
+
+    private func runResolve() async {
+        guard lanEnabled, !previewMode else { return }
+        let pub = configuredBase
+        let won = await LANResolver.race(publicBase: pub, lanBases: lanBases,
+                                         serverId: serverId ?? "", key: lanKey ?? "")
+        // Neither answered: keep the last base and let the normal "can't reach"
+        // handling show. Also ignore a result for an address Settings has since
+        // replaced.
+        guard let won, pub == configuredBase, won != activeBase else { return }
+        setActive(won)
+        // Now reachable somewhere new: refresh what we know while we can.
+        if token != nil { Task { await learnLAN() } }
+    }
+
+    private func setActive(_ base: String) {
+        guard base != activeBase else { return }
+        activeBase = base
+        // The Top Shelf extension tries this first, so it keeps working on the
+        // LAN when the internet is down.
+        UserDefaults(suiteName: Store.appGroup)?.set(base, forKey: "activeURL")
+        if token != nil { crumb("app: base → \(onHomeNetwork ? "lan" : "internet")") }
+    }
+
+    // After a request got no answer at all. Throttled, so a string of failures
+    // (four home rows, a heartbeat every few seconds) doesn't turn into a
+    // string of races; a request that fails while a race is already running
+    // just waits for that one. True when the base moved and a retry makes sense.
+    private func recoverBase(from failed: String) async -> Bool {
+        guard lanEnabled, !previewMode else { return false }
+        if resolveTask == nil {
+            guard Date().timeIntervalSince(lastFailResolve) > 20 else { return activeBase != failed }
+            lastFailResolve = Date()
+        }
+        await resolve().value
+        return activeBase != failed
+    }
+
+    nonisolated static func isUnreachable(_ e: URLError) -> Bool {
+        switch e.code {
+        case .timedOut, .cannotFindHost, .cannotConnectToHost, .networkConnectionLost,
+             .dnsLookupFailed, .notConnectedToInternet, .secureConnectionFailed:
+            return true
+        default:
+            return false
+        }
+    }
+
+    // Learning: while signed in, ask the server for its LAN addresses and key.
+    // Only ever asked of the active base, which is the configured address or a
+    // LAN address that already passed the proof, never an unverified one. A
+    // server older than the endpoint answers 401; that must NOT sign us out the
+    // way a 401 from get() does, so this reads the response itself.
+    func learnLAN() async {
+        guard lanEnabled, !previewMode, token != nil else { return }
+        struct R: Decodable { let app: String?; let id: String?; let lan: [String]?; let key: String? }
+        guard let (data, http) = try? await request("api/lan", recover: false),
+              http.statusCode == 200,
+              let r = try? JSONDecoder().decode(R.self, from: data),
+              r.app == "marquee",
+              let id = r.id, !id.isEmpty,
+              let key = r.key, !key.isEmpty else { return }
+        lanBases = (r.lan ?? []).map(Store.clean).filter { $0.hasPrefix("http://") || $0.hasPrefix("https://") }
+        serverId = id
+        lanKey = key
+        UserDefaults.standard.set(lanBases, forKey: "lan.bases")
+        UserDefaults.standard.set(id, forKey: "lan.serverId")
+        UserDefaults.standard.set(key, forKey: "lan.key")
+    }
+
+    private func forgetLAN() {
+        lanBases = []; serverId = nil; lanKey = nil
+        for k in ["lan.bases", "lan.serverId", "lan.key"] { UserDefaults.standard.removeObject(forKey: k) }
+    }
+
+    // A network change (Ethernet unplugged, Wi-Fi rejoined, a new address) can
+    // change which address works, so race again. The monitor reports the
+    // current path once when it starts; that one is only recorded. An internet
+    // outage does NOT change the path (the LAN is still up); failed requests
+    // catch that instead, through recoverBase.
+    private func watchNetwork() {
+        // Explicitly @Sendable: it runs on the monitor's queue, so it must not be
+        // inferred main-actor isolated; it only hops to the main actor.
+        pathMonitor.pathUpdateHandler = { @Sendable [weak self] path in
+            let sig = "\(path.status)|" + path.availableInterfaces.map { $0.name }.joined(separator: ",")
+            let up = path.status == .satisfied
+            Task { @MainActor [weak self] in self?.networkChanged(sig, up: up) }
+        }
+        pathMonitor.start(queue: DispatchQueue(label: "com.scenicprints.marqueetv.path"))
+    }
+
+    private func networkChanged(_ sig: String, up: Bool) {
+        let last = lastPathSig
+        lastPathSig = sig
+        guard let last, last != sig, up else { return }
+        // Give DHCP a moment to settle before probing.
+        Task {
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            resolve()
+        }
     }
 
     // What is this Apple TV plugged into? More than two output channels means a
@@ -758,10 +956,9 @@ final class Store: ObservableObject {
     // A movie or a TV episode — they stream and save progress at different paths.
     enum PlayRef: Hashable { case movie(Int), episode(Int) }
 
-    private var cleanBase: String {
-        let s = serverURL.trimmingCharacters(in: .whitespaces)
-        return s.hasSuffix("/") ? String(s.dropLast()) : s
-    }
+    // Every URL the app builds (streams, HLS, subtitles, pre-roll, downloads)
+    // starts here, so they all follow a switch between LAN and internet.
+    private var cleanBase: String { activeBase }
 
     // AVPlayer can't set an Authorization header, so it streams via ?token= on
     // the URL (the server accepts that). Pass the best file's id.

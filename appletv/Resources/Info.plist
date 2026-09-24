@@ -22,6 +22,13 @@
     <string>$(CURRENT_PROJECT_VERSION)</string>
     <key>ITSAppUsesNonExemptEncryption</key>
     <false/>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Marquee connects directly to your media server on your home network.</string>
     <key>UIAppFonts</key>
     <array>
         <string>Archivo-Regular.ttf</string>

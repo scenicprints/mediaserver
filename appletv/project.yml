@@ -47,6 +47,13 @@ targets:
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         # App Store validation requires this on any 64-bit extension binary.
         UIRequiredDeviceCapabilities: [arm64]
+        # The shelf may call the server's LAN address (plain http to a private
+        # IP) when the internet is down; see docs/LAN.md. Local only: never
+        # NSAllowsArbitraryLoads. The app's own copy of these keys is in
+        # Resources/Info.plist, which it uses directly (INFOPLIST_FILE below).
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        NSLocalNetworkUsageDescription: Marquee connects directly to your media server on your home network.
         NSExtension:
           NSExtensionPointIdentifier: com.apple.tv-top-shelf
           NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).ContentProvider"
@@ -98,6 +105,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.scenicprints.marqueetv
+        # The app's Info.plist is a checked-in file, not generated: new keys
+        # (e.g. the LAN ATS exception and NSLocalNetworkUsageDescription) go there.
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: Resources/Info.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: "App Icon & Top Shelf Image"

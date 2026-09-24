@@ -86,7 +86,9 @@ struct ContentView: View {
         // individual buttons it still left a white rounded platter behind every
         // card, tab and row on tvOS 26. Marquee draws its own focus.
         .focusEffectDisabled()
-        .task { if await preview() == false { await store.checkSession() } }
+        // launch() races the home-network address against the internet one
+        // before the first load (see docs/LAN.md); the CI preview skips it.
+        .task { if await preview() == false { await store.launch() } }
     }
 
     private var shell: some View {
