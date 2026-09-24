@@ -7,7 +7,7 @@ Status legend: ✅ done · 🔜 next · 📋 backlog · 💡 idea (not committed
 
 ---
 
-## 🏠 The house works with the internet down (BUILT 2026-09-23, branch `lan-fallback`, NOT on main)
+## 🏠 The house works with the internet down (BUILT 2026-09-23, merged to main 2026-09-23; TestFlight dispatched)
 An outage on 2026-09-23 stopped the Apple TV reaching a Dell on the same LAN: every
 client knew only `https://marqu33.duckdns.org`, and the UDM Pro answered that name with
 the public IP. Goal: with the WAN unplugged, every client still signs in, browses (with
@@ -52,8 +52,9 @@ art) and plays; away from home nothing changes.
 OpenSubtitles, Google translation of AI subtitles (LibreTranslate via `translateUrl`
 would work offline; not installed), the in-app updater, metadata for new titles.
 
-**Next:** owner approves → merge to main → Update on the Dell → TestFlight / webOS
-install → pull the WAN and check each TV. No mDNS; the fixed IP makes it unnecessary.
+**Next:** Update on the Dell (server + Roku app) → install the TestFlight build → webOS
+repackage + install → sign in on each TV once online, then pull the WAN and check each
+TV. No mDNS; the fixed IP makes it unnecessary.
 
 ---
 
