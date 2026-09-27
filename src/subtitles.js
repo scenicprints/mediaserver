@@ -9,8 +9,8 @@
 // tracks (ffmpeg.js, TEXT_SUB_CODECS) already accepted ass/ssa. The same ASS
 // subtitle was readable inside an mkv and invisible beside it.
 
-import fs from 'node:fs';
 import path from 'node:path';
+import * as disk from './diskguard.js';
 
 // Text sidecars, all of which convert to WebVTT below.
 export const TEXT_SIDECAR_RE = /\.(srt|vtt|ssa|ass|smi|sami)$/i;
@@ -37,8 +37,8 @@ export function decodeSubtitle(buf) {
   return buf.toString('utf8').replace(/^﻿/, '');
 }
 
-export function readSubtitleFile(filePath) {
-  return decodeSubtitle(fs.readFileSync(filePath));
+export async function readSubtitleFile(filePath) {
+  return decodeSubtitle(await disk.readFile(filePath));
 }
 
 // ---- Which sidecar belongs to which video ----
@@ -273,13 +273,20 @@ export function sidecarToVtt(filePath, text) {
 // (stuttering active streams on the Dell's HDDs). Cached, a 200-episode show
 // costs a handful of reads. 10s TTL so a freshly downloaded .srt still appears
 // on the next open.
+// Async and short-fused: this runs on title pages, and a readdirSync here is
+// what froze the whole server when a pool disk hung (see diskguard.js). A disk
+// too slow to answer in LIST_WAIT_MS just means no sidecars on this view, and
+// that answer is not cached, so the next open asks again.
+const LIST_WAIT_MS = 4000;
 const dirListCache = new Map(); // folder -> { t, files|null }
-function cachedDirList(folder) {
+async function cachedDirList(folder) {
   const now = Date.now();
   const hit = dirListCache.get(folder);
   if (hit && now - hit.t < 10e3) return hit.files;
   let files = null;
-  try { files = fs.readdirSync(folder); } catch { /* missing/unreadable */ }
+  try { files = await disk.readdir(folder, undefined, { wait: LIST_WAIT_MS }); } catch (e) {
+    if (disk.isStall(e)) return null; // unknown, not missing
+  }
   if (dirListCache.size > 500) dirListCache.clear(); // tiny + self-limiting
   dirListCache.set(folder, { t: now, files });
   return files;
@@ -293,13 +300,13 @@ export function clearSubtitleCache() {
 // Find external subtitle sidecars for a video: next to it (name match, see
 // sidecarMatches) and in a Subs/Subtitles subfolder, where the folder itself is
 // the scoping and every file in it counts. Returns [{ path, label }].
-export function listSubtitles(videoPath) {
+export async function listSubtitles(videoPath) {
   const dir = path.dirname(videoPath);
   const stem = path.basename(videoPath, path.extname(videoPath));
   const out = [];
 
-  const consider = (folder, loose) => {
-    const files = cachedDirList(folder);
+  const consider = async (folder, loose) => {
+    const files = await cachedDirList(folder);
     if (!files) return;
     for (const f of files) {
       if (!TEXT_SIDECAR_RE.test(f)) continue;
@@ -317,8 +324,8 @@ export function listSubtitles(videoPath) {
       out.push({ path: path.join(folder, f), label });
     }
   };
-  consider(dir, false);
-  for (const sub of ['Subs', 'Subtitles', 'subs', 'subtitles', 'Sub']) consider(path.join(dir, sub), true);
+  await consider(dir, false);
+  for (const sub of ['Subs', 'Subtitles', 'subs', 'subtitles', 'Sub']) await consider(path.join(dir, sub), true);
 
   // Deduped case-insensitively, because the five spellings above are five
   // lookups of the SAME folder on Windows: "Subs" and "subs" both open it, and

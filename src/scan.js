@@ -1,5 +1,5 @@
-import fs from 'node:fs';
 import path from 'node:path';
+import * as disk from './diskguard.js';
 import {
   isVideo, parseMovie, detectQuality, groupKey,
   parseEpisode, showFromFilename, cleanShowName, showKey
@@ -137,8 +137,8 @@ export async function pruneMissing(db) {
   const reachable = new Set();
   for (const lib of libs) {
     try {
-      if (fs.statSync(path.resolve(lib.path)).isDirectory()) reachable.add(lib.id);
-    } catch { /* unreadable/missing root — leave its rows untouched */ }
+      if ((await disk.stat(path.resolve(lib.path))).isDirectory()) reachable.add(lib.id);
+    } catch { /* unreadable/missing/hung root — leave its rows untouched */ }
   }
 
   // Existence checks are async in batches — thousands of stat calls against a
@@ -148,7 +148,7 @@ export async function pruneMissing(db) {
     for (let i = 0; i < rows.length; i += 64) {
       const batch = rows.slice(i, i + 64);
       const checks = await Promise.all(batch.map((f) =>
-        reachable.has(f.library_id) ? fs.promises.access(f.path).then(() => false, () => true) : false));
+        reachable.has(f.library_id) ? disk.access(f.path).then(() => false, (e) => !disk.isStall(e)) : false));
       for (let j = 0; j < batch.length; j++) if (checks[j]) gone.push(batch[j].id);
     }
     return gone;
@@ -224,9 +224,9 @@ const WORKING_FILE = /\.marquee-opt\.tmp\.|\.replacing$|\.partial$/i;
 async function walk(dir, cb) {
   let entries;
   try {
-    entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    entries = await disk.readdir(dir, { withFileTypes: true });
   } catch {
-    return; // unreadable/missing drive — skip quietly
+    return; // unreadable/missing/hung drive — skip quietly
   }
   for (const e of entries) {
     const full = path.join(dir, e.name);
@@ -236,7 +236,7 @@ async function walk(dir, cb) {
     } else if (e.isFile()) {
       if (WORKING_FILE.test(e.name)) continue;
       let stat;
-      try { stat = await fs.promises.stat(full); } catch { continue; }
+      try { stat = await disk.stat(full); } catch { continue; }
       cb(full, stat);
     }
   }
