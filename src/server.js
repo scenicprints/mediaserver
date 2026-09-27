@@ -24,6 +24,7 @@ import { registerHls } from './hls.js';
 import { registerArtCache, rewriteJson, originOf, warm as warmArtCache } from './artcache.js';
 import { registerRoku } from './roku.js';
 import { registerLan } from './lan.js';
+import { rematchMovies } from './rematch.js';
 import { isOnline, onChange as onInternetChange, startWatching as watchInternet, netFetch } from './online.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -62,6 +63,7 @@ const db = openDb(path.resolve(ROOT, config.dbPath));
 // does the LAN identity (server id, LAN key, pair ids).
 const DATA_DIR = path.dirname(path.resolve(ROOT, config.dbPath));
 const ART_DIR = path.resolve(DATA_DIR, 'artcache');
+const REMATCH_DONE = path.join(DATA_DIR, 'rematch-v1.done');
 
 const MIME = {
   '.mp4': 'video/mp4', '.m4v': 'video/mp4', '.webm': 'video/webm',
@@ -718,6 +720,15 @@ function runEnrichment(reason) {
         totals.movies = await enrichLibrary(db, config.tmdbApiKey, { log });
         totals.shows = await enrichShows(db, config.tmdbApiKey, { log });
         totals.episodes = await enrichEpisodes(db, config.tmdbApiKey, { log });
+        // Once: re-check matches made by the old matcher (src/rematch.js).
+        // Before the backfills, so a corrected film gets its own genres,
+        // runtime and collection in the same run. The marker is only written
+        // when the pass finishes; an outage part-way means it runs again.
+        if (!fs.existsSync(REMATCH_DONE)) {
+          const r = await rematchMovies(db, config.tmdbApiKey, { log });
+          fs.writeFileSync(REMATCH_DONE, JSON.stringify({ at: new Date().toISOString(), checked: r.checked, changed: r.changed.length }));
+          console.log(`TMDB rematch: checked ${r.checked} movie(s), corrected ${r.changed.length} (listed in rematch_log).`);
+        }
         await backfillGenres(db, config.tmdbApiKey, { log });
         await backfillMovieDetails(db, config.tmdbApiKey, { log });
         await backfillCompanies(db, config.tmdbApiKey, { log });
