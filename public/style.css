@@ -1257,6 +1257,11 @@ body.tv-nav .card:not(.tv-focus) { opacity: 1; }
   font-family: "Roboto Mono", ui-monospace, monospace; font-size: 14px;
   letter-spacing: 0.08em; color: var(--muted); margin-bottom: 18px;
 }
+/* Releasing soon: a label over the title, in the same mono as the meta line. */
+.hero-soon {
+  font-family: "Roboto Mono", ui-monospace, monospace; font-size: 13px; font-weight: 700;
+  letter-spacing: 0.14em; text-transform: uppercase; color: var(--hot); margin-bottom: 12px;
+}
 .hero-overview {
   font-size: 17px; line-height: 1.6; color: var(--text-2); max-width: 46ch;
   margin: 0 0 24px; text-shadow: none; -webkit-line-clamp: 4;

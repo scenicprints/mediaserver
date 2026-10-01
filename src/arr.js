@@ -21,6 +21,13 @@ async function arr(cfg, pathQ, opts = {}) {
   return { ok: res.ok, status: res.status, body };
 }
 
+/** GET a v3 endpoint's JSON, or throw. Short timeout: callers draw a screen with it. */
+export async function arrGet(cfg, pathQ, timeoutMs = 8000) {
+  const r = await arr(cfg, pathQ, { signal: AbortSignal.timeout(timeoutMs) });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.body;
+}
+
 export async function testConn(cfg) {
   if (!radarrEnabled(cfg)) return { configured: false, ok: false };
   try {

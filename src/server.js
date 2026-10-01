@@ -25,6 +25,7 @@ import { registerArtCache, rewriteJson, originOf, warm as warmArtCache } from '.
 import { registerRoku } from './roku.js';
 import { registerLan } from './lan.js';
 import { rematchMovies } from './rematch.js';
+import { upcoming, heroUpcoming } from './upcoming.js';
 import { isOnline, onChange as onInternetChange, startWatching as watchInternet, netFetch } from './online.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1957,6 +1958,16 @@ app.post('/api/requests/add', async (req, reply) => {
     return reply.code(500).send({ error: e.message });
   }
 });
+
+// "Releasing soon" for the hero (src/upcoming.js): what Radarr and Sonarr are
+// waiting on, this month for movies and this week for episodes, already cut to
+// what each hero shows: { home, movies, tv }. Empty when neither is set up.
+async function upcomingHeroes() {
+  const library = db.prepare('SELECT id, tmdb_id, title, poster, backdrop FROM shows').all();
+  const u = await upcoming(config, library);
+  return { home: heroUpcoming(u, 'home'), movies: heroUpcoming(u, 'movies'), tv: heroUpcoming(u, 'tv') };
+}
+app.get('/api/upcoming', async () => upcomingHeroes());
 
 // Quality profiles per service (for the picker) + the current download queues.
 app.get('/api/requests/profiles', async () => ({

@@ -431,12 +431,25 @@ function weeklyPick(items, n) {
   return pool.slice(0, n);
 }
 
-function heroFor(view, movies, shows) {
+// Releasing soon (app.js setHero + drawUpcomingHero): the server's picks for
+// this view go first, with no Play; More Info only for a show we already have.
+function upcomingSlide(it) {
+  return {
+    upcoming: true, kind: it.kind === 'show' ? 'show' : 'movie', id: it.showId || null,
+    title: it.title, art: it.backdrop || it.poster || '', overview: it.overview || '',
+    when: it.when || '', year: it.kind === 'movie' ? (it.year || null) : null
+  };
+}
+
+function heroFor(view, movies, shows, upcoming = {}) {
   let items;
   if (view === 'movies') items = movies.filter((m) => m.backdrop);
   else if (view === 'tv') items = shows.filter((s) => s.backdrop);
   else items = [...movies.filter((m) => m.backdrop), ...shows.filter((s) => s.backdrop)].sort(byRating);
-  return weeklyPick(items.filter((x) => x.source !== 'stream'), 6).map((it) => {
+  const up = Array.isArray(upcoming[view]) ? upcoming[view] : [];
+  const soonShows = new Set(up.filter((u) => u.showId).map((u) => u.showId));
+  const rest = items.filter((x) => x.source !== 'stream' && !(x.episodes !== undefined && soonShows.has(x.id)));
+  return [...up.map(upcomingSlide), ...weeklyPick(rest, 6 - up.length).map((it) => {
     const kind = it.episodes !== undefined ? 'show' : 'movie';
     return {
       kind, id: it.id, title: it.title, art: it.backdrop || it.poster || '', overview: it.overview || '',
@@ -444,7 +457,7 @@ function heroFor(view, movies, shows) {
       extra: kind === 'show' ? `${it.episodes} episodes` : (it.qualities ? it.qualities.split(',').sort().reverse()[0] : null),
       extraQ: kind !== 'show'
     };
-  });
+  })];
 }
 
 // ---- the page (app.js renderView) ----
@@ -466,7 +479,7 @@ export function computeView(view, data, seed, now) {
     const items = r.sort ? r.items.slice().sort(r.sort) : r.items;
     out.push({ key, title: r.name, parts: richParts(r.name), total: items.length, seeAll: true, all: items, cards: items.slice(0, ROW_N).map((p) => mediaCard(p.x, p.kind)) });
   }
-  return { hero: heroFor(view, movies, shows), rows: out };
+  return { hero: heroFor(view, movies, shows, data.upcoming || {}), rows: out };
 }
 
 // ---- Live TV (app.js "Live TV (channel surfing)") ----
@@ -663,12 +676,13 @@ export function registerRoku(app, { ROOT }) {
     return JSON.parse(res.body.split('http://' + INTERNAL + '/art/').join(origin + '/art/'));
   }
   async function libraryData(req) {
-    const [movies, shows, continueItems, collections] = await Promise.all([
-      inject(req, '/api/movies'), inject(req, '/api/shows'), inject(req, '/api/continue'), inject(req, '/api/collections')
+    const [movies, shows, continueItems, collections, upcoming] = await Promise.all([
+      inject(req, '/api/movies'), inject(req, '/api/shows'), inject(req, '/api/continue'), inject(req, '/api/collections'),
+      inject(req, '/api/upcoming').catch(() => null)
     ]);
     return {
       movies: movies || [], shows: shows || [], continueItems: continueItems || [],
-      collections: Array.isArray(collections) ? collections : []
+      collections: Array.isArray(collections) ? collections : [], upcoming: upcoming || {}
     };
   }
   // The viewer's local date, as their browser would have it: ?ymd=2026-09-18.

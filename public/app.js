@@ -247,6 +247,7 @@ let continueItems = [];
 let collections = []; // franchise groupings, for the franchise rows on Home/Movies
 let currentView = 'home';
 let heroItems = [];
+let upcomingHero = {}; // { home, movies, tv }: releasing-soon slides from /api/upcoming
 let heroIdx = 0;
 let heroTimer = null;
 
@@ -289,7 +290,13 @@ async function loadAll() {
     fetch('/api/shows').then((r) => r.json()),
     fetch('/api/continue').then((r) => r.json()),
     fetch('/api/collections').then((r) => r.json()).catch(() => []),
-    loadPrefs()
+    loadPrefs(),
+    // Releasing soon comes from Radarr/Sonarr. It must never hold the home
+    // screen, so it gets three seconds and is otherwise left out.
+    Promise.race([
+      fetch('/api/upcoming').then((r) => (r.ok ? r.json() : null)),
+      new Promise((res) => setTimeout(() => res(null), 3000))
+    ]).catch(() => null).then((u) => { upcomingHero = u || {}; })
   ]);
   movies = mv; shows = sh; continueItems = cont; collections = Array.isArray(col) ? col : [];
   refreshPreroll(); // prefetch the movie pre-roll (fire and forget)
@@ -661,9 +668,9 @@ function renderView() {
 
   const view = currentView;
   const P = pairsFor(view);
-  if (view === 'movies') setHero(movies.filter((m) => m.backdrop));
-  else if (view === 'tv') setHero(shows.filter((s) => s.backdrop));
-  else setHero([...movies.filter((m) => m.backdrop), ...shows.filter((s) => s.backdrop)].sort(byRating));
+  if (view === 'movies') setHero(movies.filter((m) => m.backdrop), upcomingHero.movies);
+  else if (view === 'tv') setHero(shows.filter((s) => s.backdrop), upcomingHero.tv);
+  else setHero([...movies.filter((m) => m.backdrop), ...shows.filter((s) => s.backdrop)].sort(byRating), upcomingHero.home);
 
   const rand = rng(rowSeed(view));
   const out = [];
@@ -1364,10 +1371,16 @@ function weeklyPick(items, n) {
   return pool.slice(0, n);
 }
 
-function setHero(items) {
+function setHero(items, upcoming) {
   // The hero has a local Play button, so never feature deep-link-only streaming
   // titles there — they live in the rows/grids with a provider badge instead.
-  heroItems = weeklyPick(items.filter((x) => x.source !== 'stream'), 6);
+  // Releasing-soon titles (at most three, already chosen by the server) go
+  // first; the weekly pick fills the rest of the six.
+  // A show with a new episode this week appears once, as releasing soon.
+  const up = Array.isArray(upcoming) ? upcoming : [];
+  const soonShows = new Set(up.filter((u) => u.showId).map((u) => u.showId));
+  const rest = items.filter((x) => x.source !== 'stream' && !(x.episodes !== undefined && soonShows.has(x.id)));
+  heroItems = [...up, ...weeklyPick(rest, 6 - up.length)];
   heroIdx = 0;
   if (heroTimer) clearInterval(heroTimer);
   if (!heroItems.length) { heroEl.classList.add('hidden'); return; }
@@ -1378,6 +1391,7 @@ function setHero(items) {
 
 function drawHero() {
   const it = heroItems[heroIdx];
+  if (it.upcoming) { drawUpcomingHero(it); return; }
   const kind = it.episodes !== undefined ? 'show' : 'movie';
   heroBg.style.backgroundImage = `url("${it.backdrop || it.poster}")`;
   heroContent.innerHTML = `
@@ -1396,6 +1410,27 @@ function drawHero() {
   heroDots.querySelectorAll('.hero-dot').forEach((d) => d.addEventListener('click', () => { heroIdx = +d.dataset.i; drawHero(); }));
   document.getElementById('hero-play').addEventListener('click', () => openMedia(it, kind, true));
   document.getElementById('hero-info').addEventListener('click', () => openMedia(it, kind, false));
+}
+
+// A releasing-soon slide: nothing to play yet, so no Play. A show already in
+// the library still opens on More Info; a film that isn't here yet has no page.
+function drawUpcomingHero(it) {
+  heroBg.style.backgroundImage = `url("${it.backdrop || it.poster}")`;
+  heroContent.innerHTML = `
+    <span class="hero-soon">Releasing soon</span>
+    <h2 class="hero-title">${escapeHtml(it.title)}</h2>
+    <div class="hero-meta">
+      <span class="chip">${escapeHtml(it.when || '')}</span>
+      ${it.kind === 'movie' && it.year ? `<span class="chip">${it.year}</span>` : ''}
+    </div>
+    <p class="hero-overview">${escapeHtml(it.overview || '')}</p>
+    <div class="hero-actions">
+      ${it.showId ? '<button class="btn" id="hero-info">ⓘ More Info</button>' : ''}
+    </div>`;
+  heroDots.innerHTML = heroItems.map((_, i) => `<button class="hero-dot${i === heroIdx ? ' active' : ''}" data-i="${i}"></button>`).join('');
+  heroDots.querySelectorAll('.hero-dot').forEach((d) => d.addEventListener('click', () => { heroIdx = +d.dataset.i; drawHero(); }));
+  const info = document.getElementById('hero-info');
+  if (info) info.addEventListener('click', () => openMedia({ id: it.showId }, 'show', false));
 }
 
 // ---------- Rows & cards ----------
