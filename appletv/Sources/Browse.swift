@@ -2,7 +2,9 @@ import SwiftUI
 
 // ============================================================================
 // The Marquee — the featured spotlight the app is named after. A deterministic
-// weekly pick of 6, rotating every 9s.
+// weekly pick of 6, rotating every 9s. Releasing-soon titles from the server
+// (at most three) go first and the weekly pick fills the rest, the same rule
+// as the web and Roku heroes.
 //
 // The artwork is a PLATE: framed, never scrimmed, and nothing is set on top of
 // it. The title, the facts and the actions sit beside it on the panel. Six ticks
@@ -18,7 +20,9 @@ struct HeroItem: Identifiable, Hashable {
     let rating: Double?
     let badge: String?
     let overview: String?
-    let route: Route
+    let route: Route?            // nil: no page to open (a film not in the library yet)
+    var upcoming = false         // releasing soon: nothing to play yet, so no Play
+    var when: String? = nil      // the server's wording of the date, upcoming only
 }
 
 struct MarqueeHero: View {
@@ -26,17 +30,27 @@ struct MarqueeHero: View {
     @Binding var route: [Route]
     @Environment(\.pal) private var pal
     @State private var idx = 0
+    @FocusState private var focus: Slot?
     private let timer = Timer.publish(every: 9, on: .main, in: .common).autoconnect()
+
+    // The two button positions. The lead one is never taken away, only
+    // re-labelled, so focus standing on it survives the rotation whatever the
+    // next slide is.
+    private enum Slot: Hashable { case lead, details }
 
     var body: some View {
         let it = idx < items.count ? items[idx] : items[0]
+        // A releasing-soon film that isn't in the library has nothing to open.
+        let inert = it.upcoming && it.route == nil
         HStack(alignment: .top, spacing: 44) {
             ArtPlate(url: it.backdrop ?? it.poster, width: 1074, height: 396, title: it.title)
                 .id(it.id)
                 .transition(.opacity)
 
             VStack(alignment: .leading, spacing: 0) {
-                Lab("The Marquee — this week", small: true)
+                // Orange is right here: releasing soon is what happens next.
+                if it.upcoming { Lab("Releasing soon", small: true, signal: true) }
+                else { Lab("The Marquee — this week", small: true) }
                 Text(it.title)
                     .font(F.med(54)).foregroundStyle(pal.ink)
                     .lineLimit(2).minimumScaleFactor(0.7)
@@ -48,8 +62,21 @@ struct MarqueeHero: View {
                         .lineLimit(4).padding(.top, 18)
                 }
                 HStack(spacing: 14) {
-                    MButton(title: "Play", kind: .primary, play: true) { route.append(it.route) }
-                    MButton(title: "Details") { route.append(it.route) }
+                    // Play on a normal slide, More Info on a show that's coming
+                    // back, and on a film that isn't here yet a blank: the slide
+                    // shows no buttons, but the hero keeps one focusable spot.
+                    // Without it a slide with nothing to press would throw focus
+                    // out of the hero into the rows the moment it rotated in, and
+                    // Up from the rows would find nothing to land on.
+                    MButton(title: it.upcoming ? "More Info" : "Play",
+                            kind: it.upcoming ? .secondary : .primary,
+                            play: !it.upcoming, blank: inert) { open(it) }
+                        .accessibilityHidden(inert)
+                        .focused($focus, equals: .lead)
+                    if !it.upcoming {
+                        MButton(title: "Details") { open(it) }
+                            .focused($focus, equals: .details)
+                    }
                 }
                 .padding(.top, 26)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -62,12 +89,25 @@ struct MarqueeHero: View {
         .padding(.horizontal, Theme.gutter)
         .onReceive(timer) { _ in
             guard items.count > 1 else { return }
-            withAnimation(.easeInOut(duration: 0.5)) { idx = (idx + 1) % items.count }
+            let next = (idx + 1) % items.count
+            // Details is about to go (releasing-soon slides have none). Hand
+            // focus to the lead spot first, or tvOS picks somewhere on its own.
+            if focus == .details && items[next].upcoming { focus = .lead }
+            withAnimation(.easeInOut(duration: 0.5)) { idx = next }
         }
+    }
+
+    private func open(_ it: HeroItem) {
+        if let r = it.route { route.append(r) }
     }
 
     private func meta(_ it: HeroItem) -> String {
         var parts: [String] = []
+        if it.upcoming {
+            if let w = it.when, !w.isEmpty { parts.append(w) }
+            if let y = it.year { parts.append(String(y)) }
+            return parts.joined(separator: "   /   ")
+        }
         if let y = it.year { parts.append(String(y)) }
         if let b = it.badge { parts.append(b.uppercased()) }
         if let r = it.rating, r > 0 { parts.append(String(format: "%.1f", r)) }
@@ -255,22 +295,52 @@ enum Browse {
                           badges: badges, stream: nil, route: .show(s.localId ?? 0))
     }
 
-    static func heroFromMovies(_ movies: [Movie]) -> [HeroItem] {
-        weeklyPick(movies.filter { $0.backdrop != nil && !$0.isStream }, 6).map {
+    // Each hero is the view's releasing-soon list first (the server already
+    // chose it: at most three, soonest first), then the weekly pick fills the
+    // rest of the six. A show with a releasing-soon slide is left out of the
+    // pick, so it appears once.
+    static func heroFromMovies(_ movies: [Movie], upcoming: [UpcomingItem] = []) -> [HeroItem] {
+        let up = heroFromUpcoming(upcoming)
+        let picks = weeklyPick(movies.filter { $0.backdrop != nil && !$0.isStream }, 6 - up.count).map {
             HeroItem(id: "m\($0.id)", title: $0.title, backdrop: $0.backdrop, year: $0.year,
                      rating: $0.rating, badge: $0.bestQuality, overview: $0.overview, route: .movie($0.localId ?? 0))
         }
+        return up + picks
     }
-    static func heroFromShows(_ shows: [Show]) -> [HeroItem] {
-        weeklyPick(shows.filter { $0.backdrop != nil && !$0.isStream }, 6).map {
+    static func heroFromShows(_ shows: [Show], upcoming: [UpcomingItem] = []) -> [HeroItem] {
+        let up = heroFromUpcoming(upcoming)
+        let soon = soonShowIds(upcoming)
+        let picks = weeklyPick(shows.filter { $0.backdrop != nil && !$0.isStream && !isSoon($0, soon) }, 6 - up.count).map {
             HeroItem(id: "s\($0.id)", title: $0.title, backdrop: $0.backdrop, year: $0.year,
                      rating: $0.rating, badge: $0.episodes.map { "\($0) episodes" }, overview: $0.overview, route: .show($0.localId ?? 0))
         }
+        return up + picks
     }
-    static func heroMixed(_ movies: [Movie], _ shows: [Show]) -> [HeroItem] {
+    static func heroMixed(_ movies: [Movie], _ shows: [Show], upcoming: [UpcomingItem] = []) -> [HeroItem] {
+        let up = heroFromUpcoming(upcoming)
+        let soon = soonShowIds(upcoming)
         let m = movies.filter { $0.backdrop != nil && !$0.isStream }.map { HeroItem(id: "m\($0.id)", title: $0.title, backdrop: $0.backdrop, year: $0.year, rating: $0.rating, badge: $0.bestQuality, overview: $0.overview, route: .movie($0.localId ?? 0)) }
-        let s = shows.filter { $0.backdrop != nil && !$0.isStream }.map { HeroItem(id: "s\($0.id)", title: $0.title, backdrop: $0.backdrop, year: $0.year, rating: $0.rating, badge: $0.episodes.map { "\($0) eps" }, overview: $0.overview, route: .show($0.localId ?? 0)) }
-        return weeklyPick((m + s).sorted { ($0.rating ?? 0) > ($1.rating ?? 0) }, 6)
+        let s = shows.filter { $0.backdrop != nil && !$0.isStream && !isSoon($0, soon) }.map { HeroItem(id: "s\($0.id)", title: $0.title, backdrop: $0.backdrop, year: $0.year, rating: $0.rating, badge: $0.episodes.map { "\($0) eps" }, overview: $0.overview, route: .show($0.localId ?? 0)) }
+        return up + weeklyPick((m + s).sorted { ($0.rating ?? 0) > ($1.rating ?? 0) }, 6 - up.count)
+    }
+
+    // Releasing-soon slides. A movie keeps its year on the meta line; a show's
+    // year would be the year it started, which says nothing about this episode.
+    // Only a show already in the library has a page to open.
+    private static func heroFromUpcoming(_ upcoming: [UpcomingItem]) -> [HeroItem] {
+        upcoming.prefix(6).map { u in
+            HeroItem(id: u.key, title: u.title, backdrop: u.backdrop, poster: u.poster,
+                     year: u.kind == "movie" ? u.year : nil, rating: nil, badge: nil,
+                     overview: u.overview, route: u.showId.map { Route.show($0) },
+                     upcoming: true, when: u.when)
+        }
+    }
+    private static func soonShowIds(_ upcoming: [UpcomingItem]) -> Set<Int> {
+        Set(upcoming.compactMap { $0.showId })
+    }
+    private static func isSoon(_ s: Show, _ soon: Set<Int>) -> Bool {
+        guard let id = s.localId else { return false }
+        return soon.contains(id)
     }
 }
 

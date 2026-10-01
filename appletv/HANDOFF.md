@@ -13,6 +13,28 @@ UI rewrite was built against superseded versions of half these files. The push
 was rejected and the work had to be redone. **Check `git log HEAD..origin/main`
 before you touch a file, not after.**
 
+## Releasing soon in the Marquee (2026-09-30) — UNVERIFIED, never compiled
+`GET /api/upcoming` (`src/upcoming.js`) gives `{ home, movies, tv }`, each the
+final releasing-soon set for that hero (at most 3, soonest first). Same rule
+as web `setHero` and Roku: hero = upcoming list, then
+`weeklyPick(regular, 6 - upcoming.count)`, and a show with a releasing-soon
+slide is dropped from the regular pool so it appears once.
+- `Store.fetchUpcoming` runs beside the library calls in `loadHome`, raced
+  against a 3 s timer; a timeout, 404, 401 or junk is nil and the old lists are
+  kept (empty on first load). It deliberately bypasses `get()`, which signs out
+  on a 401. Preview mode has no upcoming items.
+- `HeroItem` gained `upcoming`, `when`, and `route` is now optional (nil = a
+  film not in the library, nothing to open). The slide shows a signal-orange
+  "Releasing soon" `Lab`, the meta line is `when` (+ year for films), no Play.
+  A show in the library keeps a "More Info" button to its page.
+- Focus: the hero's lead button is never removed, only re-labelled. On a slide
+  with nothing to open it becomes `MButton(blank: true)`, a clear label that is
+  focusable and does nothing, so focus never gets thrown out of the hero on
+  rotation and Up from the rows still lands in it. If focus is on Details when
+  the next slide is releasing-soon, the timer hands it to the lead first.
+**Test on-device:** focus standing in the hero across a full rotation; that the
+blank spot isn't confusing (focus is invisible while it sits there).
+
 ## Home-network fallback (2026-09-23) — UNVERIFIED, never compiled
 During an internet outage the Apple TV couldn't reach the Dell on its own LAN,
 because `https://marqu33.duckdns.org` was the only address it knew. It now

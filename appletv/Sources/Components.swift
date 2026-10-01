@@ -39,13 +39,16 @@ enum CardBadge: Hashable {
 struct Lab: View {
     let text: String
     var small = false
+    var signal = false               // state, not decoration: see Palette.signal
     @Environment(\.pal) private var pal
-    init(_ text: String, small: Bool = false) { self.text = text; self.small = small }
+    init(_ text: String, small: Bool = false, signal: Bool = false) {
+        self.text = text; self.small = small; self.signal = signal
+    }
     var body: some View {
         Text(text.uppercased())
             .font(small ? F.semi(15) : F.semi(18))
             .tracking(small ? 2.6 : 3.4)
-            .foregroundStyle(small ? pal.ink3 : pal.ink2)
+            .foregroundStyle(signal ? pal.signal : (small ? pal.ink3 : pal.ink2))
     }
 }
 
@@ -87,37 +90,51 @@ struct MButton: View {
     var play = false                 // draw the play triangle
     var wide = false
     var height: CGFloat = 64
+    // Draws nothing and does nothing, but stays focusable and keeps its place.
+    // The Marquee uses it on a slide with no actions, so focus has somewhere to
+    // stand in the hero instead of being thrown into the rows (see MarqueeHero).
+    // The label becomes clear rather than the button going transparent: a clear
+    // label is the same proven trick as the player's focus catcher.
+    var blank = false
     let action: () -> Void
 
     @Environment(\.pal) private var pal
     @FocusState private var focused: Bool
 
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 14) {
-                if play {
-                    Triangle().fill(fg).frame(width: 15, height: 18)
-                }
-                Text(title.uppercased()).font(F.semi(18)).tracking(2.6)
+        Button(action: { if !blank { action() } }) {
+            if blank {
+                Color.clear.frame(width: height, height: height)
+            } else {
+                face
             }
-            .foregroundStyle(fg)
-            .frame(maxWidth: wide ? .infinity : nil)
-            .frame(height: height)
-            .padding(.horizontal, wide ? 0 : 32)
-            .background(bg)
-            .overlay(Rectangle().strokeBorder(border, lineWidth: focused ? 4 : 2))
-            // An inner keyline as well, so the frame reads as a pressed edge and
-            // not just a thicker outline. Both stay INSIDE the button's bounds.
-            .overlay(
-                Rectangle()
-                    .strokeBorder(focused ? pal.onSignal.opacity(kind == .primary ? 0.85 : 0) : .clear,
-                                  lineWidth: 2)
-                    .padding(5)
-            )
         }
         .buttonStyle(.bare)
         .focused($focused)
         .focusEffectDisabled()
+    }
+
+    private var face: some View {
+        HStack(spacing: 14) {
+            if play {
+                Triangle().fill(fg).frame(width: 15, height: 18)
+            }
+            Text(title.uppercased()).font(F.semi(18)).tracking(2.6)
+        }
+        .foregroundStyle(fg)
+        .frame(maxWidth: wide ? .infinity : nil)
+        .frame(height: height)
+        .padding(.horizontal, wide ? 0 : 32)
+        .background(bg)
+        .overlay(Rectangle().strokeBorder(border, lineWidth: focused ? 4 : 2))
+        // An inner keyline as well, so the frame reads as a pressed edge and
+        // not just a thicker outline. Both stay INSIDE the button's bounds.
+        .overlay(
+            Rectangle()
+                .strokeBorder(focused ? pal.onSignal.opacity(kind == .primary ? 0.85 : 0) : .clear,
+                              lineWidth: 2)
+                .padding(5)
+        )
     }
 
     // The primary is ALREADY orange, so focus can't be "turn orange". It presses

@@ -148,6 +148,58 @@ struct Show: Identifiable, Decodable, Hashable {
     var isNew: Bool { Store.isRecent(addedAt) }
 }
 
+// A releasing-soon title from /api/upcoming (Radarr/Sonarr calendars). The
+// server has already chosen each view's set, so the app only shows them.
+// `showId` is set when the show is already in the library; a film that isn't
+// here yet has no page to open. Every field is decoded loosely, the same as
+// the library models, so one odd entry can't empty the whole list.
+struct UpcomingItem: Decodable, Hashable, Sendable {
+    let key: String
+    let kind: String             // "movie" | "show"
+    let title: String
+    let year: Int?
+    let overview: String?
+    let poster: String?
+    let backdrop: String?
+    let when: String?            // "Digital release · Tue, Oct 20", already worded by the server
+    let showId: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case key, kind, title, year, overview, poster, backdrop, when, showId
+    }
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        let t = (try? c.decode(String.self, forKey: .title)) ?? "—"
+        let k = (try? c.decode(String.self, forKey: .kind)) ?? "movie"
+        title = t
+        kind = k
+        key = (try? c.decode(String.self, forKey: .key)) ?? "up:\(k):\(t)"
+        year = try? c.decode(Int.self, forKey: .year)
+        overview = try? c.decode(String.self, forKey: .overview)
+        poster = try? c.decode(String.self, forKey: .poster)
+        backdrop = try? c.decode(String.self, forKey: .backdrop)
+        when = try? c.decode(String.self, forKey: .when)
+        showId = try? c.decode(Int.self, forKey: .showId)
+    }
+}
+
+// GET /api/upcoming: one list per hero (Home, Movies, TV), at most three each,
+// soonest first.
+struct UpcomingHero: Decodable, Sendable {
+    var home: [UpcomingItem] = []
+    var movies: [UpcomingItem] = []
+    var tv: [UpcomingItem] = []
+
+    enum CodingKeys: String, CodingKey { case home, movies, tv }
+    init() {}
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        home = (try? c.decode([UpcomingItem].self, forKey: .home)) ?? []
+        movies = (try? c.decode([UpcomingItem].self, forKey: .movies)) ?? []
+        tv = (try? c.decode([UpcomingItem].self, forKey: .tv)) ?? []
+    }
+}
+
 struct Collection: Identifiable, Decodable, Hashable {
     // TMDB collections have numeric ids; curated meta collections use string ids
     // like "meta:mcu" — decode either (a plain `String` decoder rejects the
@@ -429,6 +481,9 @@ final class Store: ObservableObject {
     @Published var continueItems: [ContinueItem] = []
     @Published var shows: [Show] = []
     @Published var collections: [Collection] = []
+    // Releasing-soon slides for the three heroes. Empty until the server
+    // answers, and stays empty on a server that doesn't have the endpoint.
+    @Published var upcoming = UpcomingHero()
 
     @Published var error: String?
     @Published var loading = false
@@ -710,6 +765,7 @@ final class Store: ObservableObject {
         let old = token
         token = nil; user = nil
         movies = []; continueItems = []; shows = []; collections = []
+        upcoming = UpcomingHero()
         if old != nil { Task { _ = try? await request("api/logout", method: "POST") } }
     }
 
@@ -899,12 +955,41 @@ final class Store: ObservableObject {
         async let c: [ContinueItem]? = get("api/continue", as: [ContinueItem].self)
         async let s: [Show]? = get("api/shows", as: [Show].self)
         async let col: [Collection]? = get("api/collections", as: [Collection].self)
-        let (mv, cont, sh, cols) = await (m, c, s, col)
+        async let up: UpcomingHero? = fetchUpcoming()
+        let (mv, cont, sh, cols, ups) = await (m, c, s, col, up)
         if let mv { movies = mv }
         if let cont { continueItems = cont }
         if let sh { shows = sh }
         if let cols { collections = cols }
+        if let ups { upcoming = ups }
         if mv == nil && movies.isEmpty { error = "Couldn't reach the server. Check the address in Settings." }
+    }
+
+    // Releasing soon comes from Radarr/Sonarr, which can be slow or down, and it
+    // must never hold the home screen: it runs beside the library calls and gets
+    // three seconds. Anything that isn't a good answer (a timeout, an older
+    // server's 404, junk) is nil, and the caller keeps what it had, which on a
+    // first load is nothing. It skips get() on purpose: get() signs out on a
+    // 401, and an older server can answer an unknown route that way.
+    private func fetchUpcoming() async -> UpcomingHero? {
+        await withTaskGroup(of: UpcomingHero?.self) { group in
+            group.addTask { await self.requestUpcoming() }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                return nil
+            }
+            // Whichever finishes first decides; the loser is cancelled, which
+            // also stops the request if it was the timer that won.
+            let first = await group.next()
+            group.cancelAll()
+            return first.flatMap { $0 }
+        }
+    }
+    private func requestUpcoming() async -> UpcomingHero? {
+        // No LAN re-resolve from here; the library calls beside it do that.
+        guard let (data, http) = try? await request("api/upcoming", recover: false),
+              (200..<300).contains(http.statusCode) else { return nil }
+        return try? decoder().decode(UpcomingHero.self, from: data)
     }
 
     func loadMovies() async {

@@ -12,7 +12,7 @@ struct MoviesView: View {
                 emptyState
             } else {
                 BrowseScreen(route: $route,
-                             heroItems: Browse.heroFromMovies(store.movies),
+                             heroItems: Browse.heroFromMovies(store.movies, upcoming: store.upcoming.movies),
                              rows: Browse.rows(.movies, movies: store.movies, shows: [], collections: store.collections),
                              continueKind: "movie")
             }

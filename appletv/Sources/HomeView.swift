@@ -1,13 +1,14 @@
 import SwiftUI
 
-// Home: the rotating Marquee hero (mixed, by rating) over the full row set.
+// Home: the rotating Marquee hero (releasing soon, then mixed by rating) over
+// the full row set.
 struct HomeView: View {
     @EnvironmentObject var store: Store
     @Binding var route: [Route]
 
     var body: some View {
         BrowseScreen(route: $route,
-                     heroItems: Browse.heroMixed(store.movies, store.shows),
+                     heroItems: Browse.heroMixed(store.movies, store.shows, upcoming: store.upcoming.home),
                      rows: Browse.rows(.home, movies: store.movies, shows: store.shows, collections: store.collections),
                      continueKind: nil)
             .task { if store.movies.isEmpty { await store.loadHome() } }
