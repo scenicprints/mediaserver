@@ -110,6 +110,18 @@ app changes, this file changes with it and the Roku app follows.
       every 9s. Home = movies+shows by rating; Movies/TV = that kind. Title, year chip,
       ★ rating chip, "N episodes" (show) or top quality chip (movie), 4-line overview,
       ▶ PLAY + ⓘ MORE INFO.
+- [ ] Releasing soon (`src/upcoming.js`, server picks per view) go first in the hero
+      (`drawUpcomingHero`): "RELEASING SOON" (mono 13px, .14em, --hot = accent, 12px
+      below; the Roku uses the 500 face at .1em, as Chrome fakes the 700), title, a
+      `when` chip (+ year chip for a film; the chips wrap like the flex row), overview,
+      no Play. ⓘ MORE INFO only for a show already in the library (opens that show);
+      otherwise no buttons and no focus stops, so Up from the first row goes to the
+      ribbon and Down from the ribbon to the first row. A focused hero button that
+      rotates away is dropped exactly as before (next key re-seats on the ribbon).
+- [ ] Hero height: the web's hero grid resizes per slide and the rows move with it. The
+      Roku lays the rows out once, so it measures every slide when the hero is built
+      and reserves the TALLEST text column; each slide stays top-aligned and the dial
+      and rows never move or overlap during rotation. (Deliberate difference.)
 - [ ] Continue Watching first (tab-aware: movies on Movies, episodes on TV, all on Home),
       with progress bars and a ✓ "Mark watched" (dismiss) action.
 - [ ] Pinned: up to 2 seasonal rows (full holiday calendar: New Year, Big Game, Valentine,

@@ -52,9 +52,35 @@ function heroBuild(page as object, items as object) as dynamic
     m.heroItems = items
     m.heroIdx = 0
     m.heroG = uiGroup(page, 0, 0)
+    m.heroRow1 = heroRow1Max()
     h = heroDraw()
     heroStart()
     return h
+end function
+
+' The web's hero grid resizes per slide and the rows follow it. The Roku lays
+' the rows out once, so it reserves the TALLEST slide's text column instead:
+' every slide is laid out once into a detached group (same code, no focus
+' items), and row 1 of the grid is the largest of them. Rotation then never
+' overlaps the first row or moves it; each slide stays top-aligned.
+function heroRow1Max() as dynamic
+    best = 286.9 - 44 - 48
+    scratch = CreateObject("roSGNode", "Group")
+    for each it in m.heroItems
+        y = heroSlide(scratch, it, false)
+        best = maxf(best, y - 94)
+        clearChildren(scratch)
+    end for
+    return best
+end function
+
+' Draws a slide's text column into g; returns the y below its actions. live:
+' false measures only (the buttons are drawn but not made focusable).
+function heroSlide(g as object, it as object, live as boolean) as dynamic
+    colX = 38.4 + 510.1 + 44
+    colW = 329.1
+    if isT(it.upcoming) then return heroDrawSoon(g, it, colX, colW, live)
+    return heroDrawLib(g, it, colX, colW, live)
 end function
 
 ' app.js drawHero(). Returns the page y where the rows begin.
@@ -71,13 +97,34 @@ function heroDraw() as dynamic
     if m.fCur <> invalid and isT(m.fCur.hero) then m.fCur.hidden = true
     clearChildren(g)
     it = m.heroItems[m.heroIdx]
-    kind = it.kind
     colX = 38.4 + 510.1 + 44
     colW = 329.1
     ' The plate: 16:9, hairline frame, sunk behind the art.
     uiRect(g, 38.4, 94, 510.1, 286.9, m.c.sunk)
     uiPoster(g, it.art, 38.4, 94, 510.1, 286.9)
     uiFrame(g, 38.4, 94, 510.1, 286.9, 1, m.c.line)
+    heroSlide(g, it, true)
+    ' Row 1 is the tallest slide's (heroRow1Max), so the dial and the rows
+    ' stay put while the slides rotate.
+    row1 = m.heroRow1
+    ' The dial: 12px cells (a 2px tick in the button's padding box), 9 apart,
+    ' bottom-aligned in 22px; the current one signal and full height.
+    dy = 94 + row1 + 44 + 26
+    for i = 0 to m.heroItems.Count() - 1
+        if i = m.heroIdx
+            uiRect(g, colX + i * 21, dy, 12, 22, m.c.accent)
+        else
+            uiRect(g, colX + i * 21, dy + 11, 12, 11, m.c.muted)
+        end if
+    end for
+    ' The first row sits below the hero's 30px margin.
+    return 94 + row1 + 44 + 48 + 30
+end function
+
+' A library slide (drawHero): title, chips, overview, ▶ Play + ⓘ More Info.
+' Returns the y below the actions.
+function heroDrawLib(g as object, it as object, colX as dynamic, colW as dynamic, live as boolean) as dynamic
+    kind = it.kind
     ' Title: Archivo 500, 28px, line-height 1.04, -0.01em, wraps in the column.
     tst = { v: "A500n01", s: 28, c: m.c.text, lh: 29.12 }
     t = uiPara(g, it.title, tst, colX, 94, colW)
@@ -108,24 +155,62 @@ function heroDraw() as dynamic
     if str0(it.overview) = "" then o.h = 0
     y = y + o.h + 24
     play = uiBtn(g, colX, y, "▶ Play", { primary: true })
-    btnItem(play, "page", heroPlay, { hero: true, hg: "hero-actions", kindH: kind, heroIt: it })
     info = uiBtn(g, colX + play.w + 12, y, "ⓘ More Info")
-    btnItem(info, "page", heroInfo, { hero: true, hg: "hero-actions", heroIt: it })
-    y = y + 43
-    contentH = y - 94
-    row1 = maxf(contentH, 286.9 - 44 - 48)
-    ' The dial: 12px cells (a 2px tick in the button's padding box), 9 apart,
-    ' bottom-aligned in 22px; the current one signal and full height.
-    dy = 94 + row1 + 44 + 26
-    for i = 0 to m.heroItems.Count() - 1
-        if i = m.heroIdx
-            uiRect(g, colX + i * 21, dy, 12, 22, m.c.accent)
-        else
-            uiRect(g, colX + i * 21, dy + 11, 12, 11, m.c.muted)
+    if live
+        btnItem(play, "page", heroPlay, { hero: true, hg: "hero-actions", kindH: kind, heroIt: it })
+        btnItem(info, "page", heroInfo, { hero: true, hg: "hero-actions", heroIt: it })
+    end if
+    return y + 43
+end function
+
+' A releasing-soon slide (drawUpcomingHero): nothing to play yet, so no Play.
+' "Releasing soon", the title, a `when` chip (+ the year for a film), the
+' overview, and ⓘ More Info only for a show already in the library (id set).
+' With no id the actions row is empty (0 tall) and the slide adds no focus
+' stops: Up from the first row then finds nothing above and lifts to the
+' ribbon, Down from the ribbon lands on the first row, as on the web.
+function heroDrawSoon(g as object, it as object, colX as dynamic, colW as dynamic, live as boolean) as dynamic
+    ' .hero-soon: Roboto Mono 13px bold, .14em, uppercase, --hot (= the accent
+    ' in both finishes), body line-height 1.6, 12px below. Chrome fakes the bold
+    ' from the 500 face (only 400/500 ship); the Roku has no fake bold, so the
+    ' 500 face with the nearest tracking cut (.1em) stands in.
+    uiText(g, "Releasing soon", { v: "M500t10", s: 13, c: m.c.accent, lh: 20.8, upper: true }, colX, 94)
+    ty = 94 + 20.8 + 12
+    tst = { v: "A500n01", s: 28, c: m.c.text, lh: 29.12 }
+    t = uiPara(g, it.title, tst, colX, ty, colW)
+    y = ty + t.h + 16
+    chips = [str0(it.when)]
+    if it.kind = "movie" and it.year <> invalid then chips.Push(str0(it.year))
+    y = y + heroChipsWrap(g, chips, colX, y, colW) + 18
+    ost = { v: "A400", s: 17, c: m.c.text2, lh: 27.2 }
+    o = uiPara(g, it.overview, ost, colX, y, colW, 4)
+    if str0(it.overview) = "" then o.h = 0
+    y = y + o.h + 24
+    if it.id <> invalid
+        info = uiBtn(g, colX, y, "ⓘ More Info")
+        if live then btnItem(info, "page", heroInfo, { hero: true, hg: "hero-actions", heroIt: it })
+        y = y + 43
+    end if
+    return y
+end function
+
+' .hero-meta is a wrapping flex row (gap 12 both ways) of nowrap chips: a chip
+' that would cross the column edge starts a new line. Returns the block height.
+function heroChipsWrap(g as object, texts as object, x as dynamic, y as dynamic, w as dynamic) as dynamic
+    st = { v: "M500t10", s: 12, c: m.c.text2, lh: 19.2, upper: true }
+    chipH = st.lh + 6 + 2
+    cx = x
+    cy = y
+    for each t in texts
+        cw = textWidth(t, st) + 18 + 2
+        if cx > x and cx + cw > x + w
+            cx = x
+            cy = cy + chipH + 12
         end if
+        uiChip(g, cx, cy, t)
+        cx = cx + cw + 12
     end for
-    ' The first row sits below the hero's 30px margin.
-    return 94 + row1 + 44 + 48 + 30
+    return cy - y + chipH
 end function
 
 sub heroStart()
@@ -152,6 +237,8 @@ end sub
 
 sub heroPlay(it as object)
     h = it.heroIt
+    ' A releasing-soon slide never draws a Play button.
+    if isT(h.upcoming) then return
     if h.kind = "show"
         openShow(h.id, invalid, true)
     else
@@ -161,6 +248,12 @@ end sub
 
 sub heroInfo(it as object)
     h = it.heroIt
+    ' Releasing soon: id is the library show's id, opened as a show
+    ' (openMedia({ id: it.showId }, 'show', false)).
+    if isT(h.upcoming)
+        if h.id <> invalid then openShow(h.id, invalid, false)
+        return
+    end if
     if h.kind = "show"
         openShow(h.id, invalid, false)
     else
