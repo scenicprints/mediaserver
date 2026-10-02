@@ -108,11 +108,45 @@ function showWindow() {
   else { win.show(); win.focus(); }
 }
 
+// Start with Windows, and start WITHOUT a window.
+//
+// Closing the window has always left the work running, but nothing brought it
+// back after a reboot: the machine came up and the optimizer simply was not
+// there until someone double-clicked it. On a box whose whole job is to be left
+// alone, that is the difference between a background service and a program
+// somebody has to remember to start.
+//
+// The login entry passes --hidden so the machine does not boot to a window
+// nobody asked for. Launched by hand it still opens, because then you did ask.
+const HIDDEN_FLAG = '--hidden';
+
+function startsWithWindows() {
+  try { return app.getLoginItemSettings({ args: [HIDDEN_FLAG] }).openAtLogin; }
+  catch { return false; }
+}
+
+function setStartsWithWindows(on) {
+  try { app.setLoginItemSettings({ openAtLogin: !!on, args: [HIDDEN_FLAG] }); }
+  catch (e) {
+    dialog.showErrorBox('Marquee Optimizer', 'Could not change the startup setting.\n\n' + e.message);
+  }
+  buildTray(); // redraw, so the tick shows what actually happened rather than what was asked
+}
+
 function buildTray() {
-  tray = new Tray(trayIcon());
+  // Reused on redraw: a second `new Tray` leaves two icons in the notification
+  // area, both live, and only one of them ever goes away.
+  if (!tray) tray = new Tray(trayIcon());
   tray.setToolTip('Marquee Optimizer');
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: 'Open Marquee Optimizer', click: showWindow },
+    { type: 'separator' },
+    {
+      label: 'Start with Windows',
+      type: 'checkbox',
+      checked: startsWithWindows(),
+      click: (item) => setStartsWithWindows(item.checked)
+    },
     { type: 'separator' },
     {
       label: 'Open log folder',
@@ -164,8 +198,9 @@ if (!app.requestSingleInstanceLock()) {
       }
     }
 
-    // You double-clicked it, so it opens.
-    createWindow(true);
+    // Double-clicked, so it opens. Started by Windows at login, it does not:
+    // the tray icon is the only thing that should appear.
+    createWindow(!process.argv.includes(HIDDEN_FLAG));
   });
 
   // No windows open is normal here — it lives in the tray.
