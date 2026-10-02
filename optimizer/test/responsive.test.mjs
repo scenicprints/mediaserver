@@ -16,7 +16,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
-import { fingerprint } from '../duplicates.mjs';
+import { fingerprint } from '../fingerprint.mjs';
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'responsive-'));
 

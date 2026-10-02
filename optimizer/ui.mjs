@@ -3,13 +3,11 @@
 // Everything this program does was reachable only by typing node commands at
 // it, which is not a program so much as a set of instructions for operating
 // one. This is the interface: what it is doing, what it has done, what it has
-// given up on, and the one manual control — find duplicates, and delete the
-// copies you choose.
+// given up on, and which files it cannot read.
 //
 // It is served BY the watch process rather than being a second program. One
 // process means one database handle and no chance of the window and the worker
-// disagreeing about what is happening, or of a "drop" landing mid-encode from a
-// different connection.
+// disagreeing about what is happening.
 //
 // Deliberately not part of Marquee: separate program, separate port, separate
 // process. A crash here cannot take down playback, and the media server has no
@@ -18,16 +16,11 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import * as engine from './engine.mjs';
-import { findDuplicates, confirmDropSafe } from './duplicates.mjs';
 import { badFiles } from './badfiles.mjs';
 import { planMigration, writePlan, journalPlan, preflight, runMigration, migrationStatus } from './migrate.mjs';
 
-// Duplicate scanning reads real bytes across the library and takes minutes, so
-// it runs in the background and the page polls it. One at a time.
-const dupes = { running: false, done: 0, total: 0, groups: [], error: null, ranAt: 0 };
-
-// The pool migration, likewise: planning reads bytes and moving is hours. Both
-// are background jobs the page watches rather than requests it waits on.
+// The pool migration: planning reads bytes and moving takes hours, so it is a
+// background job the page watches rather than a request it waits on.
 const migration = {
   planning: false, running: false, stop: false,
   done: 0, total: 0, error: null,
@@ -93,8 +86,7 @@ export function startUI(db, {
             jobs: stk.jobs.slice(0, 40),
             probes: stk.probes.slice(0, 40)
           },
-          plan,
-          dupes: { running: dupes.running, done: dupes.done, total: dupes.total, error: dupes.error, ranAt: dupes.ranAt, count: dupes.groups.length }
+          plan
         });
       }
 
@@ -111,10 +103,6 @@ export function startUI(db, {
           }
         } catch { /* the log is a convenience, never a dependency */ }
         return json(res, 200, { text });
-      }
-
-      if (p === '/api/duplicates' && req.method === 'GET') {
-        return json(res, 200, { ...dupes, groups: dupes.groups });
       }
 
       // ---- Pool migration ------------------------------------------------
@@ -172,59 +160,6 @@ export function startUI(db, {
       if (p === '/api/migrate/stop' && req.method === 'POST') {
         migration.stop = true;
         return json(res, 200, { ok: true, note: 'will stop after the file in flight finishes' });
-      }
-
-      if (p === '/api/duplicates/scan' && req.method === 'POST') {
-        if (dupes.running) return json(res, 409, { error: 'already scanning' });
-        const body = await readBody(req);
-        dupes.running = true; dupes.error = null; dupes.done = 0; dupes.total = 0; dupes.groups = [];
-        // Not awaited: this is minutes of reading and the page polls for it.
-        (async () => {
-          try {
-            const r = await findDuplicates(db, {
-              log,
-              full: !!body.full,
-              onProgress: (n, total) => { dupes.done = n; dupes.total = total; }
-            });
-            // Pass the full description of every copy through. This used to
-            // send two bare paths, which is not enough for anyone to judge
-            // which copy to keep — and for a byte-identical pair the scoring
-            // could not tell them apart either.
-            dupes.groups = r.confirmed.map((d) => ({
-              title: d.title, size: d.size, reclaimable: d.reclaimable, is4k: d.is4k, note: d.note,
-              copies: d.copies, differs: d.differs
-            }));
-            dupes.ranAt = Date.now();
-          } catch (e) { dupes.error = e.message; }
-          finally { dupes.running = false; }
-        })();
-        return json(res, 202, { started: true });
-      }
-
-      if (p === '/api/drop' && req.method === 'POST') {
-        const body = await readBody(req);
-        const id = String(body.id || '');
-        if (!/^(movie|episode):\d+$/.test(id)) return json(res, 400, { error: 'bad id' });
-        const [kind, idStr] = id.split(':');
-        const fileId = parseInt(idStr, 10);
-
-        const row = db.prepare('SELECT path, size FROM media_info WHERE file_kind = ? AND file_id = ?').get(kind, fileId);
-        // Re-proved here, not trusted from the list on screen — that list may
-        // be minutes or days old and the library moves underneath it.
-        const check = await confirmDropSafe(db, kind, fileId);
-        if (!check.ok) return json(res, 409, { error: check.reason });
-
-        try { fs.rmSync(row.path, { force: true }); }
-        catch (e) { return json(res, 500, { error: 'could not delete: ' + e.message }); }
-
-        const table = kind === 'episode' ? 'episode_files' : 'movie_files';
-        try { db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(fileId); } catch { /* library row may already be gone */ }
-        try { db.prepare('DELETE FROM media_info WHERE file_kind = ? AND file_id = ?').run(kind, fileId); } catch {}
-
-        log(`Deleted duplicate ${path.basename(row.path)} (${GB(row.size)}); kept ${check.keeper.path}`);
-        // Take it off the list on screen as well.
-        for (const g of dupes.groups) g.drop = g.drop.filter((x) => x.id !== id);
-        return json(res, 200, { ok: true, freed: Number(row.size) || 0, keeper: check.keeper.path });
       }
 
       if (p === '/api/retry' && req.method === 'POST') {
@@ -286,40 +221,21 @@ export const PAGE = `<!doctype html>
   button:disabled { color:var(--ink3); cursor:default; }
   button.sig { background:var(--signal); border-color:var(--signal); color:#141416; }
   button.sig:hover:not(:disabled) { background:#C85410; border-color:#C85410; color:#fff; }
-  button.danger:hover:not(:disabled) { border-color:var(--signal); color:var(--signal); }
   .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
-  .dupe { border:1px solid var(--rule); background:var(--panel); padding:16px 18px; margin-bottom:1px; }
-  .dupe .h { display:flex; justify-content:space-between; gap:16px; align-items:baseline; }
-  .dupe .title { font-weight:600; font-size:15px; }
-  .dupe .size { color:var(--ink3); font-variant-numeric:tabular-nums; font-size:12px; letter-spacing:.1em; }
+  .card { border:1px solid var(--rule); background:var(--panel); padding:16px 18px; margin-bottom:1px; }
+  .card .h { display:flex; justify-content:space-between; gap:16px; align-items:baseline; }
+  .card .title { font-weight:600; font-size:15px; }
+  .card .size { color:var(--ink3); font-variant-numeric:tabular-nums; font-size:12px; letter-spacing:.1em; }
   .keepline, .dropline { display:flex; gap:12px; align-items:center; margin-top:10px; font-size:12.5px; }
   .tag { font-size:10px; font-weight:700; letter-spacing:.16em; padding:3px 8px; border:1px solid var(--rule); white-space:nowrap; }
   .tag.keep { color:var(--ink2); }
   .tag.drop { color:var(--signal); border-color:var(--signal); }
-  .tag.locked { color:var(--ink3); }
   .path { color:var(--ink2); word-break:break-all; font-family:ui-monospace,Consolas,monospace; font-size:11.5px; }
   .why { color:var(--ink3); font-size:11.5px; }
-  /* What the file is — stated once, because every copy in a group shares it. */
-  .spec { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:2px 22px;
-    margin:14px 0 12px; padding:12px 14px; background:var(--sunk); border:1px solid var(--rule); }
-  .spec > div { display:flex; gap:10px; align-items:baseline; min-width:0; }
-  .spec .k { color:var(--ink3); font-size:10px; letter-spacing:.16em; text-transform:uppercase; white-space:nowrap; }
-  .spec .v { color:var(--ink); font-size:12.5px; font-variant-numeric:tabular-nums; word-break:break-word; }
-  /* The verdict on how the copies relate. One signal colour, used for state. */
-  .differs { border-left:2px solid var(--signal); padding:8px 12px; margin-bottom:12px;
-    font-size:12px; color:var(--ink); background:var(--panel2); }
-  .same { border-left:2px solid var(--rule); padding:8px 12px; margin-bottom:12px;
-    font-size:12px; color:var(--ink3); }
-  .copy { border:1px solid var(--rule); padding:10px 12px; margin-top:8px; background:var(--panel2); }
-  .copy.rec { border-color:var(--ink3); }
-  .copyhead { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
-  .drive { font-size:11px; font-weight:700; letter-spacing:.14em; color:var(--signal); }
-  .fname { margin-top:6px; font-size:12.5px; color:var(--ink); word-break:break-all; }
   pre { background:var(--sunk); border:1px solid var(--rule); padding:14px 16px; margin:0;
     max-height:340px; overflow:auto; font-family:ui-monospace,Consolas,monospace; font-size:11.5px;
     color:var(--ink2); white-space:pre-wrap; word-break:break-word; }
   .empty { color:var(--ink3); padding:16px 18px; border:1px solid var(--rule); background:var(--panel); }
-  .warn { color:var(--signal); }
 </style></head>
 <body>
 <header>
@@ -347,16 +263,6 @@ export const PAGE = `<!doctype html>
     <span class="sub" id="mstate"></span>
   </div>
   <div id="migrate"></div>
-</section>
-
-<section>
-  <h2>Duplicates <span class="sub">— manual. Nothing here is automatic.</span></h2>
-  <div class="row" style="margin-bottom:14px">
-    <button id="scan" class="sig">Find duplicates</button>
-    <button id="scanfull">Find duplicates (full hash)</button>
-    <span class="sub" id="dupstate"></span>
-  </div>
-  <div id="dupes"></div>
 </section>
 
 <section>
@@ -429,68 +335,6 @@ function renderStats(s) {
     '<div class="cell"><div class="k">' + k + '</div><div class="v' + (sig?' sig':'') + '">' + esc(v) + '</div></div>').join('');
 }
 
-function renderDupes(d) {
-  if (d.running) {
-    $('dupstate').textContent = 'reading bytes — ' + d.done + ' of ' + d.total + ' candidate groups';
-    $('scan').disabled = true; $('scanfull').disabled = true;
-    return;
-  }
-  $('scan').disabled = false; $('scanfull').disabled = false;
-  if (d.error) { $('dupstate').innerHTML = '<span class="warn">' + esc(d.error) + '</span>'; return; }
-  if (!d.ranAt) { $('dupstate').textContent = 'not looked yet'; return; }
-
-  const groups = d.groups || [];
-  const total = groups.reduce((n,g) => n + (g.drop.length ? g.reclaimable : 0), 0);
-  $('dupstate').textContent = groups.length + ' genuine duplicate group(s)' + (total ? ' — ' + GB(total) + ' reclaimable' : '');
-  if (!groups.length) { $('dupes').innerHTML = '<div class="empty">Nothing is duplicated. Metadata matches were checked byte for byte and were different files.</div>'; return; }
-
-  $('dupes').innerHTML = groups.map((g) => {
-    const copies = g.copies || [];
-    const first = copies[0] || {};
-    // What the file IS. Identical across every copy — that is what made them a
-    // group — so it is stated once rather than repeated in every row.
-    const mins = first.duration ? Math.round(first.duration / 60) + ' min' : null;
-    const res = first.width && first.height ? first.width + '×' + first.height : null;
-    const vid = [first.vcodec, res, first.vkbps ? (Math.round(first.vkbps / 100) / 10) + ' Mbps' : null,
-                 first.hdr ? 'HDR' : null].filter(Boolean).join(' · ');
-    const aud = (first.audio || []).map((a) =>
-      [a.codec, a.ch ? a.ch + 'ch' : null, a.kbps ? a.kbps + 'k' : null, a.lang].filter(Boolean).join(' ')).join('  +  ');
-
-    const spec = '<div class="spec">' +
-      '<div><span class="k">Video</span><span class="v">' + esc(vid || '—') + '</span></div>' +
-      '<div><span class="k">Audio</span><span class="v">' + esc(aud || '—') + '</span></div>' +
-      '<div><span class="k">Runtime</span><span class="v">' + esc(mins || '—') + '</span></div>' +
-      '<div><span class="k">Each copy</span><span class="v">' + GB(g.size) + '</span></div>' +
-    '</div>';
-
-    // The honest headline: for a byte-identical group nothing differs except
-    // where the files live, and saying so beats a table of matching numbers.
-    const diff = (g.differs && g.differs.length)
-      ? '<div class="differs"><b>These copies differ:</b> ' +
-          g.differs.map((d) => esc(d.field) + ' (' + d.values.map((v) => esc(String(v))).join(' vs ') + ')').join(' · ') + '</div>'
-      : '<div class="same">Byte-for-byte identical — same picture, same sound, same everything. Only the location differs.</div>';
-
-    const rows = copies.map((c) => {
-      const tag = c.recommended
-        ? '<span class="tag keep">Keep</span>'
-        : (g.is4k ? '<span class="tag locked">4K — kept</span>'
-                  : '<button class="danger" data-drop="' + esc(c.id) + '">Delete</button>');
-      return '<div class="copy' + (c.recommended ? ' rec' : '') + '">' +
-        '<div class="copyhead">' + tag + '<span class="drive">' + esc(c.drive) + '</span>' +
-        '<span class="path">' + esc(c.folder) + '</span></div>' +
-        '<div class="fname">' + esc(c.filename) + '</div>' +
-        (c.reasons && c.reasons.length ? '<div class="why">' + esc(c.reasons.join(' · ')) + '</div>' : '') +
-      '</div>';
-    }).join('');
-
-    return '<div class="dupe"><div class="h"><span class="title">' + esc(g.title) + '</span>' +
-      '<span class="size">' + GB(g.reclaimable) + ' reclaimable' + (g.is4k ? ' · 4K' : '') + '</span></div>' +
-      spec + diff + rows +
-      (g.note ? '<div class="why">' + esc(g.note) + '</div>' : '') +
-    '</div>';
-  }).join('');
-}
-
 function renderStuck(s) {
   const k = s.stuck;
   $('stuckstate').textContent = k.retry + ' waiting to retry · ' + k.failed + ' given up on · ' + k.unreadable + ' unreadable';
@@ -499,7 +343,7 @@ function renderStuck(s) {
   for (const p of k.probes) rows.push(['Unreadable', String(p.path||'').split(/[\\\\/]/).pop(), p.probe_error]);
   $('stuck').innerHTML = rows.length
     ? rows.map(([tag,name,err]) =>
-        '<div class="dupe"><div class="keepline"><span class="tag ' + (tag==='Retry'?'keep':'drop') + '">' + tag + '</span>' +
+        '<div class="card"><div class="keepline"><span class="tag ' + (tag==='Retry'?'keep':'drop') + '">' + tag + '</span>' +
         '<span class="title" style="font-size:13px">' + esc(name) + '</span></div>' +
         '<div class="why">' + esc(String(err||'').split('\\n')[0].slice(0,220)) + '</div></div>').join('')
     : '<div class="empty">Nothing stuck.</div>';
@@ -522,7 +366,7 @@ async function renderBad() {
     (groups[g] = groups[g] || []).push(i);
   }
   $('bad').innerHTML = Object.entries(groups).map(([g, items]) =>
-    '<div class="dupe"><div class="h"><span class="title">' + esc(g) + '</span>' +
+    '<div class="card"><div class="h"><span class="title">' + esc(g) + '</span>' +
     '<span class="size">' + items.length + ' file(s)</span></div>' +
     items.map((i) =>
       '<div class="dropline"><span class="tag ' + (i.sizeMB === 0 ? 'drop' : 'keep') + '">' +
@@ -537,11 +381,6 @@ async function tick() {
     const s = await get('/api/status');
     $('head').textContent = s.worker.running ? 'working' : 'idle';
     renderNow(s); renderStats(s); renderStuck(s);
-    if (s.dupes.running) renderDupes(s.dupes);
-    else if (s.dupes.ranAt && s.dupes.ranAt !== window.__dupAt) {
-      window.__dupAt = s.dupes.ranAt;
-      renderDupes(await get('/api/duplicates'));
-    } else if (!s.dupes.ranAt) renderDupes(s.dupes);
     await renderBad();
     renderMigrate(await get('/api/migrate'));
     const l = await get('/api/log');
@@ -611,8 +450,6 @@ $('mgo').onclick = async () => {
   tick();
 };
 
-$('scan').onclick = async () => { await post('/api/duplicates/scan', {}); tick(); };
-$('scanfull').onclick = async () => { await post('/api/duplicates/scan', { full:true }); tick(); };
 $('copybad').onclick = async () => {
   const text = badCache.map((i) => i.what).join('\\n');
   try { await navigator.clipboard.writeText(text); $('copybad').textContent = 'Copied'; }
@@ -620,21 +457,6 @@ $('copybad').onclick = async () => {
   setTimeout(() => { $('copybad').textContent = 'Copy list'; }, 1800);
 };
 $('retry').onclick = async () => { const r = await post('/api/retry', {}); alert('Requeued ' + (r.data.jobs||0) + ' job(s).'); tick(); };
-
-document.addEventListener('click', async (e) => {
-  const b = e.target.closest('[data-drop]');
-  if (!b) return;
-  const id = b.getAttribute('data-drop');
-  const card = b.closest('.copy');
-  const folder = card.querySelector('.path').textContent;
-  const name = card.querySelector('.fname').textContent;
-  if (!confirm('Delete this copy?\\n\\n' + name + '\\n' + folder + '\\n\\nThe copy marked Keep stays. This cannot be undone.')) return;
-  b.disabled = true; b.textContent = 'checking';
-  const r = await post('/api/drop', { id });
-  if (!r.ok) { b.disabled = false; b.textContent = 'Delete'; alert('Refused: ' + (r.data.error || 'unknown')); return; }
-  card.remove();
-  tick();
-});
 
 tick();
 setInterval(tick, 3000);

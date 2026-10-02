@@ -26,8 +26,8 @@ const LOG_MAX = 8 * 1024 * 1024;
 // notices, it is already mid-encode on a 30 GB file.
 //
 // So the heavy work is confined to hours when nobody is realistically watching.
-// The application itself keeps running the whole time — the window, the log,
-// the duplicate finder are always there — only the encoding is scheduled.
+// The application itself keeps running the whole time — the window and the log
+// are always there — only the encoding is scheduled.
 const DEFAULT_WINDOW = { from: '00:00', to: '05:00' };
 
 // How many of each kind of job to line up per cycle. Separate numbers, because
@@ -301,7 +301,7 @@ export async function startEngine({ root, port = 8097 } = {}) {
     log(workWindow.always === true ? 'Working hours: around the clock.' : `Working hours: ${workWindow.from} to ${workWindow.to}.`);
     if (!withinWindow(workWindow)) {
       const mins = minutesUntilOpen(workWindow);
-      log(`Outside those hours — next run in ${Math.floor(mins / 60)}h ${mins % 60}m. The window and the duplicate finder work regardless.`);
+      log(`Outside those hours — next run in ${Math.floor(mins / 60)}h ${mins % 60}m. The window still works regardless.`);
     }
     for (;;) {
       try { await once(); } catch (e) { log('error: ' + (e && e.message ? e.message : e)); }

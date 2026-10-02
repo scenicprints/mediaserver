@@ -35,7 +35,7 @@
 // input, so the decisions can be reviewed before any file moves.
 import fs from 'node:fs';
 import path from 'node:path';
-import { fingerprint } from './duplicates.mjs';
+import { fingerprint } from './fingerprint.mjs';
 import { driveRank, copyNoClobberAsync, findCollisions } from './engine.mjs';
 
 // Longest prefix wins, so H:\4k is matched before H:\ would be.
