@@ -350,8 +350,8 @@ export function copyNoClobber(src, dst) {
  * window and runs the encoder, so the program would appear dead for hours.
  *
  * The same mistake — an async-looking function doing synchronous reads —
- * already shipped once in the duplicate finder and read to the owner as a
- * crash. See the note above fingerprint() in duplicates.mjs.
+ * already shipped once in the duplicate finder that used to live here, and read
+ * to the owner as a crash. See the note above fingerprint() in fingerprint.mjs.
  */
 export async function copyNoClobberAsync(src, dst) {
   const exists = await fs.promises.access(dst).then(() => true, () => false);
@@ -918,6 +918,28 @@ function freeSpaceOn(filePath) {
 // The files that hit this carry PGS (image) subtitles, where fonts do nothing.
 const DROP_ATTACHMENTS = ['-map', '-0:t?'];
 
+// How far the muxer may let streams drift apart before writing a packet anyway,
+// in microseconds.
+//
+// This was `0`, which does not mean "no buffering" - it means no limit:
+// libavformat keeps queueing packets until it holds one for every stream,
+// however long that takes. In these jobs the video is copied at disk speed while
+// an audio track is encoded in real time, so the video runs minutes ahead and
+// all of those packets wait in RAM for the audio to catch up.
+//
+// On a 2-hour 4K file that reached ~6 GB resident. This box has 15.9 GB, and on
+// 2026-09-24 it ran out of commit: qBittorrent, DrivePool's service, Explorer
+// and Defender all died inside the same second with 0xc00000fd - a stack
+// overflow, which is what a thread gets when no stack page can be committed.
+// The Incredible Hulk retried the same job four times across two days and never
+// finished it.
+//
+// One second is bounded and far more than ordinary A/V interleaving needs. The
+// only cost of a tighter limit is interleave tightness for sparse streams - PGS
+// subtitles with minutes between cues get written less neatly. The file stays
+// valid, and every verification gate downstream still has to pass.
+const MAX_INTERLEAVE = ['-max_interleave_delta', '1000000'];
+
 // Build the ffmpeg command for a profile.
 //
 // Audio profile: `-map 0 -c copy` keeps every stream — video, subtitles, chapters,
@@ -932,7 +954,7 @@ function buildArgs(info, plan, src, dst, { audioMode = 'convert', crf = null } =
   // times realtime. Uncapped it will pull as hard as the drive allows, which is
   // what these USB disks did not enjoy.
   if (throttle.readRate > 0) args.push('-readrate', String(throttle.readRate));
-  args.push('-i', src, '-map', '0', '-map', '-0:d?', ...DROP_ATTACHMENTS, '-max_interleave_delta', '0');
+  args.push('-i', src, '-map', '0', '-map', '-0:d?', ...DROP_ATTACHMENTS, ...MAX_INTERLEAVE);
   const doVideo = plan.profile === 'video' || plan.profile === 'both';
   const doAudio = plan.profile === 'audio' || plan.profile === 'both';
   if (doAudio && audioMode === 'drop') {
@@ -1630,7 +1652,7 @@ export async function addCompatibleAudio(db, kind, fileId, { log = () => {}, dry
     ...(throttle.readRate > 0 ? ['-readrate', String(throttle.readRate)] : []),
     '-i', src,
     '-map', '0', '-map', `0:a:${plan.srcIndex}`, '-map', '-0:d?', ...DROP_ATTACHMENTS,
-    '-max_interleave_delta', '0',
+    ...MAX_INTERLEAVE,
     '-c', 'copy',                                 // everything copied, including video
     `-c:a:${n}`, AUDIO_CODEC, `-b:a:${n}`, `${plan.channels > 2 ? AUDIO_KBPS : 320}k`,
     `-ac:a:${n}`, String(plan.channels),
