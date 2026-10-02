@@ -152,10 +152,6 @@ function buildTray() {
       label: 'Open log folder',
       click: () => shell.openPath(path.join(ROOT, 'data'))
     },
-    {
-      label: 'Files needing re-download',
-      click: () => shell.openPath(path.join(ROOT, 'data', 'needs-redownload.txt'))
-    },
     { type: 'separator' },
     { label: 'Quit', click: () => { quitting = true; app.quit(); } }
   ]));

@@ -35,12 +35,15 @@ const opts = {
   // security — anyone can unpack it — but it does stop the app looking like a
   // folder of loose script files.
   asar: true,
-  // Tests and build scripts are not part of the application.
+  // Tests, build scripts and one-off tooling are not part of the application.
   ignore: [
     /^\/test($|\/)/,
     /^\/build-exe\.mjs$/,
     /^\/build-app\.mjs$/,
     /^\/run\.mjs$/,          // the CLI stays a CLI; the app does not shell out to it
+    // Seven analysis scripts written for one afternoon each, against this
+    // machine's drive letters. They were being shipped to every user.
+    /^\/tools($|\/)/,
     /\.md$/
   ],
   win32metadata: {

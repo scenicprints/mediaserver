@@ -132,6 +132,13 @@ export function originalOf(tempPath) {
   return path.join(dir, base.slice(0, i) + ext);
 }
 
+/** The pid baked into a temp name, or null if it does not carry one. */
+export function pidOf(tempPath) {
+  const m = path.basename(tempPath).match(
+    new RegExp(TMP_SUFFIX.replace(/\./g, '\\.') + '\\.(\\d+)\\.'));
+  return m ? Number(m[1]) : null;
+}
+
 // Clear temp files left by runs that are no longer alive. Best-effort by
 // design: one that is still locked is skipped and tried again next time, which
 // is exactly right — it costs nothing and it cannot block the work.
@@ -167,6 +174,64 @@ export function sweepTempFiles(dir, { log = () => {} } = {}) {
     } catch { /* still held: leave it, we will try again next time */ }
   }
   return freed;
+}
+
+/**
+ * Sweep the whole library once, rather than a folder at a time.
+ *
+ * sweepTempFiles() above only ever looks in the folder of the job about to
+ * start, so a temp left by a killed run sits where it is until something else
+ * in that same directory happens to need encoding. That can be never. A run
+ * stopped mid-encode on a 4K film left 14 GB behind that way, and the comment on
+ * the swap below records nine films — 188 GiB — that waited in exactly this
+ * state. Called at startup, which is when leftovers exist and when nothing of
+ * ours is in flight yet.
+ *
+ * Folders come from the library itself, so it visits only places the optimizer
+ * has actually worked and never walks a whole drive.
+ *
+ * It keeps the same rule, which is the one that matters: a temp whose ORIGINAL
+ * IS MISSING is not litter, it is the only copy of that film, and deleting it is
+ * the data loss this is meant to clean up after. Those are left for
+ * recoverOrphanedTemps() and reported loudly here.
+ *
+ * It also skips anything carrying THIS process's pid. At startup there should be
+ * none, but pids are reused across reboots, and the one unacceptable outcome is
+ * a sweeper that deletes a live encode out from under the encoder.
+ */
+export function sweepLibraryTemps(db, { log = () => {} } = {}) {
+  ensureSchema(db);
+  const dirs = new Set();
+  for (const r of db.prepare('SELECT DISTINCT path FROM media_info').all()) {
+    try { dirs.add(path.dirname(r.path)); } catch { /* unusable row */ }
+  }
+
+  let freed = 0, cleared = 0;
+  const orphans = [];
+  for (const dir of dirs) {
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch { continue; }
+    for (const n of names) {
+      if (!n.includes(TMP_SUFFIX)) continue;
+      const p = path.join(dir, n);
+      if (pidOf(p) === process.pid) continue;          // ours, in flight
+
+      const orig = originalOf(p);
+      if (orig && !fs.existsSync(orig)) { orphans.push(p); continue; }
+
+      try {
+        const size = fs.statSync(p).size;
+        fs.rmSync(p, { force: true });
+        freed += size; cleared++;
+      } catch { /* held open by something: next startup will get it */ }
+    }
+  }
+
+  if (cleared) log(`Cleared ${cleared} leftover temp file(s), ${(freed / 2 ** 30).toFixed(2)} GiB.`);
+  for (const p of orphans) {
+    log(`KEEPING ${path.basename(p)} — the file it came from is gone, so this is the only copy. Recover it, do not delete it.`);
+  }
+  return { cleared, freed, orphans };
 }
 
 /**
@@ -1147,6 +1212,15 @@ export async function runQueue(db, { log = () => {}, allow4kVideo = false, allow
   if (revived) log(`Optimizer: requeued ${revived} job(s) left behind by an interrupted run.`);
 
   if (worker.running) return;
+
+  // Those same interrupted jobs each left a temp file behind, and the per-folder
+  // sweep further down only finds one if a later job happens to land in the same
+  // directory. Do it here instead, once, while nothing of ours is encoding.
+  if (revived) {
+    try { sweepLibraryTemps(db, { log }); }
+    catch (e) { log('Optimizer: could not sweep leftover temp files — ' + e.message); }
+  }
+
   worker.running = true; worker.stop = false;
 
   // Baseline for the disk-health watch: anything Windows logs from here on is
@@ -1245,6 +1319,10 @@ async function runJob(db, job, { log, allow4kVideo, allowHdrVideo }) {
         new_size: res.newSize, pct: 100, ended_at: Date.now(),
         reason: `added E-AC-3 surround; video bitstream verified identical (${res.beforeHash})`
       });
+    }
+    if (res.nothingToDo) {
+      note(`Left alone ${path.basename(info.path)} — ${res.error}`);
+      return setState('kept', { error: res.error, ended_at: Date.now() });
     }
     note(`FAILED ${path.basename(info.path)}: ${res.error}`);
     return setState('failed', { error: res.error, ended_at: Date.now() });
@@ -1416,7 +1494,11 @@ async function runJob(db, job, { log, allow4kVideo, allowHdrVideo }) {
     fs.rmSync(dst, { force: true });
     note(`REJECTED ${path.basename(src)}: ${bad} — original untouched.`);
     log(`Optimizer rejected ${path.basename(src)}: ${bad}`);
-    return setState('failed', { error: 'verification failed: ' + bad, ended_at: Date.now() });
+    // 'kept', not 'failed'. The gate did its job: the re-encode was not good
+    // enough and the original stayed. That is the program working, and listing
+    // it under "given up on" told the owner 700 of their files were broken when
+    // in fact 700 of their files were already as good as they can be.
+    return setState('kept', { error: 'kept the original: ' + bad, ended_at: Date.now() });
   }
 
   // Verified. Replace the source, keeping its exact name where possible so
@@ -1601,7 +1683,10 @@ export async function addCompatibleAudio(db, kind, fileId, { log = () => {}, dry
   if (!fs.existsSync(src)) return { ok: false, error: 'file is gone' };
 
   const plan = planAddAudio(info);
-  if (!plan.need) return { ok: false, error: plan.reason };
+  // Not a failure. The file is already fine, which is the outcome this whole
+  // feature is trying to reach — flagged so the caller records a decision
+  // rather than a fault. See the `kept` state in runJob().
+  if (!plan.need) return { ok: false, nothingToDo: true, error: plan.reason };
 
   const st = fs.statSync(src);
   if (st.size !== Number(info.size)) return { ok: false, error: 'file changed since it was probed — rescan first' };
@@ -1862,15 +1947,22 @@ export function stuck(db) {
 // own judgement, so it is deliberate and explicit: nothing here happens on its
 // own, and a job that was rejected on QUALITY is only reconsidered when asked
 // for by id.
+//
+// `kept` has to be reachable from here even though it is not a failure. It is
+// where a quality rejection now lands, and "reconsider the ones you judged" is
+// exactly what --judged means — lowering the pass mark and asking again is a
+// real thing the owner does. Without it in this list, --judged would silently
+// have nothing to work on.
 export function retryStuck(db, { id = 0, includeJudged = false } = {}) {
   ensureSchema(db);
   const reset = (where, args) => db.prepare(
     `UPDATE optimize_jobs SET state='queued', attempts=0, next_try_at=NULL, error=NULL, pct=0 ${where}`).run(...args).changes;
 
-  if (id) return { jobs: reset('WHERE id = ? AND state IN (\'failed\',\'retry\')', [id]), probes: 0 };
+  if (id) return { jobs: reset("WHERE id = ? AND state IN ('failed','retry','kept')", [id]), probes: 0 };
 
+  const states = includeJudged ? "('failed','retry','kept')" : "('failed','retry')";
   let jobs = 0;
-  for (const r of db.prepare("SELECT id, error FROM optimize_jobs WHERE state IN ('failed','retry')").all()) {
+  for (const r of db.prepare(`SELECT id, error FROM optimize_jobs WHERE state IN ${states}`).all()) {
     if (!includeJudged && !isRetryableFailure(String(r.error || '').replace(/^gave up after \d+ attempts: /, ''))) continue;
     jobs += reset('WHERE id = ?', [r.id]);
   }

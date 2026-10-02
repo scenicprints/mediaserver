@@ -14,7 +14,6 @@ import { DatabaseSync } from 'node:sqlite';
 import * as engine from './engine.mjs';
 import * as ff from './ffmpeg.mjs';
 import { startUI } from './ui.mjs';
-import { writeBadFileList } from './badfiles.mjs';
 
 const LOG_MAX = 8 * 1024 * 1024;
 
@@ -144,7 +143,6 @@ function takeEngineLock(lockPath, { onStale = () => {} } = {}) {
 
 export async function startEngine({ root, port = 8097 } = {}) {
   const LOG_FILE = path.join(root, 'data', 'optimizer.log');
-  const BAD_LIST = path.join(root, 'data', 'needs-redownload.txt');
 
   function log(m) {
     const line = `[${stamp()}] ${m}`;
@@ -244,8 +242,6 @@ export async function startEngine({ root, port = 8097 } = {}) {
     // Scanning is cheap — it reads headers, not whole files — so the library
     // stays up to date around the clock. Only the encoding is scheduled.
     await engine.runProbeScan(db, { log });
-    const bad = writeBadFileList(db, BAD_LIST);
-    if (bad.length) log(`${bad.length} file(s) need re-downloading — see ${BAD_LIST}`);
 
     if (!withinWindow(workWindow)) return;
 

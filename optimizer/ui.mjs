@@ -16,7 +16,6 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import * as engine from './engine.mjs';
-import { badFiles } from './badfiles.mjs';
 
 const GB = (b) => (Number(b) / 2 ** 30).toFixed(2) + ' GB';
 
@@ -78,10 +77,6 @@ export function startUI(db, {
           },
           plan
         });
-      }
-
-      if (p === '/api/badfiles') {
-        return json(res, 200, { items: badFiles(db) });
       }
 
       if (p === '/api/log') {
@@ -188,15 +183,6 @@ export const PAGE = `<!doctype html>
 </section>
 
 <section>
-  <h2>Needs re-downloading <span class="sub">— files that cannot be read</span></h2>
-  <div class="row" style="margin-bottom:14px">
-    <button id="copybad">Copy list</button>
-    <span class="sub" id="badstate"></span>
-  </div>
-  <div id="bad"></div>
-</section>
-
-<section>
   <h2>Stuck</h2>
   <div class="row" style="margin-bottom:14px">
     <button id="retry">Try these again</button>
@@ -247,9 +233,12 @@ function renderStats(s) {
   const cells = [
     ['Reclaimed', GB(s.reclaimedBytes), true],
     ['Queued', (q.queued||0) + (q.retry||0), false],
-    ['Done', q.done||0, false],
-    ['Files', s.scannable.toLocaleString(), false],
-    ['Unreadable', s.stuck.unreadable, false]
+    ['Shrunk', q.done||0, false],
+    // Files the program looked at and chose to leave alone — either already
+    // playable everywhere, or the re-encode was not good enough to keep. This
+    // is a result, not a problem, and it used to be reported as 800 failures.
+    ['Left as they were', (q.kept||0) + (q.skipped||0), false],
+    ['Files', s.scannable.toLocaleString(), false]
   ];
   if (s.plan) cells.push(['Still to reclaim', GB(s.plan.totalBytes), false]);
   cells.push(['Hardware encode', s.nvenc ? 'Yes' : 'CPU only', false]);
@@ -257,45 +246,29 @@ function renderStats(s) {
     '<div class="cell"><div class="k">' + k + '</div><div class="v' + (sig?' sig':'') + '">' + esc(v) + '</div></div>').join('');
 }
 
+// Only things that actually went wrong. A file the program decided to leave
+// alone is in 'kept' and never reaches here, which is the point: this list is
+// for faults someone may need to act on, and when it is padded with 800
+// correct decisions nobody reads it at all.
 function renderStuck(s) {
   const k = s.stuck;
-  $('stuckstate').textContent = k.retry + ' waiting to retry · ' + k.failed + ' given up on · ' + k.unreadable + ' unreadable';
+  const total = k.failed + k.retry + k.unreadable;
+  $('stuckstate').textContent = total === 0
+    ? 'nothing went wrong'
+    : [k.retry ? k.retry + ' waiting to retry' : null,
+       k.failed ? k.failed + ' gave up' : null,
+       k.unreadable ? k.unreadable + ' unreadable' : null].filter(Boolean).join(' · ');
   const rows = [];
   for (const j of k.jobs) rows.push([j.state === 'retry' ? 'Retry' : 'Gave up', String(j.path||'').split(/[\\\\/]/).pop(), j.error]);
+  // A file that will not even probe is a genuine fault, so it belongs in this
+  // list rather than in a panel of its own.
   for (const p of k.probes) rows.push(['Unreadable', String(p.path||'').split(/[\\\\/]/).pop(), p.probe_error]);
   $('stuck').innerHTML = rows.length
     ? rows.map(([tag,name,err]) =>
         '<div class="card"><div class="keepline"><span class="tag ' + (tag==='Retry'?'keep':'drop') + '">' + tag + '</span>' +
         '<span class="title" style="font-size:13px">' + esc(name) + '</span></div>' +
         '<div class="why">' + esc(String(err||'').split('\\n')[0].slice(0,220)) + '</div></div>').join('')
-    : '<div class="empty">Nothing stuck.</div>';
-}
-
-let badCache = [];
-async function renderBad() {
-  const r = await get('/api/badfiles');
-  badCache = r.items || [];
-  const empties = badCache.filter((i) => i.sizeMB === 0).length;
-  $('badstate').textContent = badCache.length
-    ? badCache.length + ' file(s)' + (empties ? ' · ' + empties + ' are 0 bytes' : '')
-    : 'nothing broken';
-  if (!badCache.length) { $('bad').innerHTML = '<div class="empty">Every file in the library reads.</div>'; return; }
-
-  // Grouped by show, because a broken season is one job rather than twelve.
-  const groups = {};
-  for (const i of badCache) {
-    const g = i.what.includes(' - S') ? i.what.slice(0, i.what.indexOf(' - S')) : 'Films';
-    (groups[g] = groups[g] || []).push(i);
-  }
-  $('bad').innerHTML = Object.entries(groups).map(([g, items]) =>
-    '<div class="card"><div class="h"><span class="title">' + esc(g) + '</span>' +
-    '<span class="size">' + items.length + ' file(s)</span></div>' +
-    items.map((i) =>
-      '<div class="dropline"><span class="tag ' + (i.sizeMB === 0 ? 'drop' : 'keep') + '">' +
-      (i.sizeMB === 0 ? 'Empty' : 'Damaged') + '</span>' +
-      '<span class="path">' + esc(i.what) + '</span></div>' +
-      '<div class="why">' + esc(i.why) + '</div>').join('') +
-    '</div>').join('');
+    : '<div class="empty">Nothing went wrong.</div>';
 }
 
 async function tick() {
@@ -303,19 +276,12 @@ async function tick() {
     const s = await get('/api/status');
     $('head').textContent = s.worker.running ? 'working' : 'idle';
     renderNow(s); renderStats(s); renderStuck(s);
-    await renderBad();
     const l = await get('/api/log');
     $('log').textContent = l.text || 'nothing logged yet';
     $('log').scrollTop = $('log').scrollHeight;
   } catch (e) { $('head').textContent = 'not running'; }
 }
 
-$('copybad').onclick = async () => {
-  const text = badCache.map((i) => i.what).join('\\n');
-  try { await navigator.clipboard.writeText(text); $('copybad').textContent = 'Copied'; }
-  catch { $('copybad').textContent = 'Could not copy'; }
-  setTimeout(() => { $('copybad').textContent = 'Copy list'; }, 1800);
-};
 $('retry').onclick = async () => { const r = await post('/api/retry', {}); alert('Requeued ' + (r.data.jobs||0) + ' job(s).'); tick(); };
 
 tick();

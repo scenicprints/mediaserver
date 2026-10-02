@@ -28,7 +28,6 @@ import { DatabaseSync } from 'node:sqlite';
 import * as ff from './ffmpeg.mjs';
 import * as engine from './engine.mjs';
 import { startUI } from './ui.mjs';
-import { writeBadFileList } from './badfiles.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const cmd = process.argv[2] || 'status';
@@ -122,16 +121,11 @@ engine.setThrottle({
   ...(config.optimizeThrottle || {})
 });
 
-const BAD_LIST = path.join(ROOT, 'data', 'needs-redownload.txt');
 
 async function doScan() {
   const before = db.prepare('SELECT COUNT(*) n FROM media_info').get().n;
   const n = await engine.runProbeScan(db, { log });
   const total = engine.scannableFiles(db).length;
-  // Anything unreadable becomes a re-download list a person can act on, kept
-  // current on every scan rather than accumulating stale entries.
-  const bad = writeBadFileList(db, BAD_LIST);
-  if (bad.length) log(bad.length + " file(s) need re-downloading — see " + BAD_LIST);
   log(n ? `probed ${n} file(s) — ${before + n} of ${total} known` : `nothing new (${before} of ${total} already known)`);
   return n;
 }
