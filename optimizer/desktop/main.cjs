@@ -16,25 +16,39 @@
 const { app, BrowserWindow, Tray, Menu, nativeImage, shell, dialog } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
+const { rootProblems, loadSavedRoot, saveRoot } = require('./locate.cjs');
 
-const ROOT = findRoot();
-const PORT = readPort();
+// Not const: setup can change where the library is, and everything downstream
+// reads these.
+let ROOT = findRoot();
+let PORT = readPort();
 
 let win = null;
 let tray = null;
 let engineStarted = false;
 let quitting = false;
 
+// Where the owner's answer is remembered, if they had to be asked.
+//
+// userData, not beside the executable: a packaged app can sit in Program Files,
+// which is not writable, and a setup step that cannot save its own answer would
+// ask the same question at every launch.
+function savedRootFile() {
+  return path.join(app.getPath('userData'), 'library-location.json');
+}
+
 function findRoot() {
   // Packaged, the app sits in its own folder; in development it is run from the
-  // project. Both are checked so neither needs configuring.
+  // project. Both are checked so neither needs configuring. A location the owner
+  // chose during setup wins over all of them.
   const candidates = [
+    loadSavedRoot(savedRootFile()),
     path.resolve(path.dirname(app.getPath('exe')), '..'),
     path.dirname(app.getPath('exe')),
     'C:\\mediaserver',
     path.resolve(__dirname, '..', '..'),
     process.cwd()
-  ];
+  ].filter(Boolean);
   for (const c of candidates) if (fs.existsSync(path.join(c, 'config.json'))) return c;
   return path.resolve(__dirname, '..', '..');
 }
@@ -42,6 +56,75 @@ function findRoot() {
 function readPort() {
   try { return JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8')).optimizerUiPort || 8097; }
   catch { return 8097; }
+}
+
+/**
+ * Ask for the Marquee folder until it points at something usable, or the owner
+ * quits.
+ *
+ * Before this, a wrong guess at the location produced "No library database at
+ * ..." in an error box and then an application that sat in the tray doing
+ * nothing, with no way to correct it short of editing JSON by hand. Which is
+ * fine for the machine it was written on and useless for anybody else.
+ *
+ * Returns true if the engine can now start.
+ */
+async function runSetup() {
+  if (!rootProblems(ROOT).length) return true;
+
+  for (;;) {
+    const problems = rootProblems(ROOT);
+    const r = await dialog.showMessageBox({
+      type: 'warning',
+      title: 'Marquee Optimizer — setup',
+      message: 'Point the optimizer at your Marquee folder',
+      detail:
+        'The optimizer works on the library Marquee has already scanned, so it ' +
+        'needs the folder Marquee is installed in — the one containing ' +
+        'config.json and data\\library.db.\n\n' +
+        'Tried: ' + ROOT + '\n\n' + problems.join('\n'),
+      buttons: ['Choose folder…', 'Quit'],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true
+    });
+    if (r.response !== 0) return false;
+
+    const picked = await dialog.showOpenDialog({
+      title: 'Where is Marquee installed?',
+      properties: ['openDirectory'],
+      defaultPath: fs.existsSync(ROOT) ? ROOT : undefined
+    });
+    if (picked.canceled || !picked.filePaths.length) continue;
+
+    const dir = picked.filePaths[0];
+    const bad = rootProblems(dir);
+    if (bad.length) {
+      await dialog.showMessageBox({
+        type: 'error',
+        title: 'Marquee Optimizer — setup',
+        message: 'That folder will not work',
+        detail: dir + '\n\n' + bad.join('\n'),
+        buttons: ['Try again'],
+        noLink: true
+      });
+      continue;
+    }
+
+    ROOT = dir;
+    PORT = readPort();
+    if (!saveRoot(savedRootFile(), dir)) {
+      await dialog.showMessageBox({
+        type: 'warning',
+        title: 'Marquee Optimizer',
+        message: 'Carrying on, but this will be asked again next time',
+        detail: 'The choice could not be saved to ' + savedRootFile(),
+        buttons: ['OK'],
+        noLink: true
+      });
+    }
+    return true;
+  }
 }
 
 // The tray icon, drawn rather than shipped as a file: a Braun-orange square on
@@ -120,6 +203,48 @@ function showWindow() {
 // nobody asked for. Launched by hand it still opens, because then you did ask.
 const HIDDEN_FLAG = '--hidden';
 
+// Pick a different Marquee folder, then restart into it.
+async function changeLibraryFolder() {
+  const picked = await dialog.showOpenDialog({
+    title: 'Where is Marquee installed?',
+    properties: ['openDirectory'],
+    defaultPath: fs.existsSync(ROOT) ? ROOT : undefined
+  });
+  if (picked.canceled || !picked.filePaths.length) return;
+
+  const dir = picked.filePaths[0];
+  const bad = rootProblems(dir);
+  if (bad.length) {
+    await dialog.showMessageBox({
+      type: 'error', title: 'Marquee Optimizer', noLink: true,
+      message: 'That folder will not work',
+      detail: dir + '\n\n' + bad.join('\n'),
+      buttons: ['OK']
+    });
+    return;
+  }
+  if (dir === ROOT) return;
+
+  const r = await dialog.showMessageBox({
+    type: 'question', title: 'Marquee Optimizer', noLink: true,
+    message: 'Restart the optimizer on the new folder?',
+    detail: 'Any job in progress stops and is picked up again afterwards — the ' +
+            'file being written is a temp file beside the original, and the ' +
+            'original is only replaced once a job passes its checks.\n\n' + dir,
+    buttons: ['Restart', 'Cancel'],
+    defaultId: 0, cancelId: 1
+  });
+  if (r.response !== 0) return;
+
+  if (!saveRoot(savedRootFile(), dir)) {
+    dialog.showErrorBox('Marquee Optimizer', 'Could not save the choice to ' + savedRootFile());
+    return;
+  }
+  quitting = true;
+  app.relaunch();
+  app.quit();
+}
+
 function startsWithWindows() {
   try { return app.getLoginItemSettings({ args: [HIDDEN_FLAG] }).openAtLogin; }
   catch { return false; }
@@ -152,6 +277,13 @@ function buildTray() {
       label: 'Open log folder',
       click: () => shell.openPath(path.join(ROOT, 'data'))
     },
+    // The chosen folder has to be correctable. Once saved it wins over every
+    // other candidate, so if Marquee moves — or the wrong folder was picked —
+    // the alternative is finding and deleting a JSON file in AppData.
+    //
+    // Changing it means the engine is already holding the old database, so this
+    // saves and restarts rather than pretending it can be swapped underneath.
+    { label: 'Change library folder…', click: changeLibraryFolder },
     { type: 'separator' },
     { label: 'Quit', click: () => { quitting = true; app.quit(); } }
   ]));
@@ -167,6 +299,14 @@ if (!app.requestSingleInstanceLock()) {
   app.on('second-instance', showWindow);
 
   app.whenReady().then(async () => {
+    // Before anything else: can this even find a library? If not, ask — and if
+    // the answer is "quit", quit, rather than sitting in the tray pretending.
+    //
+    // Deliberately ahead of the tray and the window. A tray icon that claims the
+    // optimizer is running, over an engine that never started, is the failure
+    // this replaces.
+    if (!(await runSetup())) { quitting = true; app.quit(); return; }
+
     buildTray();
 
     // Engine FIRST, window second. The window points at a server this process
