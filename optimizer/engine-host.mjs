@@ -14,6 +14,8 @@ import { DatabaseSync } from 'node:sqlite';
 import * as engine from './engine.mjs';
 import * as ff from './ffmpeg.mjs';
 import { startUI } from './ui.mjs';
+import { readSettings } from './settings.mjs';
+import { setVmaf } from './vmaf.mjs';
 
 const LOG_MAX = 8 * 1024 * 1024;
 
@@ -169,6 +171,11 @@ export async function startEngine({ root, port = 8097 } = {}) {
   const cfgPath = path.join(root, 'config.json');
   const config = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
 
+  // Read on every use rather than captured once, so changing a setting in the
+  // window takes effect on the next cycle instead of at the next restart. The
+  // file is tiny and this is asked a few times an hour.
+  const settings = () => readSettings(root);
+
   const dbPath = path.resolve(root, config.dbPath || './data/library.db');
   if (!fs.existsSync(dbPath)) throw new Error(`No library database at ${dbPath}`);
   const db = new DatabaseSync(dbPath);
@@ -177,6 +184,11 @@ export async function startEngine({ root, port = 8097 } = {}) {
   const st = await ff.detect(root, config);
   if (!st.available) throw new Error('ffmpeg not found — nothing can run');
   log(`ffmpeg ready, hardware encoding ${st.nvenc ? 'available' : 'NOT available (CPU only)'}`);
+
+  // The pass mark is a module-level value in vmaf.mjs, so it is pushed in rather
+  // than read. Re-applied whenever settings are saved; see /api/settings.
+  const applyVmaf = () => setVmaf({ min: settings().vmafPassMark });
+  applyVmaf();
 
   const policy = {
     allow4kVideo: config.optimizeAllow4kVideo === true,
@@ -196,10 +208,12 @@ export async function startEngine({ root, port = 8097 } = {}) {
     ...(config.optimizeThrottle || {})
   });
 
-  startUI(db, { port, logFile: LOG_FILE, policy, log });
+  startUI(db, { port, logFile: LOG_FILE, policy, log, root, onSettingsSaved: applyVmaf });
 
   const profiles = Array.isArray(config.optimizeAutoProfiles) ? config.optimizeAutoProfiles : ['audio'];
-  const workWindow = { ...DEFAULT_WINDOW, ...(config.optimizeWindow || {}) };
+  // The working window is read fresh on each check (see withinWindow calls),
+  // so turning "around the clock" on or off in the window takes effect at once.
+  const workWindow = () => ({ ...DEFAULT_WINDOW, ...(settings().optimizeWindow || {}) });
   // Healthiest drive first. See setDriveOrder in engine.mjs for why this is a
   // stated judgement rather than a measurement.
   engine.setDriveOrder(config.optimizeDriveOrder || []);
@@ -218,7 +232,12 @@ export async function startEngine({ root, port = 8097 } = {}) {
   // machine. The one exception is a server that is not running at all, which
   // genuinely means nobody is watching.
   async function someoneWatching() {
-    const p = config.port || 8096;
+    // Turned off, so there is nothing to ask and nothing to wait for. This is
+    // the switch for a machine with no Marquee on it: the check below fails
+    // closed, which for anyone running Plex, Jellyfin or nothing at all means an
+    // optimizer that never does a single job and only says "standing down".
+    if (settings().pauseWhileWatching === false) return false;
+    const p = settings().mediaServerPort || config.port || 8096;
     try {
       const res = await fetch(`http://127.0.0.1:${p}/api/local/activity`, { signal: AbortSignal.timeout(3000) });
       if (res.ok) {
@@ -243,10 +262,10 @@ export async function startEngine({ root, port = 8097 } = {}) {
     // stays up to date around the clock. Only the encoding is scheduled.
     await engine.runProbeScan(db, { log });
 
-    if (!withinWindow(workWindow)) return;
+    if (!withinWindow(workWindow())) return;
 
     for (;;) {
-      if (!withinWindow(workWindow)) { log('outside the working hours — stopping for tonight'); return; }
+      if (!withinWindow(workWindow())) { log('outside the working hours — stopping for tonight'); return; }
       if (await someoneWatching() === true) { log('someone is watching — standing down'); return; }
       // The two halves of this program get SEPARATE budgets.
       //
@@ -284,7 +303,7 @@ export async function startEngine({ root, port = 8097 } = {}) {
       // window closing. Either returns the file in flight to the queue with its
       // temp cleaned up, so nothing is left half-done at five in the morning.
       const watcher = setInterval(async () => {
-        if (!withinWindow(workWindow)) { log('working hours are over — finishing up'); engine.worker.stop = true; return; }
+        if (!withinWindow(workWindow())) { log('working hours are over — finishing up'); engine.worker.stop = true; return; }
         if (await someoneWatching() === true) engine.worker.stop = true;
       }, 20000);
       try { await engine.runQueue(db, { log, ...policy }); } finally { clearInterval(watcher); }
@@ -294,9 +313,10 @@ export async function startEngine({ root, port = 8097 } = {}) {
   // Deliberately not awaited: the host has a window to put on screen and must
   // not sit behind a library scan to do it.
   (async () => {
-    log(workWindow.always === true ? 'Working hours: around the clock.' : `Working hours: ${workWindow.from} to ${workWindow.to}.`);
-    if (!withinWindow(workWindow)) {
-      const mins = minutesUntilOpen(workWindow);
+    const w = workWindow();
+    log(w.always === true ? 'Working hours: around the clock.' : `Working hours: ${w.from} to ${w.to}.`);
+    if (!withinWindow(w)) {
+      const mins = minutesUntilOpen(w);
       log(`Outside those hours — next run in ${Math.floor(mins / 60)}h ${mins % 60}m. The window still works regardless.`);
     }
     for (;;) {
@@ -306,5 +326,5 @@ export async function startEngine({ root, port = 8097 } = {}) {
     }
   })();
 
-  return { db, log, port, window: workWindow, withinWindow: () => withinWindow(workWindow) };
+  return { db, log, port, window: workWindow, withinWindow: () => withinWindow(workWindow()) };
 }

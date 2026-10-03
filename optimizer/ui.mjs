@@ -16,6 +16,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import * as engine from './engine.mjs';
+import { readSettings, writeSettings, SETTING_NAMES } from './settings.mjs';
 
 const GB = (b) => (Number(b) / 2 ** 30).toFixed(2) + ' GB';
 
@@ -37,7 +38,9 @@ export function startUI(db, {
   port = 8097,
   logFile = null,
   policy = {},
-  log = () => {}
+  log = () => {},
+  root = null,
+  onSettingsSaved = () => {}
 } = {}) {
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
@@ -94,6 +97,29 @@ export function startUI(db, {
         const body = await readBody(req);
         const r = engine.retryStuck(db, { id: Number(body.id) || 0, includeJudged: !!body.judged });
         return json(res, 200, r);
+      }
+
+      // ---- Settings --------------------------------------------------------
+      // Only the keys settings.mjs knows about can be written, and each one is
+      // validated there. A rejected value returns 400 with the reason and
+      // changes nothing, rather than being quietly clamped into something the
+      // owner did not ask for.
+      if (p === '/api/settings' && req.method === 'GET') {
+        if (!root) return json(res, 200, { unavailable: true });
+        return json(res, 200, readSettings(root));
+      }
+
+      if (p === '/api/settings' && req.method === 'POST') {
+        if (!root) return json(res, 503, { error: 'settings are not available in this build' });
+        const body = await readBody(req);
+        try {
+          const now = writeSettings(root, body);
+          onSettingsSaved(now);            // the pass mark lives in a module, so it is pushed
+          log('Settings changed: ' + Object.keys(body).filter((k) => SETTING_NAMES.includes(k)).join(', '));
+          return json(res, 200, now);
+        } catch (e) {
+          return json(res, 400, { error: e.message });
+        }
       }
 
       res.writeHead(404, { 'content-type': 'text/plain' });
@@ -164,6 +190,19 @@ export const PAGE = `<!doctype html>
     max-height:340px; overflow:auto; font-family:ui-monospace,Consolas,monospace; font-size:11.5px;
     color:var(--ink2); white-space:pre-wrap; word-break:break-word; }
   .empty { color:var(--ink3); padding:16px 18px; border:1px solid var(--rule); background:var(--panel); }
+  /* Settings. Each switch carries its own explanation, because the ones here
+     change whether the program does anything at all and a bare label would
+     leave the owner guessing. */
+  .opt { display:flex; gap:12px; align-items:flex-start; padding:10px 0; }
+  .opt + .opt { border-top:1px solid var(--rule); }
+  .opt input[type=checkbox] { margin-top:3px; width:15px; height:15px; accent-color:var(--signal); flex:none; }
+  .opt b { display:block; font-weight:600; font-size:13.5px; }
+  .opt i { display:block; color:var(--ink3); font-size:11.5px; font-style:normal; margin-top:3px; max-width:70ch; }
+  .fields { display:flex; gap:20px; flex-wrap:wrap; align-items:baseline; }
+  .fields label { color:var(--ink3); font-size:11px; letter-spacing:.14em; text-transform:uppercase; }
+  .fields input { background:var(--sunk); border:1px solid var(--rule); color:var(--ink); padding:6px 8px;
+    font-family:ui-monospace,Consolas,monospace; font-size:12.5px; margin-left:8px; }
+  .fields input:focus { outline:none; border-color:var(--signal); }
 </style></head>
 <body>
 <header>
@@ -189,6 +228,40 @@ export const PAGE = `<!doctype html>
     <span class="sub" id="stuckstate"></span>
   </div>
   <div id="stuck"></div>
+</section>
+
+<section>
+  <h2>Settings</h2>
+  <div id="settings" class="card">
+    <label class="opt">
+      <input type="checkbox" id="s_pause">
+      <span>
+        <b>Pause while someone is watching</b>
+        <i>Asks the media server before starting work. Turn this off if you do not
+        run Marquee — the check treats "no answer" as "someone is watching", so
+        with another server, or none, nothing will ever run.</i>
+      </span>
+    </label>
+    <label class="opt">
+      <input type="checkbox" id="s_always">
+      <span>
+        <b>Work around the clock</b>
+        <i>Off means only between the hours below. Encoding is heavy; playback always wins either way.</i>
+      </span>
+    </label>
+    <div class="opt">
+      <span class="fields">
+        <label>From <input type="text" id="s_from" size="5" placeholder="00:00"></label>
+        <label>To <input type="text" id="s_to" size="5" placeholder="05:00"></label>
+        <label>Media server port <input type="text" id="s_port" size="6" placeholder="8096"></label>
+        <label>Quality pass mark <input type="text" id="s_vmaf" size="5" placeholder="95"></label>
+      </span>
+    </div>
+    <div class="row" style="margin-top:4px">
+      <button id="ssave" class="sig">Save</button>
+      <span class="sub" id="sstate"></span>
+    </div>
+  </div>
 </section>
 
 <section>
@@ -284,6 +357,37 @@ async function tick() {
 
 $('retry').onclick = async () => { const r = await post('/api/retry', {}); alert('Requeued ' + (r.data.jobs||0) + ' job(s).'); tick(); };
 
+// ---- Settings ----------------------------------------------------------
+// Loaded once rather than on every poll: the fields are editable, and
+// overwriting them three seconds into someone typing is its own bug.
+async function loadSettings() {
+  const s = await get('/api/settings');
+  if (s.unavailable) { $('settings').innerHTML = '<div class="empty">Settings are not available in this build.</div>'; return; }
+  $('s_pause').checked = s.pauseWhileWatching !== false;
+  $('s_always').checked = !!(s.optimizeWindow && s.optimizeWindow.always);
+  $('s_from').value = (s.optimizeWindow && s.optimizeWindow.from) || '00:00';
+  $('s_to').value = (s.optimizeWindow && s.optimizeWindow.to) || '05:00';
+  $('s_port').value = s.mediaServerPort || 8096;
+  $('s_vmaf').value = s.vmafPassMark != null ? s.vmafPassMark : 95;
+}
+
+$('ssave').onclick = async () => {
+  $('ssave').disabled = true;
+  $('sstate').textContent = 'saving…';
+  const r = await post('/api/settings', {
+    pauseWhileWatching: $('s_pause').checked,
+    mediaServerPort: $('s_port').value.trim(),
+    vmafPassMark: $('s_vmaf').value.trim(),
+    optimizeWindow: { always: $('s_always').checked, from: $('s_from').value.trim(), to: $('s_to').value.trim() }
+  });
+  $('ssave').disabled = false;
+  if (!r.ok) { $('sstate').innerHTML = '<span class="tag drop">' + esc(r.data.error || 'could not save') + '</span>'; return; }
+  $('sstate').textContent = 'saved';
+  await loadSettings();                       // show what was actually stored
+  setTimeout(() => { $('sstate').textContent = ''; }, 2500);
+};
+
+loadSettings();
 tick();
 setInterval(tick, 3000);
 </script>
