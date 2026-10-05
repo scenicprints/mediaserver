@@ -203,7 +203,14 @@ filters, instant scrolling, 12-card rows, per-row layout+paint containment); nat
   played-to-end event, which on a server-transcoded HLS stream can come long after the
   picture runs out; the player now ends itself at the FILE's runtime (from `/api/play`,
   never the title's stored duration, which can belong to another cut) or on a stall in
-  the last six seconds while not paused.
+  the last six seconds while not paused. (5) **Audio track = the codec this device plays
+  as-is**, movies and episodes. The web already did this (device setting + `autoPickTrack`);
+  the server's own pick for the Apple TV HLS route now also skips commentary and prefers the
+  most channels (`pickAudioIndex` in `src/hls.js`, mirrored in `hlsDefaultTrack`); the Roku
+  now picks before direct play from `/api/audio/list` using its "What are you watching on?"
+  setting, and goes straight to the converted stream when no track is playable. Android TV
+  and the Apple TV's VLC route decode every codec on the TV, so the Dell never converts there.
+  The Roku has no in-player audio menu yet, so it can't be overridden there.
 - **Subtitle sidecars beyond .srt, and the episodes the parser could not see (2026-09-15).**
   Two gaps found while migrating the library into the DrivePool pool, both with real files
   behind them. **Sidecars:** discovery accepted `.srt`/`.vtt` only, while *embedded* tracks

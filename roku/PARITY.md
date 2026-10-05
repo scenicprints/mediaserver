@@ -190,6 +190,20 @@ version switch, soundtrack chooser, Up Next card, end card) is Android's FALLBAC
       fallback is the server's `/api/hls/...` path at the same position (Android: native
       failure -> web player, which asks the server to transcode). `/api/play?native=1`
       fetched for duration + intro and to log the play.
+- [ ] Soundtrack (web `autoPickTrack`, every device: the track this device plays without
+      converting): before a movie/episode direct-plays (Live TV included, same path),
+      `/api/audio/list/...` is fetched and the best track picked from `playable[device]`,
+      where device is Settings ▸ Audio ▸ "What are you watching on?" (Detect = roku; the
+      stored appletv/androidtv/roku/vava/browser map to the same `playable` keys; anything
+      else = roku), as app.js deviceType()/deviceCodecs() (no commentary; Surround = most
+      channels, Stereo = a real 2.0; then bitrate, then the default flag). It is written to
+      the Video node's `audioTrack` from `availableAudioTracks`, matched by position, only
+      when the Roku lists the same number of tracks as the server (otherwise the Roku's own
+      choice stands). No track that device can play (TrueHD + DTS only on a Roku): starts on
+      the `/api/hls/...` converted stream instead.
+      The list is waited on for 3s at most, then direct play starts as before (a late
+      answer still sets the track). The Roku player has no audio menu yet (Android's
+      PlayerActivity has none either), so there is nothing to mark as selected.
 - [ ] Pre-roll (`/api/preroll/stream`) before a movie started from 0; locked (only Back,
       which exits everything); a broken pre-roll just starts the movie. The fallback
       path plays it too (on Android the fallback is the web player, which does).

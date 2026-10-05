@@ -61,11 +61,15 @@ sub playerStart(spec as object)
         hasUpNext: spec.hasUpNext, creditsTaken: false, hudVisible: false,
         sessionId: newUuid(), rebufferStartedAt: 0, rebufferCount: 0, seekGateUntil: 0,
         subTracks: [], currentSubIdx: -1, aiJobRunning: false, menuOpen: false, menuSel: 1,
-        base: 0.0, finished: false, wasPlaying: false, cues: [], errShown: false
+        base: 0.0, finished: false, wasPlaying: false, cues: [], errShown: false,
+        audState: "none", audT0: 0, audWaiting: false, audPick: -1, audCount: 0, audApplied: false, audMismatch: false
     }
     m.pl = pl
     m.playerOpen = true
     playerBuildUi()
+    ' Asked before the pre-roll, so the answer is usually in by the time the
+    ' film itself starts.
+    playerFetchAudio()
     if spec.prerollPath <> invalid and not pl.live
         pl.inPreroll = true
         playerPlayUrl(absUrl(withToken(spec.prerollPath)), "")
@@ -102,8 +106,19 @@ end function
 sub playerStartMain()
     pl = m.pl
     pl.inPreroll = false
-    pl.mainStarted = true
     sp = pl.spec
+    ' Direct play waits for the soundtrack pick (3 seconds at most): it may turn
+    ' out the Roku can't play any of the file's tracks, and then the converted
+    ' stream is the one to start.
+    if not sp.fallback and pl.audState = "pending"
+        pl.audWaiting = true
+        playerShowBuffering(true)
+        ' The 3 seconds count from here: time spent in the pre-roll is free.
+        pl.audT0 = nowMs()
+        playerAfter(3.0, "playerAudioTimeout")
+        return
+    end if
+    pl.mainStarted = true
     if sp.fallback
         ' The server-converted stream, starting where the direct play stopped.
         pl.base = sp.startAt
@@ -142,6 +157,7 @@ sub playerBuildUi()
     v.observeField("state", "onVideoState")
     v.observeField("position", "onVideoPosition")
     v.observeField("duration", "onVideoDuration")
+    v.observeField("availableAudioTracks", "onVideoAudioTracks")
     g.appendChild(v)
     m.video = v
     ' Captions (libVLC draws them over the picture: white, black outline).
@@ -264,6 +280,7 @@ sub onVideoState()
             end if
             playerAfter(0.8, "playerForceSubsOff")
         end if
+        playerApplyAudio()
         playerUpdateHud()
     else if st = "paused"
         pl.wasPlaying = false
@@ -364,6 +381,166 @@ sub onPlayInfo(res as object, sid as string)
         pl.introStart = num(j.intro.start, -1)
         pl.introEnd = num(j.intro["end"], -1)
     end if
+end sub
+
+' ------------------------------------------------------------ soundtrack
+' Direct play hands the Roku the raw file, and the Roku plays whichever track
+' the file marks as default: often TrueHD or DTS, which it can't decode. So ask
+' the server what is in the file (app.js chooseAudioTrackThen) and pick one the
+' device named in Settings plays as-is. The converted stream needs none of this: the server picks
+' a copyable track for it.
+sub playerFetchAudio()
+    pl = m.pl
+    sp = pl.spec
+    if sp.fallback then return
+    if sp.kind <> "movie" and sp.kind <> "episode" then return
+    pl.audState = "pending"
+    pl.audT0 = nowMs()
+    apiGet("/api/audio/list/" + sp.kind + "/" + str0(sp.fileId), onAudioList, pl.sessionId)
+    ' Playback never depends on this: a slow answer is let go after 3 seconds.
+    playerAfter(3.0, "playerAudioTimeout")
+end sub
+
+sub onAudioList(res as object, sid as string)
+    pl = m.pl
+    if pl = invalid or pl.finished or pl.sessionId <> sid then return
+    ' After the timeout the film is already playing: a pick can still be
+    ' applied, but it is too late to switch to the converted stream.
+    late = pl.audState <> "pending"
+    pl.audState = "done"
+    tracks = invalid
+    if res.data <> invalid and type(res.data) = "roAssociativeArray" then tracks = res.data.tracks
+    if tracks <> invalid and type(tracks) = "roArray" and tracks.Count() > 0
+        dev = audioDeviceKey()
+        pick = audioAutoPick(tracks, dev)
+        if pick <> invalid
+            pl.audPick = num(pick.index, -1)
+            pl.audCount = tracks.Count()
+        else if not late and not audioAnyPlayable(tracks, dev)
+            ' Nothing in the file the device can decode, so direct play would be
+            ' silent. The server's converted stream has sound; converting is
+            ' unavoidable here.
+            pl.spec.fallback = true
+            tele("player", { ev: "audio", result: "convert", title: pl.spec.title, dev: dev })
+        end if
+    end if
+    if late
+        playerApplyAudio()
+    else
+        playerAudioSettled()
+    end if
+end sub
+
+sub playerAudioTimeout()
+    pl = m.pl
+    if pl = invalid or pl.finished or pl.audState <> "pending" then return
+    ' During the pre-roll nothing is waiting yet; the film starts its own 3
+    ' seconds if the answer still hasn't come. A timer left over from the
+    ' previous play can also fire early in this one.
+    if pl.inPreroll or nowMs() - pl.audT0 < 2900 then return
+    pl.audState = "late"
+    playerAudioSettled()
+end sub
+
+sub playerAudioSettled()
+    pl = m.pl
+    if pl.audWaiting
+        pl.audWaiting = false
+        playerStartMain()
+    end if
+end sub
+
+' Settings > Audio > "What are you watching on?", as app.js deviceType() reads
+' it: the stored choice names the device, and Detect means this Roku. The
+' server's `playable` map uses the same keys. Anything else (an old or mistyped
+' value) counts as a Roku, the hardware actually doing the decoding.
+function audioDeviceKey() as string
+    t = deviceType()
+    if t = "appletv" or t = "androidtv" or t = "roku" or t = "vava" or t = "browser" then return t
+    return "roku"
+end function
+
+function audioPlayable(t as dynamic, dev as string) as boolean
+    if t = invalid or type(t) <> "roAssociativeArray" then return false
+    p = t.playable
+    if p = invalid or type(p) <> "roAssociativeArray" then return false
+    return isT(p[dev])
+end function
+
+function audioAnyPlayable(tracks as object, dev as string) as boolean
+    for each t in tracks
+        if audioPlayable(t, dev) then return true
+    end for
+    return false
+end function
+
+' app.js autoPickTrack(): only tracks the chosen device plays as-is, never
+' commentary on its own; Surround wants the most channels, Stereo a real 2.0
+' track; then bitrate, then the file's default flag. A tie keeps the file's
+' order.
+function audioAutoPick(tracks as object, dev as string) as dynamic
+    wantSurround = regRead("audioMode", "stereo") = "surround"
+    best = invalid
+    bestScore = 0.0
+    for each t in tracks
+        if audioPlayable(t, dev) and not isT(t.commentary)
+            ch = num(t.channels, 0)
+            s = 0.0
+            if wantSurround
+                if ch > 8 then ch = 8
+                s = s + ch * 10
+            else if ch = 2
+                s = s + 50
+            else if ch < 20
+                s = s + (20 - ch)
+            end if
+            b = num(t.bitrateKbps, 0) / 100
+            if b > 10 then b = 10
+            s = s + b
+            if isT(t.default) then s = s + 5
+            if best = invalid or s > bestScore
+                best = t
+                bestScore = s
+            end if
+        end if
+    end for
+    return best
+end function
+
+sub onVideoAudioTracks()
+    playerApplyAudio()
+end sub
+
+' The Roku lists the stream's soundtracks in availableAudioTracks, and writing
+' an entry's Track id to audioTrack switches to it. The id's format isn't
+' documented, so the pick is matched by position: the server's index is the
+' track's place among the file's audio streams. If the Roku lists a different
+' number of tracks (it may leave out ones it can't decode), position means
+' nothing, and the Roku's own choice stands rather than a guess.
+sub playerApplyAudio()
+    pl = m.pl
+    if pl = invalid or pl.finished or pl.audApplied or pl.audPick < 0 then return
+    if not pl.mainStarted or pl.inPreroll or pl.spec.fallback then return
+    v = m.video
+    if v = invalid then return
+    avail = v.availableAudioTracks
+    if avail = invalid or type(avail) <> "roArray" or avail.Count() = 0 then return
+    if avail.Count() <> pl.audCount
+        ' Tracks can be added as the Roku finds them: look again on the next
+        ' change, but report it only once.
+        if not pl.audMismatch
+            pl.audMismatch = true
+            tele("player", { ev: "audio", result: "mismatch", title: pl.spec.title, roku: avail.Count(), server: pl.audCount })
+        end if
+        return
+    end if
+    t = avail[pl.audPick]
+    if t = invalid then return
+    id = str0(t.Track)
+    if id = "" then return
+    pl.audApplied = true
+    if str0(v.currentAudioTrack) <> id then v.audioTrack = id
+    tele("player", { ev: "audio", result: "set", title: pl.spec.title, idx: pl.audPick, of: pl.audCount, dev: audioDeviceKey() })
 end sub
 
 ' ------------------------------------------------------------ ticks
@@ -662,8 +839,9 @@ function playerKey(key as string, press as boolean) as boolean
         if key = "back" then playerFinish(false, false, true)
         return true
     end if
-    ' Pre-roll: locked. Back still exits everything.
-    if pl.inPreroll
+    ' Pre-roll, and the moment spent waiting on the soundtrack pick: locked.
+    ' Back still exits everything.
+    if pl.inPreroll or pl.audWaiting
         if key = "back" then playerFinish(false, false, false)
         return true
     end if
@@ -782,6 +960,7 @@ sub playerFinish(ended as boolean, failed as boolean, silent as boolean)
         m.video.unobserveField("state")
         m.video.unobserveField("position")
         m.video.unobserveField("duration")
+        m.video.unobserveField("availableAudioTracks")
     end if
     clearChildren(m.playerG)
     m.video = invalid
