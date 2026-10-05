@@ -24,10 +24,36 @@
 > position). `/api/play?native=1` logs truthful direct-play stats — compare
 > transcode share before/after in Settings ▸ Diagnostics. CI note: branch
 > pushes of `androidtv/**` are compile checks only; main publishes the rolling
-> release. Still open: on-TCL verification, audio-track picker, caption delay,
+> release. Still open: on-TCL verification, caption delay,
 > Up Next overlay inside native (currently chains through the web app between
 > episodes), HDR display-mode switching (deliberately NOT attempted — see the
 > tvOS crash below).
+
+> **2026-10-05: soundtrack + Audio and Version menus (UNVERIFIED on a TV,
+> not compiled here).** The owner's rule for every client: start on the audio
+> track this device plays as-is, without asking, movies and episodes alike,
+> and let the viewer change it in the player. `PlayerActivity` fetches
+> `/api/audio/list/<kind>/<fileId>` and ranks it with the web's
+> `autoPickTrack` rule (playable on `androidtv`, never commentary; surround =
+> most channels up to 8, stereo = a real 2.0; then bitrate, then default).
+> The speakers setting is the page's localStorage `audioMode`, which the spec
+> does not carry, so `MainActivity.playNative` reads it with
+> `evaluateJavascript` before launching (1 s cap; a spec that already has
+> `audioMode` wins; unknown = surround). The pick maps server ordinal to
+> libVLC's `audioTracks` (minus "Disable", id -1) BY POSITION, and only when
+> the counts agree; otherwise libVLC's own choice stands. It runs once per
+> file, debounced off ESAdded/Playing, never on the pre-roll. Up Next relaunches
+> the activity per episode, so every episode gets its own pick.
+> ▼ now opens one panel: Subtitles (AI row still first and still the default
+> highlight), then Audio (when there is more than one track; labels
+> `CODEC · layout · LANG · title`, commentary tagged), then Version (when
+> `/api/versions/<kind>/<titleId>` lists more than one file). The title id
+> comes from the spec's `progressPath` (or a `titleId` field if the web ever
+> sends one), so channels get no Version section. A version pick restarts the
+> new file at the same position (resume seek on Playing, captions off, its own
+> audio pick), stores `verid:` + `pq` prefs like the web's rememberVersion,
+> and reports progress to the same title. The result Intent and
+> `__marqueeNativeDone` now carry `fileId` (the file the player closed on).
 
 **Original goal (context):** bring the Android TV app to the same standard we
 achieved on Apple TV — a **native player that direct-plays everything** — by

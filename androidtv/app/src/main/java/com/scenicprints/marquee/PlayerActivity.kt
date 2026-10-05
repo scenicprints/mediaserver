@@ -46,7 +46,14 @@ import java.util.concurrent.Executors
  *
  * Remote control is pure key-mapping (no Android focus juggling — simplest
  * thing that can't get lost): OK = play/pause (or Skip Intro while that's on
- * screen) · ◀/▶ = ±10s · ▲ = show HUD · ▼ = subtitles · Back = close.
+ * screen) · ◀/▶ = ±10s · ▲ = show HUD · ▼ = the menu (subtitles, audio,
+ * version) · Back = close.
+ *
+ * Soundtrack: the owner's rule for every client is that playback starts on the
+ * track this device plays as-is, picked without asking, and the viewer can
+ * change it from the menu. libVLC decodes everything here, so the pick is about
+ * the right MIX (the feature, not the commentary; surround or a real 2.0 for
+ * the speakers), not about what can play.
  *
  * Apple TV port lessons applied here:
  *  - libVLC callbacks may arrive off-main → every UI/player touch is posted
@@ -67,6 +74,15 @@ class PlayerActivity : Activity() {
     private var live = false
     private var startAt = 0.0                  // seconds
     private var progressPath: String? = null
+
+    // ---- the file being played ----
+    // Starts as the web's choice; a pick from the Version menu swaps it in
+    // place, and everything per-file (stream, subtitles, play info, audio list,
+    // heartbeat) follows this rather than the spec.
+    private var fileId = 0
+    private var specFileId = 0
+    private var apiKind = "movie"              // "movie" | "episode", for the per-file APIs
+    private var titleId = -1                   // the movie/episode id (versions + remembering a pick)
 
     // ---- player ----
     private var libVLC: LibVLC? = null
@@ -139,10 +155,16 @@ class PlayerActivity : Activity() {
             hasUpNext = spec.optBoolean("hasUpNext", false)
             startAt = spec.optDouble("startAt", 0.0)
             progressPath = spec.optString("progressPath").takeIf { it.isNotEmpty() && it != "null" }
+            specFileId = spec.optInt("fileId")
+            fileId = specFileId
+            apiKind = if (spec.optString("kind") == "episode") "episode" else "movie"
+            titleId = resolveTitleId()
             token = extractToken()
             buildUi()
             startVlc()
             fetchPlayInfo()
+            fetchAudioList()
+            fetchVersions()
             ui.postDelayed(netTick, 10000)
             (getSystemService(AUDIO_SERVICE) as? AudioManager)
                 ?.requestAudioFocus({ }, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN)
@@ -159,6 +181,33 @@ class PlayerActivity : Activity() {
         val cookies = CookieManager.getInstance().getCookie(base) ?: ""
         Regex("(?:^|;\\s*)mstoken=([^;]+)").find(cookies)?.groupValues?.get(1)
     } catch (_: Exception) { null }
+
+    /** The spec doesn't name the movie/episode itself, but its progress path
+     *  does (/api/movies/<id>/progress, /api/episodes/<id>/progress). A channel
+     *  has no progress path and so no versions, which is right: a channel is
+     *  whatever file the schedule is airing. */
+    private fun resolveTitleId(): Int {
+        spec.optInt("titleId", -1).takeIf { it > 0 }?.let { return it }
+        val m = Regex("^/api/(movies|episodes)/(\\d+)/progress").find(progressPath ?: "") ?: return -1
+        return m.groupValues[2].toIntOrNull() ?: -1
+    }
+
+    /** The spec's per-file paths each name the web's file id once
+     *  (/api/stream/12, /api/play/movie/12?native=1, …). Swap in another id,
+     *  keeping whatever prefix and query the web app sends. Unchanged when the
+     *  id isn't there as a whole path segment. */
+    private fun forFile(path: String, fid: Int = fileId): String {
+        val orig = "/$specFileId"
+        val at = path.lastIndexOf(orig)
+        if (at < 0) return path
+        val end = at + orig.length
+        if (end < path.length && path[end] != '?' && path[end] != '/') return path // "/12" inside "/123"
+        return path.substring(0, at) + "/" + fid + path.substring(end)
+    }
+    private fun streamPath(fid: Int = fileId) = forFile(spec.optString("streamPath"), fid)
+    private fun subListPath() = forFile(spec.optString("subListPath"))
+    private fun subBase() = forFile(spec.optString("subBase"))
+    private fun playPath() = spec.optString("playPath").takeIf { it.isNotEmpty() }?.let { forFile(it) }
 
     /** Media/subtitle URLs carry ?token= (libVLC doesn't send our cookies);
      *  JSON API calls send the Cookie header instead (see http()). */
@@ -182,7 +231,7 @@ class PlayerActivity : Activity() {
     private fun startMain() {
         inPreroll = false
         mainStarted = true
-        playUrl(mediaUrl(spec.optString("streamPath")))
+        playUrl(mediaUrl(streamPath()))
         tele("player", JSONObject().put("ev", "load").put("native", true).put("mode", "direct")
             .put("title", spec.optString("title")).put("live", live).put("at", startAt.toInt()))
     }
@@ -218,11 +267,18 @@ class PlayerActivity : Activity() {
                     }
                     ui.postDelayed({ forceSubsOffOnce() }, 800) // after tracks settle
                 }
+                scheduleAutoAudio()
                 updateHud()
             }
+            // Tracks are reported one at a time as the demuxer finds them; each
+            // one is a chance that the full set is now there to map.
+            MediaPlayer.Event.ESAdded -> if (!inPreroll) scheduleAutoAudio()
             MediaPlayer.Event.Paused -> { updateHud(); postProgress(); heartbeat() }
             MediaPlayer.Event.TimeChanged -> {
-                if (inPreroll) return
+                // Until the resume seek has run, the clock reads the new file's
+                // first second, not where the viewer is (a version switch lands
+                // here); a progress post from that would wipe the resume point.
+                if (inPreroll || !resumeApplied) return
                 positionSec = e.timeChanged / 1000.0
                 onTick()
             }
@@ -302,12 +358,14 @@ class PlayerActivity : Activity() {
     // ================= /api/play: duration + intro (and the server-side stats log) =================
 
     private fun fetchPlayInfo() {
-        val path = spec.optString("playPath").takeIf { it.isNotEmpty() } ?: return
+        val path = playPath() ?: return
+        val fid = fileId
         net.execute {
             val body = http("GET", base + path, null) ?: return@execute
             try {
                 val j = JSONObject(body)
                 ui.post {
+                    if (fid != fileId) return@post   // a version switch overtook it
                     if (j.optDouble("duration", 0.0) > 0) durationSec = j.optDouble("duration")
                     val intro = j.optJSONObject("intro")
                     if (intro != null) { introStart = intro.optDouble("start", -1.0); introEnd = intro.optDouble("end", -1.0) }
@@ -382,7 +440,7 @@ class PlayerActivity : Activity() {
         val body = JSONObject()
             .put("sessionId", sessionId)
             .put("kind", spec.optString("kind"))
-            .put("fileId", spec.optInt("fileId"))
+            .put("fileId", fileId)
             .put("title", spec.optString("title"))
             .put("subtitle", spec.optString("subtitle"))
             .put("mode", "direct")
@@ -442,26 +500,57 @@ class PlayerActivity : Activity() {
         if (inPreroll) return
         subsMenu.visibility = View.VISIBLE
         setHudVisible(false)
-        renderSubsMenu()
+        renderSubsMenu(keepSelection = false)
+        val fid = fileId
         net.execute {
-            val body = http("GET", base + spec.optString("subListPath"), null) ?: return@execute
-            try { val arr = JSONArray(body); ui.post { subTracks = arr; renderSubsMenu() } } catch (_: Exception) {}
+            val body = http("GET", base + subListPath(), null) ?: return@execute
+            try { val arr = JSONArray(body); ui.post { if (fid == fileId) { subTracks = arr; renderSubsMenu() } } } catch (_: Exception) {}
         }
     }
 
-    private fun renderSubsMenu() {
+    /** The ▼ panel: Subtitles, then Audio, then Version (the Apple TV's order;
+     *  subtitles stay first so ▼ then OK still lands on the AI row). Audio and
+     *  Version only appear when there is a choice to make. */
+    private fun renderSubsMenu(keepSelection: Boolean = true) {
+        val keep = if (keepSelection) menuKeys.getOrNull(menuSel) else null
         subsMenuList.removeAllViews()
+        menuRows.clear(); menuKeys.clear(); aiRow = null
         subsMenuList.addView(menuHeader("Subtitles"))
         // "✨ Generate with AI…" comes FIRST — the flagship, same as web/Apple TV.
-        subsMenuList.addView(menuRow(if (aiJobRunning) "✨ Generating…" else "✨ Generate with AI…", false) { startAiSubs() })
-        subsMenuList.addView(menuRow("Off", currentSubIdx == -1) { selectSub(-1) })
+        aiRow = addMenuRow("ai", if (aiJobRunning) "✨ Generating…" else "✨ Generate with AI…", false) { startAiSubs() }
+        addMenuRow("sub:off", "Off", currentSubIdx == -1) { selectSub(-1) }
         for (i in 0 until subTracks.length()) {
             val t = subTracks.optJSONObject(i) ?: continue
             val idx = t.optInt("idx", i)
-            subsMenuList.addView(menuRow(t.optString("label", "Track ${i + 1}"), currentSubIdx == idx) { selectSub(idx) })
+            addMenuRow("sub:$idx", t.optString("label", "Track ${i + 1}"), currentSubIdx == idx) { selectSub(idx) }
         }
-        menuSel = 1.coerceAtMost(subsMenuList.childCount - 1)
+        val audio = audioMenuEntries()
+        if (audio.size > 1) {
+            subsMenuList.addView(menuHeader("Audio"))
+            val now = try { player?.audioTrack ?: -1 } catch (_: Exception) { -1 }
+            for ((id, label) in audio) addMenuRow("aud:$id", label, id == now) { selectAudio(id) }
+        }
+        if (versions.length() > 1) {
+            subsMenuList.addView(menuHeader("Version"))
+            for (i in 0 until versions.length()) {
+                val v = versions.optJSONObject(i) ?: continue
+                val fid = v.optInt("fileId", -1)
+                if (fid < 0) continue
+                val label = v.optString("label").takeIf { it.isNotEmpty() && it != "null" } ?: "Version ${i + 1}"
+                addMenuRow("ver:$fid", label, fid == fileId) { selectVersion(fid) }
+            }
+        }
+        // A re-render (the subtitle list arriving, the AI job finishing) keeps
+        // the highlight on the same row rather than jumping back to the top.
+        menuSel = keep?.let { menuKeys.indexOf(it) }?.takeIf { it >= 0 } ?: 0
         paintMenuSel()
+    }
+
+    private fun addMenuRow(key: String, text: String, selected: Boolean, onClick: () -> Unit): TextView {
+        val row = menuRow(text, selected, onClick)
+        subsMenuList.addView(row)
+        menuRows.add(row); menuKeys.add(key)
+        return row
     }
 
     private fun selectSub(idx: Int) {
@@ -472,7 +561,7 @@ class PlayerActivity : Activity() {
             else {
                 // Server tracks (sidecars + extracted embedded) are served as WebVTT;
                 // load as a selected slave — libVLC renders it over the video.
-                val url = mediaUrl(spec.optString("subBase") + "?idx=" + idx)
+                val url = mediaUrl(subBase() + "?idx=" + idx)
                 player?.addSlave(IMedia.Slave.Type.Subtitle, Uri.parse(url), true)
             }
         } catch (_: Exception) {}
@@ -483,14 +572,14 @@ class PlayerActivity : Activity() {
         if (aiJobRunning) return
         aiJobRunning = true
         renderSubsMenu()
-        val req = JSONObject().put("kind", spec.optString("kind")).put("fileId", spec.optInt("fileId")).put("target", "orig")
+        val req = JSONObject().put("kind", spec.optString("kind")).put("fileId", fileId).put("target", "orig")
         net.execute { http("POST", "$base/api/subtitles/generate", req.toString()) }
         pollAiSubs()
     }
 
     private fun pollAiSubs() {
         net.execute {
-            val q = "kind=${spec.optString("kind")}&fileId=${spec.optInt("fileId")}&target=orig"
+            val q = "kind=${spec.optString("kind")}&fileId=$fileId&target=orig"
             val body = http("GET", "$base/api/subtitles/generate?$q", null)
             ui.post {
                 val j = try { JSONObject(body ?: "{}") } catch (_: Exception) { JSONObject() }
@@ -503,7 +592,7 @@ class PlayerActivity : Activity() {
                         aiJobRunning = false
                         // Refresh the track list — the new AI track appears in it.
                         net.execute {
-                            val lb = http("GET", base + spec.optString("subListPath"), null)
+                            val lb = http("GET", base + subListPath(), null)
                             try { val arr = JSONArray(lb ?: "[]"); ui.post { subTracks = arr; if (subsMenu.visibility == View.VISIBLE) renderSubsMenu() } } catch (_: Exception) {}
                         }
                     }
@@ -514,21 +603,196 @@ class PlayerActivity : Activity() {
         }
     }
 
-    private fun setAiRowText(text: String) {
-        if (subsMenuList.childCount > 1) (subsMenuList.getChildAt(1) as? TextView)?.text = text
-    }
+    private fun setAiRowText(text: String) { aiRow?.text = text }
 
     private fun closeSubsMenu() { subsMenu.visibility = View.GONE }
 
+    // ================= audio: the automatic pick + the menu's Audio section =================
+
+    // The server's view of the file's audio streams (ffprobe, container order):
+    // codec, channels, language, title, commentary. libVLC's own list is only
+    // ids and terse names, so this is what ranks and labels them. null = not
+    // answered yet; an empty array = answered with nothing.
+    private var serverAudio: JSONArray? = null
+    private var audioAutoDone = false
+    private var userPickedAudio = false
+    private val autoAudio = Runnable { tryAutoAudio() }
+
+    private fun fetchAudioList() {
+        val fid = fileId
+        net.execute {
+            val body = http("GET", "$base/api/audio/list/$apiKind/$fid", null)
+            val arr = try { JSONObject(body ?: "{}").optJSONArray("tracks") ?: JSONArray() } catch (_: Exception) { JSONArray() }
+            ui.post { if (fid == fileId) { serverAudio = arr; tryAutoAudio() } }
+        }
+    }
+
+    /** libVLC's audio tracks without its "Disable" entry (id -1), in its order. */
+    private fun vlcAudioTracks(): List<MediaPlayer.TrackDescription> = try {
+        player?.audioTracks?.filter { it.id != -1 } ?: emptyList()
+    } catch (_: Exception) { emptyList() }
+
+    /** Tracks trickle in (an ESAdded per stream) and the server list arrives on
+     *  its own time: wait for a quiet moment rather than trying on every event. */
+    private fun scheduleAutoAudio() {
+        if (audioAutoDone) return
+        ui.removeCallbacks(autoAudio)
+        ui.postDelayed(autoAudio, 400)
+    }
+
+    /** Once per file: switch to the server-ranked best track. Both lists are the
+     *  file's audio streams in container order, so they map by position, but
+     *  only when the counts agree; anything else leaves libVLC's own choice. */
+    private fun tryAutoAudio() {
+        if (audioAutoDone || userPickedAudio || inPreroll || !mainStarted) return
+        val server = serverAudio ?: return
+        val vlc = vlcAudioTracks()
+        if (vlc.isEmpty()) return                   // not demuxed yet; ESAdded retries
+        if (server.length() != vlc.size) return     // still arriving, or a mismatch to leave alone
+        audioAutoDone = true
+        if (vlc.size < 2) return
+        val pick = autoPickAudio(server)
+        if (pick < 0 || pick >= vlc.size) return
+        try {
+            val want = vlc[pick].id
+            if (player?.audioTrack != want) player?.setAudioTrack(want)
+        } catch (_: Exception) {}
+    }
+
+    /** The web's autoPickTrack: playable on this device, never a commentary on
+     *  its own; surround speakers want the most channels (up to 7.1), stereo
+     *  wants a real 2.0 over a fold-down; then bitrate, then the file's default.
+     *  Ties go to the earlier track, as the web's stable sort does. Returns the
+     *  server ordinal, or -1 for "nothing to prefer". */
+    private fun autoPickAudio(tracks: JSONArray): Int {
+        val surround = spec.optString("audioMode") != "stereo"  // not known: surround
+        var best = -1
+        var bestScore = Double.NEGATIVE_INFINITY
+        for (i in 0 until tracks.length()) {
+            val t = tracks.optJSONObject(i) ?: continue
+            if (t.optBoolean("commentary", false)) continue
+            if (t.optJSONObject("playable")?.optBoolean("androidtv", true) == false) continue
+            val ch = t.optInt("channels", 0)
+            var score = if (surround) ch.coerceAtMost(8) * 10.0
+                        else if (ch == 2) 50.0 else (20 - ch).coerceAtLeast(0).toDouble()
+            val kbps = t.optDouble("bitrateKbps", 0.0).let { if (it.isNaN()) 0.0 else it }
+            score += (kbps / 100.0).coerceAtMost(10.0)
+            if (t.optBoolean("default", false)) score += 5.0
+            if (score > bestScore) { bestScore = score; best = t.optInt("index", i) }
+        }
+        return best
+    }
+
+    /** (libVLC id, label) for each real audio track: labelled from the server
+     *  list when it maps one-to-one, else with libVLC's own names. */
+    private fun audioMenuEntries(): List<Pair<Int, String>> {
+        val vlc = vlcAudioTracks()
+        val server = serverAudio
+        val mapped = server != null && server.length() == vlc.size
+        return vlc.mapIndexed { i, tr ->
+            val t = if (mapped) server?.optJSONObject(i) else null
+            tr.id to (if (t != null) audioLabel(t) else (tr.name ?: "Track ${i + 1}"))
+        }
+    }
+
+    /** CODEC · layout · LANG · title, the web's trackLabel, plus a commentary
+     *  tag when the title doesn't already say so. */
+    private fun audioLabel(t: JSONObject): String {
+        val bits = mutableListOf(t.optString("codec").uppercase(), t.optString("layout"))
+        val lang = t.optString("language").takeIf { it.isNotEmpty() && it != "null" }
+        if (lang != null) bits.add(lang.uppercase())
+        val title = t.optString("title").takeIf { it.isNotEmpty() && it != "null" }
+        if (title != null) bits.add(title)
+        if (t.optBoolean("commentary", false) && title?.contains("comment", ignoreCase = true) != true) bits.add("commentary")
+        return bits.filter { it.isNotEmpty() }.joinToString(" · ")
+    }
+
+    private fun selectAudio(id: Int) {
+        userPickedAudio = true          // the automatic pick never overrides the viewer
+        ui.removeCallbacks(autoAudio)
+        try { player?.setAudioTrack(id) } catch (_: Exception) {}
+        closeSubsMenu()
+    }
+
+    // ================= versions (other files of the same title) =================
+
+    private var versions = JSONArray()   // [{fileId, quality, label}], best first
+
+    private fun fetchVersions() {
+        if (live || titleId <= 0) return
+        net.execute {
+            val body = http("GET", "$base/api/versions/$apiKind/$titleId", null) ?: return@execute
+            try {
+                val arr = JSONArray(body)
+                ui.post { versions = arr; if (subsMenu.visibility == View.VISIBLE) renderSubsMenu() }
+            } catch (_: Exception) {}
+        }
+    }
+
+    /** The web's version switch: same title, same position, another file. The
+     *  new file gets everything a fresh start gets (resume seek once Playing,
+     *  captions forced off, its own soundtrack pick, its own play info), and
+     *  progress keeps going to the same title. */
+    private fun selectVersion(fid: Int) {
+        closeSubsMenu()
+        if (fid == fileId || live || inPreroll) return
+        val next = streamPath(fid)
+        if (next == streamPath()) return    // the spec's path can't be re-pointed: stay put
+        rememberVersion(fid)
+        tele("player", JSONObject().put("ev", "version").put("native", true)
+            .put("title", spec.optString("title")).put("from", fileId).put("to", fid).put("at", positionSec.toInt()))
+        fileId = fid
+        startAt = positionSec
+        resumeApplied = false
+        subsForcedOff = false; userPickedSub = false; currentSubIdx = -1; subTracks = JSONArray()
+        ui.removeCallbacks(autoAudio)
+        serverAudio = null; audioAutoDone = false; userPickedAudio = false
+        durationSec = 0.0; introStart = -1.0; introEnd = -1.0
+        rebufferStartedAt = 0L
+        playUrl(mediaUrl(next))
+        fetchPlayInfo()
+        fetchAudioList()
+    }
+
+    /** What the web's rememberVersion stores, so the next play of this title
+     *  (on any device) opens on the same file. Server-side prefs, never local. */
+    private fun rememberVersion(fid: Int) {
+        val key = (if (apiKind == "episode") "verid:e" else "verid:m") + titleId
+        val pref = JSONObject().put("key", key).put("value", fid).toString()
+        net.execute { http("POST", "$base/api/prefs", pref) }
+        var quality: String? = null
+        for (i in 0 until versions.length()) {
+            val v = versions.optJSONObject(i) ?: continue
+            if (v.optInt("fileId", -1) == fid) quality = v.optString("quality").takeIf { it.isNotEmpty() && it != "null" }
+        }
+        if (quality != null) {
+            val pq = JSONObject().put("key", "pq").put("value", quality).toString()
+            net.execute { http("POST", "$base/api/prefs", pq) }
+        }
+    }
+
     // ================= remote keys =================
 
-    private var menuSel = 1
+    // Selectable rows of the ▼ panel in display order (headers aren't in it),
+    // each with a stable key so a re-render can keep the highlight in place.
+    private val menuRows = ArrayList<TextView>()
+    private val menuKeys = ArrayList<String>()
+    private var aiRow: TextView? = null
+    private var menuSel = 0
     private fun paintMenuSel() {
-        for (i in 1 until subsMenuList.childCount) {
-            val row = subsMenuList.getChildAt(i) as? TextView ?: continue
+        for ((i, row) in menuRows.withIndex()) {
             val on = i == menuSel
             row.setBackgroundColor(if (on) Braun.panel2 else Color.TRANSPARENT)
             row.setTextColor(if (on) Braun.signal else Braun.ink2)
+        }
+        // With three sections the panel can run past the screen: keep the
+        // highlighted row in view (after layout, so its position is known).
+        menuRows.getOrNull(menuSel)?.let { row ->
+            subsMenu.post {
+                val h = subsMenu.height
+                if (row.top < subsMenu.scrollY) subsMenu.smoothScrollTo(0, row.top)
+                else if (row.bottom > subsMenu.scrollY + h) subsMenu.smoothScrollTo(0, row.bottom - h)
+            }
         }
     }
 
@@ -539,13 +803,13 @@ class PlayerActivity : Activity() {
             if (event.keyCode == KeyEvent.KEYCODE_BACK) finishWithResult()
             return true
         }
-        // Subtitles menu drives its own selection.
+        // The ▼ menu drives its own selection.
         if (subsMenu.visibility == View.VISIBLE) {
             when (event.keyCode) {
                 KeyEvent.KEYCODE_BACK -> closeSubsMenu()
-                KeyEvent.KEYCODE_DPAD_UP -> { if (menuSel > 1) menuSel--; paintMenuSel() }
-                KeyEvent.KEYCODE_DPAD_DOWN -> { if (menuSel < subsMenuList.childCount - 1) menuSel++; paintMenuSel() }
-                KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> (subsMenuList.getChildAt(menuSel))?.performClick()
+                KeyEvent.KEYCODE_DPAD_UP -> { if (menuSel > 0) menuSel--; paintMenuSel() }
+                KeyEvent.KEYCODE_DPAD_DOWN -> { if (menuSel < menuRows.size - 1) menuSel++; paintMenuSel() }
+                KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> menuRows.getOrNull(menuSel)?.performClick()
             }
             return true
         }
@@ -578,7 +842,8 @@ class PlayerActivity : Activity() {
         setResult(RESULT_OK, Intent()
             .putExtra("ended", ended || endedNaturally)
             .putExtra("failed", failed)
-            .putExtra("position", positionSec))
+            .putExtra("position", positionSec)
+            .putExtra("fileId", fileId))
         finish()
     }
 
@@ -647,7 +912,9 @@ class PlayerActivity : Activity() {
         val hint = TextView(this).apply {
             setTextColor(Braun.ink3)
             letterSpacing = 0.08f
-            text = if (live) "▼ subtitles · Back exit" else "OK play/pause · ◀ ▶ ±10s · ▼ subtitles · Back exit"
+            // ▼ opens one menu holding subtitles, audio and version (the last
+            // two only when the file has a choice); the hint names what it's for.
+            text = if (live) "▼ subtitles · audio · Back exit" else "OK play/pause · ◀ ▶ ±10s · ▼ subtitles · audio · Back exit"
             gravity = Gravity.END
         }
         sp(hint, 12f)
@@ -718,7 +985,7 @@ class PlayerActivity : Activity() {
         bufferOverlay.addView(loading, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(14) })
         root.addView(bufferOverlay, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
-        // --- Subtitles menu (right-side dark panel, remote-driven) ---
+        // --- The ▼ menu: subtitles, audio, version (right-side dark panel, remote-driven) ---
         subsMenuList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(6), dp(10), dp(6), dp(10)) }
         subsMenu = ScrollView(this).apply {
             background = GradientDrawable().apply {

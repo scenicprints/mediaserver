@@ -373,21 +373,23 @@ class MainActivity : Activity() {
         @JavascriptInterface
         fun playNative(specJson: String) {
             runOnUiThread {
-                try {
-                    // The origin the page is actually on: that is where the session
-                    // cookie lives and where the spec's paths point, LAN or public.
-                    val base = ServerResolver.originOf(web.url) ?: activeBase
-                    startActivityForResult(
-                        Intent(this@MainActivity, PlayerActivity::class.java)
-                            .putExtra("spec", specJson)
-                            .putExtra("base", base),
-                        REQ_PLAYER
-                    )
-                    playerOpen = true
-                } catch (e: Exception) {
-                    // Never strand the viewer: report failure so the web player takes over.
-                    notifyNativeDone(false, true, 0.0)
+                // The speakers setting (Settings ▸ Audio ▸ stereo/surround) is
+                // per device and lives in the page's localStorage, which the
+                // spec doesn't carry. The player needs it to pick a soundtrack,
+                // so read it here, with the web's own rule (unset = stereo).
+                // The launch must never hang on this: if the page doesn't
+                // answer within a second, play without it (the player then
+                // prefers surround).
+                var launched = false
+                val launch: (String?) -> Unit = { mode ->
+                    if (!launched) { launched = true; launchPlayer(specJson, mode) }
                 }
+                ui.postDelayed({ launch(null) }, 1000L)
+                try {
+                    web.evaluateJavascript(
+                        "(function(){try{return localStorage.getItem('audioMode')==='surround'?'surround':'stereo'}catch(e){return ''}})()"
+                    ) { v -> launch(v?.trim('"')?.takeIf { it == "surround" || it == "stereo" }) }
+                } catch (_: Exception) { launch(null) }
             }
         }
         /** For the web app to call when its requests stop getting through. An
@@ -408,6 +410,28 @@ class MainActivity : Activity() {
         } catch (_: Exception) { "?" }
     }
 
+    private fun launchPlayer(specJson: String, audioMode: String?) {
+        try {
+            // A spec that already says (a newer web app) wins over the read.
+            val spec = try { JSONObject(specJson) } catch (_: Exception) { null }
+            val out = if (spec != null && audioMode != null && !spec.has("audioMode"))
+                spec.put("audioMode", audioMode).toString() else specJson
+            // The origin the page is actually on: that is where the session
+            // cookie lives and where the spec's paths point, LAN or public.
+            val base = ServerResolver.originOf(web.url) ?: activeBase
+            startActivityForResult(
+                Intent(this@MainActivity, PlayerActivity::class.java)
+                    .putExtra("spec", out)
+                    .putExtra("base", base),
+                REQ_PLAYER
+            )
+            playerOpen = true
+        } catch (e: Exception) {
+            // Never strand the viewer: report failure so the web player takes over.
+            notifyNativeDone(false, true, 0.0)
+        }
+    }
+
     /** The native player finished (user backed out / episode ended / it failed):
      *  hand the outcome to the web app, which chains Up Next, falls back to the
      *  web player on failure, or just refreshes its resume state. */
@@ -425,7 +449,8 @@ class MainActivity : Activity() {
         notifyNativeDone(
             data?.getBooleanExtra("ended", false) ?: false,
             data?.getBooleanExtra("failed", false) ?: (resultCode != RESULT_OK),
-            data?.getDoubleExtra("position", 0.0) ?: 0.0
+            data?.getDoubleExtra("position", 0.0) ?: 0.0,
+            data?.getIntExtra("fileId", 0) ?: 0
         )
     }
     private val resolveAfterPlayback = Runnable {
@@ -435,9 +460,14 @@ class MainActivity : Activity() {
             requestResolve()
         }
     }
-    private fun notifyNativeDone(ended: Boolean, failed: Boolean, position: Double) {
+    private fun notifyNativeDone(ended: Boolean, failed: Boolean, position: Double, fileId: Int = 0) {
         try {
-            val json = JSONObject().put("ended", ended).put("failed", failed).put("position", position).toString()
+            // fileId: the file the player was on when it closed. It differs from
+            // the one the web handed over after a pick in the player's Version
+            // menu; the web may use it to resume or fall back on that file.
+            val j = JSONObject().put("ended", ended).put("failed", failed).put("position", position)
+            if (fileId > 0) j.put("fileId", fileId)
+            val json = j.toString()
             web.evaluateJavascript("window.__marqueeNativeDone && window.__marqueeNativeDone($json);", null)
         } catch (_: Exception) {}
     }
