@@ -69,7 +69,7 @@ export function startUI(db, {
         }
         return json(res, 200, {
           jobs: s.jobs, reclaimedBytes: s.reclaimedBytes, probed: s.probed, scannable: s.scannable,
-          nvenc: s.nvenc, scan: s.scan,
+          nvenc: s.nvenc, canProveQuality: s.canProveQuality, scan: s.scan,
           worker: { running: engine.worker.running, current: engine.worker.current },
           stuck: {
             retry: stk.jobs.filter((j) => j.state === 'retry').length,
@@ -190,6 +190,11 @@ export const PAGE = `<!doctype html>
     max-height:340px; overflow:auto; font-family:ui-monospace,Consolas,monospace; font-size:11.5px;
     color:var(--ink2); white-space:pre-wrap; word-break:break-word; }
   .empty { color:var(--ink3); padding:16px 18px; border:1px solid var(--rule); background:var(--panel); }
+  /* A standing explanation, not an error: the program is fine, it just cannot
+     do the part the owner is waiting for. */
+  .note { border-left:2px solid var(--signal); background:var(--panel); color:var(--ink2);
+    padding:11px 14px; margin-top:1px; font-size:12px; line-height:1.5; }
+  .note b { color:var(--ink); }
   /* Settings. Each switch carries its own explanation, because the ones here
      change whether the program does anything at all and a bare label would
      leave the owner guessing. */
@@ -219,6 +224,7 @@ export const PAGE = `<!doctype html>
 <section>
   <h2>Library</h2>
   <div class="grid" id="stats"></div>
+  <div id="statsnote"></div>
 </section>
 
 <section>
@@ -317,6 +323,21 @@ function renderStats(s) {
   cells.push(['Hardware encode', s.nvenc ? 'Yes' : 'CPU only', false]);
   $('stats').innerHTML = cells.map(([k,v,sig]) =>
     '<div class="cell"><div class="k">' + k + '</div><div class="v' + (sig?' sig':'') + '">' + esc(v) + '</div></div>').join('');
+
+  // Two states where the program is working correctly and yet nothing appears
+  // to happen. Both were only explainable from the log, and "it does nothing
+  // and does not say why" is the complaint that matters most to a new user.
+  const notes = [];
+  if (s.canProveQuality === false) {
+    notes.push('This ffmpeg has no <b>libvmaf</b>, so there is no way to prove a re-encode ' +
+      'still looks right — video is left alone and only audio is converted. Point ' +
+      '<span class="path">ffmpegPath</span> at a build with libvmaf to shrink video.');
+  }
+  if (s.scannable === 0) {
+    notes.push('<b>No files are visible.</b> Either the library has not been scanned yet, or the ' +
+      'drive or share it lives on is not reachable from here.');
+  }
+  $('statsnote').innerHTML = notes.map((n) => '<div class="note">' + n + '</div>').join('');
 }
 
 // Only things that actually went wrong. A file the program decided to leave

@@ -190,15 +190,14 @@ export async function startEngine({ root, port = 8097 } = {}) {
   const applyVmaf = () => setVmaf({ min: settings().vmafPassMark });
   applyVmaf();
 
+  // What the encoder is allowed to touch. `poolRoot` and `isWatching` were also
+  // here and are gone with the pool migration, which was the only thing that
+  // read either: runQueue destructures allow4kVideo and allowHdrVideo and
+  // ignores the rest, and the playback check reaches the queue through
+  // worker.stop from the interval below, not through this object.
   const policy = {
     allow4kVideo: config.optimizeAllow4kVideo === true,
-    allowHdrVideo: config.optimizeAllowHdrVideo === true,
-    poolRoot: config.poolRoot || 'P:\\',
-    // The migration saturates the same disks playback reads from, so it obeys
-    // the same rule as the encoder — and shares the one implementation of it,
-    // rather than growing a second copy that can rot separately. Declared
-    // below and hoisted; the reference is taken lazily either way.
-    isWatching: () => someoneWatching()
+    allowHdrVideo: config.optimizeAllowHdrVideo === true
   };
   engine.setThrottle({
     pauseBetweenJobsMs: 60_000,

@@ -663,26 +663,57 @@ async function probeOne(filePath) {
   };
 }
 
-// Every file the optimizer is allowed to look at. Files on a drive that isn't
-// mounted are excluded outright — the F: library is offline, and a missing
-// drive must never be mistaken for a missing file.
+// The volume a path lives on: a drive letter, or a UNC share.
+//
+// Network shares are the reason this exists. The old test was
+// `path.slice(0, 2)` against a list of drive letters, which for
+// \\NAS\media\Movies\Film.mkv is "\\" — never a drive letter, so EVERY file on
+// a NAS was silently excluded. For a media server that is not an edge case; a
+// library on a share is one of the normal ways to own one, and the result was
+// an optimizer reporting zero files and never saying why.
+export function volumeKeyOf(p) {
+  const s = String(p || '').replace(/\//g, '\\');
+  if (s.startsWith('\\\\')) {
+    // \\server\share\rest -> \\server\share. The share, not the server: two
+    // shares on one box can be mounted independently.
+    const m = /^\\\\([^\\]+)\\([^\\]+)/.exec(s);
+    return m ? `\\\\${m[1]}\\${m[2]}`.toUpperCase() : null;
+  }
+  return /^[A-Za-z]:/.test(s) ? s.slice(0, 2).toUpperCase() : null;
+}
+
+// Is that volume present AND readable right now?
+//
+// statSync + isDirectory, deliberately, and the same test `pruneMissing` in
+// scan.js uses — not existsSync: on Windows a drive letter can answer existsSync
+// while the volume behind it is not really usable. An external USB disk that has
+// dropped out, or a share that is unreachable, must read as unavailable so the
+// optimizer leaves those files completely alone rather than drawing conclusions
+// about media it cannot currently see.
+export function volumeAvailable(key, cache = null) {
+  if (!key) return false;
+  if (cache && cache.has(key)) return cache.get(key);
+  let ok = false;
+  try { ok = fs.statSync(key + '\\').isDirectory(); } catch { ok = false; }
+  if (cache) cache.set(key, ok);
+  return ok;
+}
+
+// Every file the optimizer is allowed to look at. Files on a volume that is not
+// reachable are excluded outright — an offline drive or an unreachable share
+// must never be mistaken for a missing file.
 export function scannableFiles(db) {
-  const roots = mountedRoots();
+  const seen = new Map();   // one stat per volume, not per file
   const rows = [
     ...db.prepare('SELECT id AS file_id, path, size FROM movie_files').all().map((r) => ({ ...r, file_kind: 'movie' })),
     ...db.prepare('SELECT id AS file_id, path, size FROM episode_files').all().map((r) => ({ ...r, file_kind: 'episode' }))
   ];
-  return rows.filter((r) => roots.has(String(r.path).slice(0, 2).toUpperCase()));
+  return rows.filter((r) => volumeAvailable(volumeKeyOf(r.path), seen));
 }
 
-// Drive letters that are actually present AND readable right now.
-//
-// This is deliberately the same test `pruneMissing` in scan.js uses (statSync +
-// isDirectory), not `existsSync`: on Windows a drive letter can answer
-// existsSync while the volume behind it is not really usable. An external USB
-// disk that has dropped out must read as "not mounted" here, so the optimizer
-// leaves its files completely alone rather than drawing conclusions about
-// media it cannot currently see.
+// Drive letters that are actually present AND readable right now. Kept for the
+// drive-health reporting, which is about physical disks and so has no business
+// with shares.
 export function mountedRoots() {
   const set = new Set();
   for (let c = 65; c <= 90; c++) {
@@ -893,12 +924,15 @@ export function analyze(db, { allow4kVideo = false, allowHdrVideo = false } = {}
     LEFT JOIN shows         s  ON s.id  = e.show_id
     WHERE (mf.id IS NOT NULL OR ef.id IS NOT NULL)`).all();
 
-  const mounted = mountedRoots();
+  // Same reachability test as scannableFiles, for the same reason: planning
+  // against a share it cannot see is as wrong as planning against an unplugged
+  // disk, and excluding every share outright was wronger still.
+  const seen = new Map();
   const items = [];
   const totals = { files: 0, bytes: 0, saveBytes: 0, byProfile: {}, byTier: {} };
 
   for (const r of rows) {
-    if (!mounted.has(String(r.path).slice(0, 2).toUpperCase())) continue;
+    if (!volumeAvailable(volumeKeyOf(r.path), seen)) continue;
     const plan = planFor(r, { allow4kVideo, allowHdrVideo });
     const size = Number(r.size) || 0;
     totals.files++; totals.bytes += size;
@@ -1986,6 +2020,13 @@ export function status(db) {
     probed,
     scannable: scannableFiles(db).length,
     nvenc: nvencAvailable(),
+    // Without libvmaf there is no way to prove a re-encode looks the same, so
+    // video shrinking is vetoed and only audio work happens. That is the right
+    // call, but it was invisible: the window showed jobs running and nothing
+    // ever getting smaller, and the explanation lived in a per-file plan reason
+    // nobody reads. Most ffmpeg builds on PATH have no libvmaf, so for anyone
+    // who did not install the bundled one this is the normal state.
+    canProveQuality: !VMAF.enabled || vmafAvailable(),
     log: worker.log.slice(-60)
   };
 }
