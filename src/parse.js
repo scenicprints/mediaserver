@@ -182,7 +182,46 @@ export function cleanShowName(name) {
   return tidy(name.replace(/\(\d{4}\)\s*$/, ''));
 }
 
-// A show's grouping key: normalized name, no year.
-export function showKey(name) {
-  return name.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+// The year in a show folder's name: "Doctor Who (2005)" -> 2005. It is the
+// only thing that tells a remake from the original ("Doctor Who (1963)"), so
+// it is kept for matching even though the display name drops it.
+export function showFolderYear(name) {
+  const m = String(name || '').match(/\((\d{4})\)\s*$/);
+  const y = m ? +m[1] : null;
+  return y && y >= 1900 && y <= 2100 ? y : null;
+}
+
+// A country tag in a show folder's name, as TMDB's origin_country code:
+// "The Office (US)" -> "US", "(UK)" -> "GB". Same idea as the year: it is how
+// two shows with one name are told apart.
+const COUNTRY_TAGS = { US: 'US', UK: 'GB', GB: 'GB', AU: 'AU', CA: 'CA', NZ: 'NZ', IE: 'IE' };
+export function showFolderCountry(name) {
+  const m = String(name || '').match(/\((US|UK|GB|AU|CA|NZ|IE)\)/i);
+  return m ? COUNTRY_TAGS[m[1].toUpperCase()] : null;
+}
+
+// What to search TMDB for: the display name without a country tag.
+export function showSearchTitle(name) {
+  return tidy(String(name || '').replace(/\((US|UK|GB|AU|CA|NZ|IE)\)/ig, ''));
+}
+
+// A show's grouping key: normalized name, plus the folder's year when it has
+// one. Without the year, "Doctor Who (1963)" and "Doctor Who (2005)" were one
+// show, and their episodes landed on top of each other as "versions".
+export function showKey(name, year = null) {
+  const k = name.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  return k && year ? `${k}|${year}` : k;
+}
+
+// The show folder a file belongs to, the way the scanner decides it: the top
+// folder under the library, unless that is a season folder (a library pointed
+// at a single show), in which case the filename or the library's own name.
+const SEASON_FOLDER = /^(season\s*\d+|s\d{1,2}|specials)$/i;
+export function showFolderOf(root, fullPath) {
+  const rel = fullPath.slice(root.length).replace(/^[\\/]+/, '');
+  const parts = rel.split(/[\\/]/);
+  const name = parts.pop();
+  if (parts.length && !SEASON_FOLDER.test(parts[0])) return parts[0];
+  const segs = root.split(/[\\/]/).filter(Boolean);
+  return showFromFilename(name) || segs[segs.length - 1] || root;
 }

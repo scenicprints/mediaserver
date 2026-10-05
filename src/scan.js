@@ -2,7 +2,7 @@ import path from 'node:path';
 import * as disk from './diskguard.js';
 import {
   isVideo, parseMovie, detectQuality, groupKey,
-  parseEpisode, showFromFilename, cleanShowName, showKey
+  parseEpisode, cleanShowName, showKey, showFolderOf, showFolderYear, showFolderCountry
 } from './parse.js';
 
 // Seed the libraries table from config.mediaRoots the first time only, so
@@ -18,6 +18,92 @@ export function seedLibraries(db, roots) {
   }
 }
 
+// Bring every existing show in line with the folders its files live in.
+//
+// Shows used to be keyed by name alone, with the folder's year thrown away, so
+// "Doctor Who (1963)" and "Doctor Who (2005)" became ONE show: their episodes
+// collided (S01E01 of each became two "versions" of one episode) and the pair
+// carried a single TMDB match. Shows are now keyed by name + year, and this
+// works out, from the files themselves, which folder each show really is:
+//   - a show from one folder gets its new key and its folder year/country;
+//   - a show built from several folders is split: the folder with the most
+//     files keeps the show (its watch state and match), every other folder
+//     becomes its own show, unmatched, so enrichment matches it with its year.
+// It touches only the database (never a file on disk), does nothing when
+// everything already agrees, and so is safe to run before every scan.
+export function reconcileShows(db, { log = () => {} } = {}) {
+  const roots = new Map(db.prepare('SELECT id, path FROM libraries').all().map((l) => [l.id, l.path]));
+  const files = db.prepare(
+    `SELECT f.id AS fileId, f.path, f.library_id AS lib, e.id AS epId, e.show_id AS showId, e.season, e.episode
+     FROM episode_files f JOIN episodes e ON e.id = f.episode_id`
+  ).all();
+  if (!files.length) return { rekeyed: 0, split: 0 };
+
+  // show -> folder key -> { name, year, country, files[] }
+  const byShow = new Map();
+  for (const f of files) {
+    const root = roots.get(f.lib);
+    if (!root || !f.path.startsWith(root)) continue;
+    const raw = showFolderOf(root, f.path);
+    const name = cleanShowName(raw);
+    const year = showFolderYear(raw);
+    const key = showKey(name, year);
+    if (!key) continue;
+    if (!byShow.has(f.showId)) byShow.set(f.showId, new Map());
+    const folders = byShow.get(f.showId);
+    if (!folders.has(key)) folders.set(key, { name, year, country: showFolderCountry(raw), files: [] });
+    folders.get(key).files.push(f);
+  }
+
+  const showRow = db.prepare('SELECT id, group_key, library_id FROM shows WHERE id = ?');
+  const keyOwner = db.prepare('SELECT id FROM shows WHERE group_key = ?');
+  const setShow = db.prepare('UPDATE shows SET group_key = ?, folder_year = ?, folder_country = ? WHERE id = ?');
+  const setFacts = db.prepare('UPDATE shows SET folder_year = ?, folder_country = ? WHERE id = ?');
+  const insShow = db.prepare('INSERT INTO shows (group_key, title, library_id, added_at, folder_year, folder_country) VALUES (?, ?, ?, ?, ?, ?)');
+  const findEp = db.prepare('SELECT id FROM episodes WHERE show_id = ? AND season = ? AND episode = ?');
+  const insEp = db.prepare('INSERT INTO episodes (show_id, season, episode, added_at) VALUES (?, ?, ?, ?)');
+  const moveFile = db.prepare('UPDATE episode_files SET episode_id = ? WHERE id = ?');
+  const dropEmptyEps = db.prepare('DELETE FROM episodes WHERE show_id = ? AND id NOT IN (SELECT DISTINCT episode_id FROM episode_files)');
+
+  let rekeyed = 0, split = 0;
+  db.exec('BEGIN');
+  try {
+    for (const [showId, folders] of byShow) {
+      const show = showRow.get(showId);
+      if (!show) continue;
+      // The folder with the most files keeps this show.
+      const ordered = [...folders.entries()].sort((a, b) => b[1].files.length - a[1].files.length);
+      const [keepKey, keep] = ordered[0];
+      if (show.group_key !== keepKey) {
+        const owner = keyOwner.get(keepKey);
+        if (!owner) { setShow.run(keepKey, keep.year, keep.country, showId); rekeyed++; }
+        else if (owner.id !== showId) log(`  shows: "${keepKey}" is already show ${owner.id}; left show ${showId} as it is`);
+      } else {
+        setFacts.run(keep.year, keep.country, showId);
+      }
+      for (const [key, folder] of ordered.slice(1)) {
+        const target = keyOwner.get(key);
+        const newId = target ? target.id
+          : insShow.run(key, folder.name, show.library_id, Date.now(), folder.year, folder.country).lastInsertRowid;
+        for (const f of folder.files) {
+          const ep = findEp.get(newId, f.season, f.episode);
+          const epId = ep ? ep.id : insEp.run(newId, f.season, f.episode, Date.now()).lastInsertRowid;
+          moveFile.run(epId, f.fileId);
+        }
+        split++;
+        log(`  shows: split "${folder.name}${folder.year ? ` (${folder.year})` : ''}" out of show ${showId} (${folder.files.length} file(s))`);
+      }
+      if (ordered.length > 1) dropEmptyEps.run(showId);
+    }
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+  if (rekeyed || split) log(`Shows: ${rekeyed} re-keyed by folder year, ${split} folder(s) split into their own show.`);
+  return { rekeyed, split };
+}
+
 // Scan every library. Movie libraries → logical movies + files (grouped by
 // title+year). TV libraries → shows + episodes (grouped by show name, with
 // season/episode parsed from filenames and Season folders).
@@ -26,6 +112,7 @@ export function seedLibraries(db, roots) {
 // as the synchronous check-update git fetch that stuttered playback).
 export async function scanLibraries(db) {
   const libs = db.prepare('SELECT id, path, type FROM libraries').all();
+  reconcileShows(db, { log: (x) => console.log(x) });
 
   // Movie statements
   // An already-known path is not skipped blindly: the file behind it can change.
@@ -46,7 +133,7 @@ export async function scanLibraries(db) {
   const epFileExists = db.prepare('SELECT id, size FROM episode_files WHERE path = ?');
   const setEpSize = db.prepare('UPDATE episode_files SET size = ? WHERE id = ?');
   const findShow = db.prepare('SELECT id FROM shows WHERE group_key = ?');
-  const insShow = db.prepare('INSERT INTO shows (group_key, title, library_id, added_at) VALUES (?, ?, ?, ?)');
+  const insShow = db.prepare('INSERT INTO shows (group_key, title, library_id, added_at, folder_year, folder_country) VALUES (?, ?, ?, ?, ?, ?)');
   const findEp = db.prepare('SELECT id FROM episodes WHERE show_id = ? AND season = ? AND episode = ?');
   const insEp = db.prepare('INSERT INTO episodes (show_id, season, episode, added_at) VALUES (?, ?, ?, ?)');
   const insEpFile = db.prepare(
@@ -54,7 +141,6 @@ export async function scanLibraries(db) {
      VALUES (?, ?, ?, ?, ?, ?, ?)`
   );
 
-  const SEASON_FOLDER = /^(season\s*\d+|s\d{1,2}|specials)$/i;
 
   let added = 0, seen = 0, refreshed = 0;
   for (const lib of libs) {
@@ -104,16 +190,16 @@ export async function scanLibraries(db) {
 
         // Show name: the top folder under the library, unless that's a Season
         // folder (user pointed at a single show) — then use filename/lib name.
-        let showNameRaw;
-        if (segs.length && !SEASON_FOLDER.test(segs[0])) showNameRaw = segs[0];
-        else showNameRaw = showFromFilename(name) || path.basename(root);
-
+        // The folder's year and country tag go into the key and onto the show,
+        // so same-named shows stay apart and are matched to the right one.
+        const showNameRaw = showFolderOf(root, full);
         const showName = cleanShowName(showNameRaw);
-        const key = showKey(showName);
+        const year = showFolderYear(showNameRaw);
+        const key = showKey(showName, year);
         if (!key) return;
 
         const existingShow = findShow.get(key);
-        const showId = existingShow ? existingShow.id : insShow.run(key, showName, lib.id, Date.now()).lastInsertRowid;
+        const showId = existingShow ? existingShow.id : insShow.run(key, showName, lib.id, Date.now(), year, showFolderCountry(showNameRaw)).lastInsertRowid;
 
         // One logical episode per show+season+episode; the file is a version of it.
         const existingEp = findEp.get(showId, ep.season, ep.episode);

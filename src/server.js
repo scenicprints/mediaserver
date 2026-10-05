@@ -24,7 +24,7 @@ import { registerHls } from './hls.js';
 import { registerArtCache, rewriteJson, originOf, warm as warmArtCache } from './artcache.js';
 import { registerRoku } from './roku.js';
 import { registerLan } from './lan.js';
-import { rematchMovies } from './rematch.js';
+import { rematchMovies, rematchShows } from './rematch.js';
 import { upcoming, heroUpcoming } from './upcoming.js';
 import { describe } from './versions.js';
 import { isOnline, onChange as onInternetChange, startWatching as watchInternet, netFetch } from './online.js';
@@ -67,6 +67,7 @@ const db = openDb(path.resolve(ROOT, config.dbPath));
 const DATA_DIR = path.dirname(path.resolve(ROOT, config.dbPath));
 const ART_DIR = path.resolve(DATA_DIR, 'artcache');
 const REMATCH_DONE = path.join(DATA_DIR, 'rematch-v1.done');
+const REMATCH_SHOWS_DONE = path.join(DATA_DIR, 'rematch-shows-v1.done');
 
 const MIME = {
   '.mp4': 'video/mp4', '.m4v': 'video/mp4', '.webm': 'video/webm',
@@ -722,6 +723,14 @@ function runEnrichment(reason) {
       if (config.tmdbApiKey) {
         totals.movies = await enrichLibrary(db, config.tmdbApiKey, { log });
         totals.shows = await enrichShows(db, config.tmdbApiKey, { log });
+        // Once, for shows whose folder carries a year or country: the same
+        // re-check as for movies. Before enrichEpisodes, so a show moved to the
+        // right TMDB entry gets its episodes' titles and stills in this run.
+        if (!fs.existsSync(REMATCH_SHOWS_DONE)) {
+          const r = await rematchShows(db, config.tmdbApiKey, { log });
+          fs.writeFileSync(REMATCH_SHOWS_DONE, JSON.stringify({ at: new Date().toISOString(), checked: r.checked, changed: r.changed.length }));
+          console.log(`TMDB rematch: checked ${r.checked} show(s), corrected ${r.changed.length} (listed in rematch_log).`);
+        }
         totals.episodes = await enrichEpisodes(db, config.tmdbApiKey, { log });
         // Once: re-check matches made by the old matcher (src/rematch.js).
         // Before the backfills, so a corrected film gets its own genres,

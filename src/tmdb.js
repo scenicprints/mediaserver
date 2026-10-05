@@ -8,6 +8,7 @@
 // every one, and nothing is written down as a permanent answer.
 
 import { netFetch, OfflineError } from './online.js';
+import { showSearchTitle } from './parse.js';
 
 const BASE = 'https://api.themoviedb.org/3';
 const POSTER = 'https://image.tmdb.org/t/p/w500';
@@ -223,7 +224,7 @@ async function tmdbSearch(apiKey, kind, query, year) {
   const url = new URL(`${BASE}/search/${kind}`);
   url.searchParams.set('api_key', apiKey);
   url.searchParams.set('query', query);
-  if (year) url.searchParams.set('year', String(year));
+  if (year) url.searchParams.set(kind === 'tv' ? 'first_air_date_year' : 'year', String(year));
   let res;
   try { res = await netFetch(url); } catch (e) { if (e instanceof OfflineError) throw e; return []; }
   if (!res.ok) return [];
@@ -249,10 +250,19 @@ export async function searchMovie(apiKey, title, year) {
   };
 }
 
-export async function searchTv(apiKey, title, year) {
+// `year` and `country` come from the show's folder ("Doctor Who (2005)",
+// "The Office (UK)"). Without them a name shared by two shows went to whichever
+// TMDB ranked more popular. The country narrows the candidates to shows from
+// there, when any are; the year is scored like a film's.
+export async function searchTv(apiKey, title, year, country = null) {
   if (!apiKey) return null;
-  let hit = pickMatch(await tmdbSearch(apiKey, 'tv', title, year), title, year);
-  if (!hit && year) hit = pickMatch(await tmdbSearch(apiKey, 'tv', title), title, year);
+  const narrow = (list) => {
+    if (!country) return list;
+    const from = list.filter((c) => (c.origin_country || []).includes(country));
+    return from.length ? from : list;
+  };
+  let hit = pickMatch(narrow(await tmdbSearch(apiKey, 'tv', title, year)), title, year);
+  if (!hit && year) hit = pickMatch(narrow(await tmdbSearch(apiKey, 'tv', title)), title, year);
   if (!hit) return null;
 
   return {
@@ -268,14 +278,14 @@ export async function searchTv(apiKey, title, year) {
 // Enrich every show that hasn't been matched yet. Returns count updated.
 export async function enrichShows(db, apiKey, { log = () => {} } = {}) {
   if (!apiKey) return 0;
-  const rows = db.prepare('SELECT id, title FROM shows WHERE tmdb_id IS NULL').all();
+  const rows = db.prepare('SELECT id, title, folder_year, folder_country FROM shows WHERE tmdb_id IS NULL').all();
   const update = db.prepare(
     `UPDATE shows SET tmdb_id = ?, overview = ?, poster = ?, backdrop = ?, rating = ?, year = ? WHERE id = ?`
   );
 
   let updated = 0;
   for (const row of rows) {
-    const meta = await searchTv(apiKey, row.title);
+    const meta = await searchTv(apiKey, showSearchTitle(row.title), row.folder_year, row.folder_country);
     if (meta) {
       update.run(meta.tmdb_id, meta.overview, meta.poster, meta.backdrop, meta.rating, meta.year, row.id);
       updated++;

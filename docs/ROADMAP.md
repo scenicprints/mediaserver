@@ -210,7 +210,11 @@ filters, instant scrolling, 12-card rows, per-row layout+paint containment); nat
   now picks before direct play from `/api/audio/list` using its "What are you watching on?"
   setting, and goes straight to the converted stream when no track is playable. Android TV
   and the Apple TV's VLC route decode every codec on the TV, so the Dell never converts there.
-  The Roku has no in-player audio menu yet, so it can't be overridden there.
+  Every player (web, Android TV, Roku, Apple TV) now has in-player Audio and Version menus.
+  (6) **Same-named shows** ("Doctor Who (1963)"/"(2005)", "The Office (US)"/"(UK)") were one
+  show matched to the more popular entry: the folder year was dropped from the key and never
+  searched. Shows are now keyed and matched by folder year/country; the scan repairs existing
+  shows (re-key, split merged folders) and a one-time show re-check moves wrong matches.
 - **Subtitle sidecars beyond .srt, and the episodes the parser could not see (2026-09-15).**
   Two gaps found while migrating the library into the DrivePool pool, both with real files
   behind them. **Sidecars:** discovery accepted `.srt`/`.vtt` only, while *embedded* tracks

@@ -135,6 +135,11 @@ export function openDb(dbPath) {
   // Genres for browse categories (movies already have the column).
   const showCols = new Set(db.prepare('PRAGMA table_info(shows)').all().map((c) => c.name));
   if (!showCols.has('genres')) db.exec('ALTER TABLE shows ADD COLUMN genres TEXT');
+  // What the show's folder says about it ("Doctor Who (2005)", "The Office
+  // (UK)"): the evidence that tells same-named shows apart when matching.
+  // `year` is TMDB's and gets overwritten by the match; these never are.
+  if (!showCols.has('folder_year')) db.exec('ALTER TABLE shows ADD COLUMN folder_year INTEGER');
+  if (!showCols.has('folder_country')) db.exec('ALTER TABLE shows ADD COLUMN folder_country TEXT');
 
   // TMDB franchise/collection grouping + a "details fetched" flag, so the
   // Collections tab can group owned movies without a live lookup per render.
