@@ -266,7 +266,24 @@ struct MovieFile: Identifiable, Decodable, Hashable {
         let mb = b / 1_000_000
         return String(format: "%.0f MB", mb)
     }
+
+    // The picker line before the server has described the file (or when it
+    // can't): the quality from the filename and the size, else the filename.
+    var fallbackLabel: String {
+        let parts = [quality, sizeText].compactMap { $0 }
+        return parts.isEmpty ? (filename ?? "Version") : parts.joined(separator: " · ")
+    }
 }
+
+// What a version actually is, read from the file by the server (/api/versions):
+// "4K · HEVC HDR10 · TrueHD Atmos 7.1 · 58.2 GB". `quality` is the tier
+// from the picture itself, so an episode whose filename says nothing still has one.
+struct VersionInfo: Decodable, Hashable {
+    let fileId: Int
+    let quality: String?
+    let label: String
+}
+
 struct MovieDetail: Decodable {
     let id: Int
     let title: String
@@ -1167,6 +1184,13 @@ final class Store: ObservableObject {
     }
     // Also primes the server's playDecisions cache so the admin Now Playing
     // monitor reports the authoritative direct/transcode engine for us.
+    // The version picker's lines for one movie or episode. Empty on failure,
+    // which leaves the picker on each file's fallbackLabel.
+    func versions(kind: String, id: Int) async -> [VersionInfo] {
+        if previewMode { return [] }
+        return await get("api/versions/\(kind)/\(id)", as: [VersionInfo].self) ?? []
+    }
+
     func playMeta(kind: String, fileId: Int) async -> PlayMeta? {
         if previewMode { return nil }
         return await get("api/play/\(kind)/\(fileId)?\(audioQuery())", as: PlayMeta.self)

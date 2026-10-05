@@ -26,6 +26,7 @@ import { registerRoku } from './roku.js';
 import { registerLan } from './lan.js';
 import { rematchMovies } from './rematch.js';
 import { upcoming, heroUpcoming } from './upcoming.js';
+import { describe } from './versions.js';
 import { isOnline, onChange as onInternetChange, startWatching as watchInternet, netFetch } from './online.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1240,6 +1241,24 @@ function audioOpts(req) {
 // How should the browser play this file? `direct` = today's range streaming;
 // `transcode` = ffmpeg remux/transcode to fragmented MP4. Also reports the real
 // duration (from ffprobe) so the player has a timeline even when transcoding.
+// The version picker's lines for one movie or episode (src/versions.js):
+// [{ fileId, quality, label }] in the same best-first order as the detail.
+// Asked for when a detail page opens, so only that title's files are probed,
+// one at a time, and the probes are cached.
+app.get('/api/versions/:kind/:id', async (req, reply) => {
+  const ep = req.params.kind === 'episode';
+  const files = db.prepare(`SELECT id, quality, filename, size, path FROM ${ep ? 'episode_files' : 'movie_files'} WHERE ${ep ? 'episode_id' : 'movie_id'} = ?`).all(req.params.id);
+  if (!files.length) return reply.code(404).send({ error: 'not found' });
+  files.sort((a, b) => qualityRank(b.quality) - qualityRank(a.quality));
+  const out = [];
+  for (const f of files) {
+    let p = null;
+    try { p = await probe(f.path); } catch { /* unreadable: describe from the name */ }
+    out.push({ fileId: f.id, ...describe(f, p) });
+  }
+  return out;
+});
+
 app.get('/api/play/:kind/:fileId', async (req, reply) => {
   const { kind, fileId } = req.params;
   const row = fileRow(kind, fileId);

@@ -239,7 +239,7 @@ struct ShowDetailView: View {
     private func episodeMenu(_ ep: Episode) -> some View {
         if ep.files.count > 1 {
             ForEach(ep.files) { f in
-                Button("Play \(f.quality ?? f.filename ?? "version")", systemImage: "rectangle.stack") {
+                Button("Play \(f.fallbackLabel)", systemImage: "rectangle.stack") {
                     play(ep, file: f)
                 }
             }
@@ -427,6 +427,7 @@ struct EpisodeDetailView: View {
     @State private var selectedFile: MovieFile?
     @State private var subJobText: String?
     @State private var showVersions = false
+    @State private var versions: [Int: VersionInfo] = [:]   // fileId -> what the file is
     @State private var showOnlineSubs = false          // OpenSubtitles result picker
     @State private var onlineSubs: [Store.OSResult] = []
 
@@ -441,11 +442,27 @@ struct EpisodeDetailView: View {
         .task {
             watched = episode.watched == 1
             resumeAt = (episode.resumePosition ?? 0) > 5 ? (episode.resumePosition ?? 0) : 0
+            // Only an episode with a choice to make needs its files described.
+            // Alongside the TMDB detail, not after it: that one needs the
+            // internet, and this must not wait on it.
+            if episode.files.count > 1 {
+                Task {
+                    let described = await store.versions(kind: "episode", id: episode.id)
+                    versions = Dictionary(described.map { ($0.fileId, $0) }, uniquingKeysWith: { a, _ in a })
+                }
+            }
             extra = await store.episodeExtra(episode.id)
         }
         .fullScreenCover(item: $session) { s in
             PlayerRouter(session: s, store: store).ignoresSafeArea()
         }
+    }
+
+    // The row has room for the tier and the size; the picker shows the rest.
+    private func rowLabel(_ f: MovieFile?) -> String {
+        guard let f else { return "Version" }
+        let parts = [versions[f.id]?.quality ?? f.quality, f.sizeText].compactMap { $0 }
+        return parts.isEmpty ? (f.filename ?? "Version") : parts.joined(separator: " · ")
     }
 
     private func play(at position: Double) {
@@ -515,7 +532,7 @@ struct EpisodeDetailView: View {
                         VStack(spacing: 0) {
                             if episode.files.count > 1 {
                                 ControlRow(name: "Version",
-                                           value: (selectedFile ?? episode.bestFile)?.quality ?? "Version") {
+                                           value: rowLabel(selectedFile ?? episode.bestFile)) {
                                     showVersions = true
                                 }
                             }
@@ -544,7 +561,7 @@ struct EpisodeDetailView: View {
                     .frame(width: 520)
                     .confirmationDialog("Version", isPresented: $showVersions, titleVisibility: .visible) {
                         ForEach(episode.files) { f in
-                            Button(f.quality ?? f.filename ?? "Version") { selectedFile = f }
+                            Button(versions[f.id]?.label ?? f.fallbackLabel) { selectedFile = f }
                         }
                     }
                     .confirmationDialog("Subtitles", isPresented: $showOnlineSubs, titleVisibility: .visible) {

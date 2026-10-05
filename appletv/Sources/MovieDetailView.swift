@@ -27,6 +27,7 @@ struct MovieDetailView: View {
     @State private var preroll: URL?
     @State private var subJobText: String?     // AI subtitle job progress line
     @State private var showVersions = false
+    @State private var versions: [Int: VersionInfo] = [:]   // fileId -> what the file is
     @State private var showOnlineSubs = false          // OpenSubtitles result picker
     @State private var onlineSubs: [Store.OSResult] = []
     @State private var info: Store.MediaInfo?  // probed facts for the spec grid
@@ -195,7 +196,7 @@ struct MovieDetailView: View {
         .focusSection()
         .confirmationDialog("Version", isPresented: $showVersions, titleVisibility: .visible) {
             ForEach(d.files) { f in
-                Button(versionLabel(f)) { selectedFile = f }
+                Button(versions[f.id]?.label ?? versionLabel(f)) { selectedFile = f }
             }
         }
         .confirmationDialog("Subtitles", isPresented: $showOnlineSubs, titleVisibility: .visible) {
@@ -297,8 +298,10 @@ struct MovieDetailView: View {
     private func runtimeText(_ min: Int) -> String {
         min >= 60 ? "\(min / 60)h \(min % 60)m" : "\(min)m"
     }
+    // The row: the tier (read from the picture when the server has described
+    // the file) and the size. The picker shows the full description.
     private func versionLabel(_ f: MovieFile?) -> String {
-        let base = f?.quality ?? f?.filename ?? "Version"
+        let base = f.flatMap { versions[$0.id]?.quality } ?? f?.quality ?? f?.filename ?? "Version"
         if let s = f?.sizeText { return "\(base) · \(s)" }
         return base
     }
@@ -315,6 +318,14 @@ struct MovieDetailView: View {
         favorite = detail?.favorite == 1
         watched = detail?.watched == 1
         loading = false
+        // Describe the versions only when there is a choice, and alongside the
+        // TMDB detail below rather than after it (that one needs the internet).
+        if (detail?.files.count ?? 0) > 1 {
+            Task {
+                let described = await store.versions(kind: "movie", id: movieId)
+                versions = Dictionary(described.map { ($0.fileId, $0) }, uniquingKeysWith: { a, _ in a })
+            }
+        }
         extra = await store.movieExtra(movieId)   // enrich after the core loads
         if let f = selectedFile ?? detail?.bestFile {
             info = await store.mediaInfo(kind: "movie", fileId: f.id)
