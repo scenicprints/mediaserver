@@ -15,7 +15,12 @@ struct PlayerRouter: View {
     let session: PlaySession
     let store: Store
     @State private var decision: Decision = .deciding
+    // A version picked in the player's menu. It replaces `session` for the rest
+    // of this viewing, and nothing outside the player ever hears of it.
+    @State private var switched: PlaySession?
     enum Decision { case deciding, vlc, hdr }
+
+    private var current: PlaySession { switched ?? session }
 
     var body: some View {
         switch decision {
@@ -23,14 +28,27 @@ struct PlayerRouter: View {
             ZStack { Color.black.ignoresSafeArea(); ProgressView().tint(.white).scaleEffect(1.6) }
                 .task { await decide() }
         case .vlc:
-            PlayerView(session: session, store: store)
+            PlayerView(session: current, store: store, onSwitchVersion: { reopen($0) })
+                .id(current.id)
         case .hdr:
-            PlayerView(session: session, store: store, useAVPlayer: true)
+            PlayerView(session: current, store: store, useAVPlayer: true, onSwitchVersion: { reopen($0) })
+                .id(current.id)
         }
+    }
+
+    // Another version: back through .deciding, exactly as a first open goes.
+    // Passing through it removes the old player first (its onDisappear saves
+    // progress and stops the engine) and probes the NEW file, so a 4K HDR to
+    // 1080p SDR switch lands on VLCKit and the reverse on AVPlayer. The cover
+    // stays up the whole time, so the detail page never flashes past.
+    private func reopen(_ next: PlaySession) {
+        switched = next
+        decision = .deciding
     }
 
     @MainActor
     private func decide() async {
+        let session = current
         // Live TV, a file with no id, and anything already on disk stay on the
         // universal VLCKit path. A downloaded copy must not wait on /api/mediainfo:
         // the server may be unreachable, and that probe would hang the open.

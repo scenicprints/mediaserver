@@ -13,6 +13,28 @@ UI rewrite was built against superseded versions of half these files. The push
 was rejected and the work had to be redone. **Check `git log HEAD..origin/main`
 before you touch a file, not after.**
 
+## Version switching in the player (2026-10-05) — UNVERIFIED, never compiled
+Web parity: the player's settings/CC panel lists a **Version** section (last,
+after Audio, so no existing row index moves) when `GET /api/versions` returns
+more than one file; the playing file is ticked. Picking one restarts that file
+at the current position.
+- How: **reopen, not in-model.** `PlayerModel.switchVersion` pauses, builds a
+  fresh `PlaySession` for the same ref/title/upNext/endNext with
+  `startAt = position` (a downloaded copy first, else `resolvePlaybackURL`,
+  same as the detail page) and hands it up via `onSwitchVersion`.
+  `PlayerRouter` swaps its session and goes back through `.deciding`, so the
+  old PlayerView tears down (saving progress), `/api/mediainfo` re-decides the
+  engine for the new file, and the new file gets a fresh start (its own
+  runtime, audio pick, subtitles off). The cover never closes. In-model was
+  rejected because the engine is fixed per PlayerView (video host + HDR
+  display-criteria lifecycle) and 4K HDR <-> 1080p SDR is an engine change.
+- The choice lives in the router's session for the rest of that viewing only;
+  Up Next keeps picking each episode's own best file. Hidden on Live TV
+  (LiveTVView builds PlayerView with no handler) and on downloaded copies.
+**Test on-device:** HDR -> SDR and SDR -> HDR mid-film (two HDMI mode
+switches when both are HDR), resume lands at the right moment on both engines,
+the list refreshes after Up Next moves to the next episode.
+
 ## Releasing soon in the Marquee (2026-09-30) — UNVERIFIED, never compiled
 `GET /api/upcoming` (`src/upcoming.js`) gives `{ home, movies, tv }`, each the
 final releasing-soon set for that hero (at most 3, soonest first). Same rule

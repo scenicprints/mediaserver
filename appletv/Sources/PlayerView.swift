@@ -41,13 +41,15 @@ struct PlaySession: Identifiable {
 }
 
 extension PlayerView {
-    init(session: PlaySession, store: Store, useAVPlayer: Bool = false) {
+    init(session: PlaySession, store: Store, useAVPlayer: Bool = false,
+         onSwitchVersion: ((PlaySession) -> Void)? = nil) {
         self.init(url: session.url, startAt: session.startAt, ref: session.ref,
                   duration: session.duration, store: store, prerollURL: session.preroll,
                   title: session.title, subtitle: session.subtitle,
                   fileId: session.fileId, live: session.live, upNext: session.upNext,
                   endNext: session.endNext,
-                  localSubs: session.localSubs, useAVPlayer: useAVPlayer)
+                  localSubs: session.localSubs, useAVPlayer: useAVPlayer,
+                  onSwitchVersion: onSwitchVersion)
     }
 }
 
@@ -105,6 +107,12 @@ struct PlayerView: View {
     // real HDR + lights the badge) instead of libVLC, but keep this exact same
     // web-styled HUD on top. SDR stays on VLCKit (direct-plays every codec).
     var useAVPlayer: Bool = false
+    // Hands a chosen version back to PlayerRouter, which reopens on it. The
+    // engine is fixed for the life of this view (the video host above, and the
+    // AV path's HDR display switch), and the usual reason to change version,
+    // 4K HDR to 1080p SDR, is exactly a change of engine. Nil where nothing
+    // can reopen the player (Live TV), and then the Version list stays hidden.
+    var onSwitchVersion: ((PlaySession) -> Void)? = nil
 
     @Environment(\.dismiss) private var dismiss
     @StateObject private var m = PlayerModel()
@@ -165,6 +173,9 @@ struct PlayerView: View {
         .onChange(of: m.showSkipCredits) { on in if on { focus = .skipCredits } else if focus == .skipCredits { focus = m.controlsVisible ? restFocus : .catcher } }
         .onChange(of: m.showUpNext) { on in if on { focus = .upNext } else if focus == .upNext || focus == .upNextDismiss { focus = m.controlsVisible ? restFocus : .catcher } }
         .onChange(of: m.finishedPlayback) { done in if done { m.teardown(); dismiss() } }
+        // A version was picked and its session is ready. Leaving this view is
+        // what tears the old file down (onDisappear), saving progress there.
+        .onChange(of: m.switchTo?.id) { _ in if let s = m.switchTo { onSwitchVersion?(s) } }
     }
 
     // Where the focus ring rests when the HUD is up. A channel has no play
@@ -479,6 +490,16 @@ struct PlayerView: View {
                             menuButton(a.label, base + j, a.id == m.currentAudio) { m.selectAudio(a.id); m.closeMenu(); focus = .catcher }
                         }
                     }
+                    // Last, unlike the web (which leads with it): this panel is
+                    // also what CC opens, so the subtitle rows keep the top, and
+                    // appending keeps every row index above unchanged.
+                    if onSwitchVersion != nil, m.versions.count > 1 {
+                        menuHeader("Version")
+                        let vbase = m.subtitleRows.count + 2 + (m.audioOptions.count > 1 ? m.audioOptions.count : 0)
+                        ForEach(Array(m.versions.enumerated()), id: \.offset) { k, v in
+                            menuButton(v.label, vbase + k, v.fileId == m.playingFileId) { m.switchVersion(v); focus = .catcher }
+                        }
+                    }
                 }
             }
             .padding(16)
@@ -675,6 +696,12 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     @Published var osBusy = false
     @Published var aiPct = 0
     @Published var aiActive = false
+    // The title's files, as the server describes them, for the Version list.
+    // Empty until the fetch lands, and for anything with only one file.
+    @Published private(set) var versions: [VersionInfo] = []
+    // Set once a picked version's session is built; the view hands it on.
+    @Published private(set) var switchTo: PlaySession?
+    var playingFileId: Int? { fileId }
 
     private weak var store: Store?
     private var ref: Store.PlayRef?
@@ -737,6 +764,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         self.mainURL = url; self.duration = duration ?? 0
         self.useAV = useAVPlayer
         if !useAV { player.delegate = self }
+        loadVersions()
         // HUD stays hidden at start (no flashControls here) — it appears only when
         // the viewer interacts with the remote.
         Task { @MainActor in
@@ -1549,6 +1577,58 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
                    case "translating": return "Translating"; default: return "Starting" }
     }
 
+    // MARK: Versions (the web player's Version list)
+    // Fetched beside playback, never ahead of it: nobody needs the list until
+    // they open the menu. Not on a channel (the guide decides what plays), and
+    // not on a downloaded copy, where the server may not be there to ask.
+    private func loadVersions() {
+        versions = []
+        guard !live, !offline, let store, let ref else { return }
+        let id: Int
+        switch ref { case .movie(let i): id = i; case .episode(let i): id = i }
+        let asked = ref, k = kind
+        Task { @MainActor [weak self] in
+            let list = await store.versions(kind: k, id: id)
+            // Up Next may have moved on to another title while this was out.
+            guard let self, self.ref == asked else { return }
+            self.versions = list
+        }
+    }
+
+    // Restart on another file at this moment, as the web's loadFile(f, cur())
+    // does. It is built as a fresh session for the same title through the same
+    // doors the detail page uses (a downloaded copy first, else
+    // resolvePlaybackURL), and PlayerRouter reopens on it. So the engine is
+    // decided again for the new file, and the new file gets a fresh start: its
+    // own runtime from /api/play, its own audio pick, its own track list.
+    // The choice lives in that session, so it holds for the rest of this
+    // viewing and nowhere else; Up Next still picks each episode's own file.
+    func switchVersion(_ v: VersionInfo) {
+        menu = .none
+        guard v.fileId != fileId, switchTo == nil, let store, let ref else { return }
+        // Hold the picture so the moment restarted at is the moment left.
+        if useAV { av?.pause() } else { player.pause() }
+        let at = position > 1 ? position : 0
+        let k = kind
+        Task { @MainActor in
+            let local = DownloadManager.shared.localURL(kind: k, fileId: v.fileId)
+            var resolved = local
+            if resolved == nil {
+                let file = MovieFile(id: v.fileId, quality: v.quality, filename: nil, size: nil)
+                resolved = await store.resolvePlaybackURL(kind: k, file: file)
+            }
+            // No URL means no token; carry on with the file already playing.
+            guard let url = resolved else {
+                if useAV { av?.play() } else { player.play() }
+                return
+            }
+            switchTo = PlaySession(url: url, ref: ref, duration: declaredDuration, startAt: at,
+                                   title: mediaTitle, subtitle: mediaSubtitle, fileId: v.fileId,
+                                   upNext: upNext, endNext: endNext,
+                                   localSubs: local == nil ? [] : DownloadManager.shared.localSubs(kind: k, fileId: v.fileId))
+        }
+    }
+
     // MARK: Up Next
     func playNext() {
         guard let next = upNext.first, let store else { return }
@@ -1570,6 +1650,8 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         let isEpisode: Bool
         if case .episode = next.ref { isEpisode = true } else { isEpisode = false }
         kind = isEpisode ? "episode" : "movie"
+        // The Version list belongs to the title now playing, not the last one.
+        loadVersions()
         if useAV {
             avBase = 0
             // Swap the queue over to the next episode's HLS remux.
