@@ -133,8 +133,11 @@ test('web: neither skip card appears on a live feed', () => {
 
 test('apple tv: neither skip card appears on a live channel', () => {
   requires(ATV, [
-    // No intro range is even fetched for a channel.
-    /if kind == "episode", !live, !offline,/,
+    // No intro range is even fetched for a channel. (The fetch also gives the
+    // file's runtime for the end-of-film check, so it covers films too, but
+    // only ever off a channel.)
+    /if !live, !offline, let pm = await store\.playMeta\(/,
+    /if kind == "episode" \{ introRange = pm\.intro \}/,
     /func skipIntro\(\) \{ guard !live,/,
     /private func updateSkipCredits\(\) \{ guard !live,/,
   ], 'both skip controls must be gated on !live');

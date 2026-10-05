@@ -190,6 +190,20 @@ filters, instant scrolling, 12-card rows, per-row layout+paint containment); nat
 ---
 
 ## ✅ Done
+- **Owner's tvOS batch (2026-10-05, committed, not yet pushed).** (1) **Wrong posters**:
+  Lion (2016) and The Lion King (2019) wore the 1994 film's match, left over from the old
+  matcher; a one-time re-check (`src/rematch.js`) moves a movie only when the current
+  matcher is confident about a different film, logging the old row to `rematch_log`.
+  (2) **Releasing soon** in the hero (`src/upcoming.js`) on web, Roku and Apple TV: Radarr
+  movies for the calendar month of their digital/disc release, Sonarr episodes for their
+  Sunday-Saturday week, until downloaded; no Play. Roku now reserves its tallest hero slide
+  so rotation never overlaps the rows. (3) **Version picker** says what each file is
+  (`src/versions.js`), so two episode versions with bare filenames are no longer both
+  "Version". (4) **End of a film on Apple TV**: the end card waited for AVPlayer's
+  played-to-end event, which on a server-transcoded HLS stream can come long after the
+  picture runs out; the player now ends itself at the FILE's runtime (from `/api/play`,
+  never the title's stored duration, which can belong to another cut) or on a stall in
+  the last six seconds while not paused.
 - **Subtitle sidecars beyond .srt, and the episodes the parser could not see (2026-09-15).**
   Two gaps found while migrating the library into the DrivePool pool, both with real files
   behind them. **Sidecars:** discovery accepted `.srt`/`.vtt` only, while *embedded* tracks

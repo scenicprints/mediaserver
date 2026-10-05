@@ -1021,9 +1021,11 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     // Positions are avBase-offset: the stream's t=0 is the resume keyframe.
     private func avTick() {
         guard useAV, onMain, let q = av, q.currentItem != nil else { return }
+        startEndWatch()
         let t = q.currentTime().seconds
         if t.isFinite { position = settle(max(0, avBase + t)) }
         if duration <= 0, let d = q.currentItem?.duration.seconds, d.isFinite, d > 0 { duration = avBase + d }
+        if fileRuntime == nil, let d = q.currentItem?.duration.seconds, d.isFinite, d > 0 { fileRuntime = avBase + d }
         if let r = q.currentItem?.loadedTimeRanges.last?.timeRangeValue {
             let end = avBase + r.start.seconds + r.duration.seconds
             if duration > 0, end.isFinite { buffered = min(1, end / duration) }
@@ -1096,8 +1098,10 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         // Never on a live feed: there is nothing to skip forward into on a
         // channel, and an intro range borrowed from the episode's own file would
         // put a Skip Intro button over a programme already in progress.
-        if kind == "episode", !live, !offline,
-           let pm = await store.playMeta(kind: kind, fileId: fileId) { introRange = pm.intro }
+        if !live, !offline, let pm = await store.playMeta(kind: kind, fileId: fileId) {
+            if kind == "episode" { introRange = pm.intro }
+            if let d = pm.duration, d > 0 { fileRuntime = d }
+        }
         // AV builds its subtitle list from the HLS media-selection groups
         // (refreshAVTracks); the VLC path pulls the server track list.
         if !useAV { await reloadSubtitles() }
@@ -1264,7 +1268,58 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     // anything.
     var endCardNext: UpNextItem? { endNext }
 
+    // The engines' own end-of-media events can come long after the picture has
+    // run out. AVPlayer only reports the end of a server-transcoded HLS stream
+    // once the playlist it last fetched carries ENDLIST, and the last stretch
+    // of a remux can sit waiting on segments that will never come; the viewer
+    // stared at the last frame for a long time before the end card appeared.
+    // So this watches the clock against the runtime the server measured and
+    // ends the film itself: at the runtime, or when playback stalls in the last
+    // few seconds while not paused (a container's declared length can run a
+    // second past its last frame, so the runtime alone is not enough).
+    private var endWatch: Task<Void, Never>?
+    // The length of THIS file: the server's probe of it (/api/play), else what
+    // the engine itself reports. Never `duration`, which for a film is stored on
+    // the title and can belong to another version (a theatrical cut, while the
+    // extended one plays) and would end the film early.
+    private var fileRuntime: Double?
+    private var endWatchPos = -1.0
+    private var endWatchSince = Date()
+
+    private func startEndWatch() {
+        guard endWatch == nil, !live else { return }
+        endWatch = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard let self, !Task.isCancelled else { return }
+                self.checkReachedEnd()
+            }
+        }
+    }
+
+    private func checkReachedEnd() {
+        guard !live, onMain, !finished, !showEndCard, seekPending == nil, let runtime = fileRuntime, runtime > 60 else { return }
+        // The position the ticks last reported, not a fresh read: right after
+        // Up Next swaps the item, a fresh read can still be the old episode's
+        // last second against the new episode's runtime.
+        let pos = position
+        guard pos.isFinite else { return }
+        if pos >= runtime - 0.75 { reachedEnd(); return }
+        guard pos >= runtime - 6 else { endWatchPos = -1; return }
+        if abs(pos - endWatchPos) > 0.05 { endWatchPos = pos; endWatchSince = Date(); return }
+        // Not moving. Paused on purpose is not the end; trying to play is.
+        let tryingToPlay = useAV ? (av?.timeControlStatus != .paused) : (player.isPlaying || player.state == .buffering)
+        if tryingToPlay, Date().timeIntervalSince(endWatchSince) >= 2 { reachedEnd() }
+    }
+
+    private func reachedEnd() {
+        if useAV { av?.pause() } else { player.pause() }
+        if !upNext.isEmpty, !upNextDismissed { playNext() } else { endOfPlayback() }
+    }
+
     private func endOfPlayback() {
+        // The watch below and the engine's own end event can both arrive.
+        guard !showEndCard else { return }
         finish(save: true)
         // Live TV that ran out of guide, and a binge the viewer dismissed, both
         // just leave — an end card there would be in the way.
@@ -1498,6 +1553,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         ref = next.ref; fileId = next.fileId; mediaTitle = next.title
         mediaSubtitle = next.subtitle; declaredDuration = next.duration
         duration = next.duration ?? 0; position = 0; currentSubtitle = -1
+        fileRuntime = nil; endWatchPos = -1
         // New file, new streams: re-ask and re-rank rather than carrying over.
         serverAudio = []; audioRequested = false; autoAudioApplied = false
         upNextDismissed = false
@@ -1553,6 +1609,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     }
     private func handleTime() {
         guard onMain else { return }
+        startEndWatch()
         // Resume: seek once, on the first time update (playback is running &
         // seekable, so the seek sticks instead of restarting from 0).
         if !seekedToStart, startAt > 1, player.isSeekable {
@@ -1562,6 +1619,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         }
         position = settle(Double(player.time.intValue) / 1000.0)
         if duration <= 0 { duration = Double(player.media?.length.intValue ?? 0) / 1000.0 }
+        if fileRuntime == nil, let ms = player.media?.length.intValue, ms > 0 { fileRuntime = Double(ms) / 1000.0 }
         buffered = min(1, progress + 0.06)
         if let r = introRange { showSkipIntro = position >= r.start && position <= r.end }
         updateSkipCredits()
@@ -1606,6 +1664,7 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     }
     func teardown() {
         hideTask?.cancel()
+        endWatch?.cancel(); endWatch = nil
         finish(save: true)
         if useAV {
             avStatusObs?.invalidate(); avRateObs?.invalidate()
