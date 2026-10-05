@@ -123,6 +123,52 @@ test('an unreadable config does not take the window down', () => {
 });
 
 test('nothing outside the declared list is writable', () => {
+  // A tripwire. Every name here is something the page can change in a file that
+  // also holds the media server's secrets, so growing this list should be a
+  // deliberate act that shows up in a diff.
   assert.deepEqual(SETTING_NAMES.sort(),
-    ['mediaServerPort', 'optimizeWindow', 'pauseWhileWatching', 'vmafPassMark']);
+    ['libraryFolders', 'mediaServerPort', 'optimizeWindow', 'pauseWhileWatching', 'vmafPassMark']);
+});
+
+// ---- folders to scan -----------------------------------------------------
+
+test('folders accept a newline-separated list, as the page sends it', () => {
+  const dir = root({});
+  const s = writeSettings(dir, { libraryFolders: 'D:\\Media\\Movies\r\n\\\\NAS\\media\\TV\n' });
+  assert.deepEqual(s.libraryFolders, ['D:\\Media\\Movies', '\\\\NAS\\media\\TV']);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('a trailing slash is trimmed, because it breaks the "is it under this root" test', () => {
+  const dir = root({});
+  assert.deepEqual(writeSettings(dir, { libraryFolders: ['D:\\Media\\'] }).libraryFolders, ['D:\\Media']);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('a relative path is refused — there is no cwd to resolve it against', () => {
+  const dir = root({});
+  assert.throws(() => writeSettings(dir, { libraryFolders: ['Movies'] }), /not a full path/);
+  assert.throws(() => writeSettings(dir, { libraryFolders: ['.\\Movies'] }), /not a full path/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('a UNC share is a valid folder, since that is where many libraries live', () => {
+  const dir = root({});
+  assert.deepEqual(writeSettings(dir, { libraryFolders: ['\\\\NAS\\media'] }).libraryFolders, ['\\\\NAS\\media']);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('duplicates are collapsed, including by case', () => {
+  const dir = root({});
+  const s = writeSettings(dir, { libraryFolders: ['D:\\Media', 'd:\\media', 'D:\\Media'] });
+  assert.deepEqual(s.libraryFolders, ['D:\\Media']);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('empty means "use Marquee", and is the default', () => {
+  const dir = root({});
+  assert.deepEqual(readSettings(dir).libraryFolders, []);
+  assert.deepEqual(writeSettings(dir, { libraryFolders: '' }).libraryFolders, []);
+  assert.deepEqual(writeSettings(dir, { libraryFolders: ['', '  '] }).libraryFolders, []);
+  fs.rmSync(dir, { recursive: true, force: true });
 });

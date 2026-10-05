@@ -16,6 +16,7 @@ import * as ff from './ffmpeg.mjs';
 import { startUI } from './ui.mjs';
 import { readSettings } from './settings.mjs';
 import { setVmaf } from './vmaf.mjs';
+import { ensureLibrarySchema, syncLibrary } from './scanner.mjs';
 
 const LOG_MAX = 8 * 1024 * 1024;
 
@@ -176,10 +177,19 @@ export async function startEngine({ root, port = 8097 } = {}) {
   // file is tiny and this is asked a few times an hour.
   const settings = () => readSettings(root);
 
+  // Standalone: the optimizer scans folders itself and owns the library tables,
+  // so its database is created rather than required. With Marquee the database
+  // must already exist — being handed the wrong folder is the common mistake,
+  // and creating an empty one there would silently look like an empty library.
+  const standalone = settings().libraryFolders.length > 0;
   const dbPath = path.resolve(root, config.dbPath || './data/library.db');
-  if (!fs.existsSync(dbPath)) throw new Error(`No library database at ${dbPath}`);
+  if (!fs.existsSync(dbPath)) {
+    if (!standalone) throw new Error(`No library database at ${dbPath}`);
+    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+  }
   const db = new DatabaseSync(dbPath);
   engine.ensureSchema(db);
+  if (standalone) ensureLibrarySchema(db);
 
   const st = await ff.detect(root, config);
   if (!st.available) throw new Error('ffmpeg not found — nothing can run');
@@ -257,6 +267,22 @@ export async function startEngine({ root, port = 8097 } = {}) {
   }
 
   async function once() {
+    // Standalone only: find what is on disk before probing it. Reading directory
+    // entries is cheap next to everything else here, and it has to come first —
+    // a probe scan can only look at rows that exist.
+    const folders = settings().libraryFolders;
+    if (folders.length) {
+      try {
+        const r = syncLibrary(db, folders, { log });
+        if (r.added || r.removed || r.updated) {
+          log(`Library scan: ${r.added} added, ${r.updated} changed, ${r.removed} gone — ${r.seen} file(s) on disk.`);
+        }
+      } catch (e) {
+        // Never fatal. A scan that fails must not stop the work already queued.
+        log('Library scan failed — ' + e.message);
+      }
+    }
+
     // Scanning is cheap — it reads headers, not whole files — so the library
     // stays up to date around the clock. Only the encoding is scheduled.
     await engine.runProbeScan(db, { log });

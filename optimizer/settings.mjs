@@ -51,6 +51,31 @@ const FIELDS = {
     default: { from: '00:00', to: '05:00', always: false }
   },
 
+  // Folders to scan for media, for running without Marquee.
+  //
+  // Empty means "the library comes from Marquee's database" — the original and
+  // still the default. Non-empty switches on the scanner, which keeps its own
+  // movie_files rows in the optimizer's own database. The two are never mixed:
+  // scanning into Marquee's database would put rows there that Marquee did not
+  // make and would delete on its next scan.
+  libraryFolders: {
+    coerce: (v) => {
+      if (v == null || v === '') return [];
+      const list = Array.isArray(v) ? v : String(v).split(/\r?\n/);
+      const out = [];
+      for (const raw of list) {
+        const f = String(raw).trim().replace(/[\\/]+$/, '');   // a trailing slash breaks the "is it under this root" test
+        if (!f) continue;
+        if (!/^([A-Za-z]:[\\/]|\\\\[^\\]+\\[^\\]+)/.test(f)) {
+          throw new Error(`"${f}" is not a full path — use D:\\Media or \\\\server\\share\\Media`);
+        }
+        if (!out.some((e) => e.toLowerCase() === f.toLowerCase())) out.push(f);
+      }
+      return out;
+    },
+    default: []
+  },
+
   // The quality bar a re-encode has to clear to be kept.
   //
   // Exposed because it is the single number that decides how much of a library

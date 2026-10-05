@@ -208,6 +208,10 @@ export const PAGE = `<!doctype html>
   .fields input { background:var(--sunk); border:1px solid var(--rule); color:var(--ink); padding:6px 8px;
     font-family:ui-monospace,Consolas,monospace; font-size:12.5px; margin-left:8px; }
   .fields input:focus { outline:none; border-color:var(--signal); }
+  .opt textarea { display:block; width:100%; margin-top:8px; background:var(--sunk);
+    border:1px solid var(--rule); color:var(--ink); padding:8px 10px; resize:vertical;
+    font-family:ui-monospace,Consolas,monospace; font-size:12.5px; }
+  .opt textarea:focus { outline:none; border-color:var(--signal); }
 </style></head>
 <body>
 <header>
@@ -261,6 +265,17 @@ export const PAGE = `<!doctype html>
         <label>To <input type="text" id="s_to" size="5" placeholder="05:00"></label>
         <label>Media server port <input type="text" id="s_port" size="6" placeholder="8096"></label>
         <label>Quality pass mark <input type="text" id="s_vmaf" size="5" placeholder="95"></label>
+      </span>
+    </div>
+    <div class="opt">
+      <span style="flex:1;min-width:0">
+        <b>Folders to scan</b>
+        <i>One per line, full paths. Sub-folders are included. Leave this EMPTY to
+        take the library from Marquee instead — the two are never mixed, because
+        scanning into Marquee's database would put rows there that Marquee did
+        not make and would remove on its next scan.</i>
+        <textarea id="s_folders" rows="4" spellcheck="false"
+          placeholder="D:\Media\Movies&#10;\\NAS\media\TV"></textarea>
       </span>
     </div>
     <div class="row" style="margin-top:4px">
@@ -390,6 +405,7 @@ async function loadSettings() {
   $('s_to').value = (s.optimizeWindow && s.optimizeWindow.to) || '05:00';
   $('s_port').value = s.mediaServerPort || 8096;
   $('s_vmaf').value = s.vmafPassMark != null ? s.vmafPassMark : 95;
+  $('s_folders').value = (s.libraryFolders || []).join('\\n');
 }
 
 $('ssave').onclick = async () => {
@@ -399,6 +415,7 @@ $('ssave').onclick = async () => {
     pauseWhileWatching: $('s_pause').checked,
     mediaServerPort: $('s_port').value.trim(),
     vmafPassMark: $('s_vmaf').value.trim(),
+    libraryFolders: $('s_folders').value,
     optimizeWindow: { always: $('s_always').checked, from: $('s_from').value.trim(), to: $('s_to').value.trim() }
   });
   $('ssave').disabled = false;

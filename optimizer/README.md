@@ -9,35 +9,51 @@ watching something.
 
 ---
 
-## It requires Marquee. It will not work without it.
+## Where it gets your library
 
-**This is not a standalone program.** The optimizer has no library scanner of
-its own. Every file it works on comes from the `movie_files` and `episode_files`
-tables in Marquee's SQLite database, which Marquee's own scan fills in.
+On first run it asks, and there are two answers.
 
-Without Marquee there is nothing for it to read, and it says so rather than
-starting: the setup screen asks for the folder Marquee is installed in — the one
-containing `config.json` and `data\library.db` — and will not accept a folder
-that has neither.
+**Scan my own folders.** You name the folders your media is in; it finds the
+video files itself and keeps its own catalogue. This is the answer for Plex,
+Jellyfin, Emby, Kodi, or no media server at all. It needs nothing from them —
+it reads your files, not their databases.
 
-So:
+**From Marquee.** If you run Marquee, it uses the library Marquee has already
+scanned, which means no second scan and no second copy of the catalogue.
 
 | You have | Result |
 |---|---|
-| Marquee, scanned at least once | Works |
-| Marquee installed but never scanned | Asks you to run a scan first |
-| Plex, Jellyfin, Emby, Kodi | **Does not work.** There is nothing it can read. |
-| A folder of media and no server | **Does not work.** |
+| Any media, any server, or no server | Works — scan your own folders |
+| Marquee, scanned at least once | Works — uses Marquee's library directly |
+| Marquee installed but never scanned | Asks you to run a scan first, or to scan folders yourself |
 
-Pointing it at a folder of films is not a supported mode and is not a setting
-that has been overlooked — supporting it means building a scanner, which is a
-different program from this one.
+The two are never mixed. With folders configured, the optimizer keeps its
+catalogue in its own database under
+`%APPDATA%\Marquee Optimizer\library\`; it does not write rows into Marquee's,
+because Marquee would delete them on its next scan.
+
+**When scanning your own folders:**
+
+- Sub-folders are included.
+- `Plex Versions`, `$RECYCLE.BIN`, `System Volume Information`, `@eaDir` and
+  `.@__thumb` are skipped. Plex's own re-encodes are not media, and a deleted
+  file should not come back as one.
+- Symlinks and junctions are never followed, so a link pointing at a parent
+  cannot turn the scan into an endless one.
+- A folder on a drive or share that is not reachable is **skipped entirely** and
+  its files stay in the catalogue. Unplugging a drive does not empty your
+  library.
+- **Turn off "pause while someone is watching"** unless you run Marquee's
+  server. The check asks Marquee over HTTP and treats no answer as "someone is
+  watching", so with another server it would never run. Choosing "scan my own
+  folders" during setup turns it off for you.
 
 ## Requirements
 
 - **Windows.** Drive and volume handling, the disk-health check and the tray are
   all Windows-specific.
-- **Marquee**, installed and scanned (see above).
+- **Media files.** Either folders to scan, or a Marquee install that has
+  already scanned them — see above. Nothing else is required.
 - **ffmpeg with `libvmaf`.** This matters more than it sounds. Without libvmaf
   there is no way to prove a re-encode still looks like the original, so video
   shrinking is refused outright and only audio conversion runs. **Many ffmpeg
@@ -52,7 +68,7 @@ different program from this one.
 - **Optional: an NVIDIA GPU** for `hevc_nvenc`. Without one it encodes on the
   CPU, which works and is slower. The window says which you have.
 
-ffmpeg is looked for in this order: the `ffmpegPath` in Marquee's `config.json`,
+ffmpeg is looked for in this order: the `ffmpegPath` in the active `config.json`,
 then a copy under the project's `tools/`, then plain `ffmpeg` on `PATH`.
 
 ## Running it
@@ -72,7 +88,8 @@ no window.
 
 ## Settings
 
-In the window, and written back into Marquee's `config.json`:
+In the window. They are written into the `config.json` of whichever root is in
+use — Marquee's, or the optimizer's own when scanning folders.
 
 - **Pause while someone is watching** — asks the media server before starting
   work. **Turn this off if you do not run Marquee's server**, or if it is not on
@@ -115,9 +132,13 @@ The point of this program is that it is boring and does not lose anything.
 
 | | |
 |---|---|
-| Log | `<Marquee folder>\data\optimizer.log` — "Open log folder" in the tray |
-| Its own tables | `media_info` and `optimize_jobs` in Marquee's database |
-| Chosen library folder | `%APPDATA%\Marquee Optimizer\library-location.json` |
+| Log | `<root>\data\optimizer.log` — "Open log folder" in the tray |
+| Its own tables | `media_info` and `optimize_jobs`, in whichever database is in use |
+| Which root was chosen | `%APPDATA%\Marquee Optimizer\library-location.json` |
+| Its own library, when scanning folders | `%APPDATA%\Marquee Optimizer\library\` |
+
+"Root" is the Marquee folder, or the optimizer's own one above when it is
+scanning folders itself.
 
 ## Building
 

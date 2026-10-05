@@ -58,6 +58,76 @@ function readPort() {
   catch { return 8097; }
 }
 
+// ---- Standalone: a root the optimizer owns ------------------------------
+//
+// Without Marquee there is no config.json and no library database, and the
+// engine needs both. Rather than teaching it a second mode, setup builds a root
+// that looks exactly like the one it already expects — config.json and
+// data\library.db — inside userData. Everything downstream carries on unchanged;
+// the only difference is that `libraryFolders` is set, which switches on the
+// scanner.
+function ownRoot() {
+  return path.join(app.getPath('userData'), 'library');
+}
+
+function ownRootIsReady() {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(ownRoot(), 'config.json'), 'utf8'));
+    return Array.isArray(cfg.libraryFolders) && cfg.libraryFolders.length > 0;
+  } catch { return false; }
+}
+
+/** Ask for folders to scan, then build the root. True if it is ready to run. */
+async function setUpOwnLibrary() {
+  const folders = [];
+  for (;;) {
+    const picked = await dialog.showOpenDialog({
+      title: folders.length ? 'Add another folder, or Cancel when done' : 'Which folder holds your media?',
+      properties: ['openDirectory', 'multiSelections']
+    });
+    if (!picked.canceled) {
+      for (const f of picked.filePaths) if (!folders.includes(f)) folders.push(f);
+    }
+    if (!folders.length) return false;        // cancelled before naming any
+
+    const more = await dialog.showMessageBox({
+      type: 'question',
+      title: 'Marquee Optimizer — setup',
+      message: folders.length === 1 ? 'One folder chosen' : `${folders.length} folders chosen`,
+      detail: folders.join('\n') + '\n\nSub-folders are included.',
+      buttons: ['Done', 'Add another…', 'Start over'],
+      defaultId: 0, cancelId: 0, noLink: true
+    });
+    if (more.response === 0) break;
+    if (more.response === 2) folders.length = 0;
+  }
+
+  const root = ownRoot();
+  try {
+    fs.mkdirSync(path.join(root, 'data'), { recursive: true });
+    const cfgPath = path.join(root, 'config.json');
+    // Written only if absent, so a second run through setup cannot discard
+    // settings the owner has since changed.
+    let cfg = {};
+    try { cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')); } catch { /* new */ }
+    cfg.libraryFolders = folders;
+    cfg.dbPath = './data/library.db';
+    // Nothing to ask about playback, so do not stand down waiting for an answer
+    // that will never come. This is the setting that would otherwise leave a
+    // non-Marquee install doing nothing at all.
+    if (cfg.pauseWhileWatching === undefined) cfg.pauseWhileWatching = false;
+    fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
+  } catch (e) {
+    dialog.showErrorBox('Marquee Optimizer', 'Could not set up the library folder.\n\n' + e.message);
+    return false;
+  }
+
+  ROOT = root;
+  PORT = readPort();
+  saveRoot(savedRootFile(), root);
+  return true;
+}
+
 /**
  * Ask for the Marquee folder until it points at something usable, or the owner
  * quits.
@@ -71,24 +141,30 @@ function readPort() {
  */
 async function runSetup() {
   if (!rootProblems(ROOT).length) return true;
+  // A standalone setup already done: its own root is saved and valid.
+  if (ownRootIsReady()) { ROOT = ownRoot(); PORT = readPort(); return true; }
 
   for (;;) {
     const problems = rootProblems(ROOT);
     const r = await dialog.showMessageBox({
-      type: 'warning',
+      type: 'question',
       title: 'Marquee Optimizer — setup',
-      message: 'Point the optimizer at your Marquee folder',
+      message: 'Where should the optimizer get its library?',
       detail:
-        'The optimizer works on the library Marquee has already scanned, so it ' +
-        'needs the folder Marquee is installed in — the one containing ' +
-        'config.json and data\\library.db.\n\n' +
-        'Tried: ' + ROOT + '\n\n' + problems.join('\n'),
-      buttons: ['Choose folder…', 'Quit'],
+        'It can work from Marquee, which has already scanned and catalogued ' +
+        'everything — or it can scan folders itself, which is what to choose if ' +
+        'you run Plex, Jellyfin, Emby, or no media server at all.\n\n' +
+        'Tried for a Marquee install at: ' + ROOT + '\n' + problems.join('\n'),
+      buttons: ['Scan my own folders…', 'I use Marquee — choose its folder…', 'Quit'],
       defaultId: 0,
-      cancelId: 1,
+      cancelId: 2,
       noLink: true
     });
-    if (r.response !== 0) return false;
+    if (r.response === 2) return false;
+    if (r.response === 0) {
+      if (await setUpOwnLibrary()) return true;
+      continue;
+    }
 
     const picked = await dialog.showOpenDialog({
       title: 'Where is Marquee installed?',
