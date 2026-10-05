@@ -16,6 +16,8 @@
 sub detailOpenLayer()
     stopActivePlayer()
     m.detailOpen = true
+    ' Which page is on screen, for answers that arrive after it was built.
+    m.detailSeq = num(m.detailSeq, 0) + 1
     m.detailG.visible = true
     clearChildren(m.detailG)
     uiRect(m.detailG, 0, 0, 960, 540, m.c.bg)
@@ -186,6 +188,95 @@ function versionLabel(f as object, i as integer) as string
     return joinArr(parts, "   ·   ")
 end function
 
+' /api/versions/<kind>/<id> -> [{ fileId, quality, label }]: what each file
+' actually is, read from the file by the server ("4K · HEVC HDR10 · TrueHD
+' Atmos 7.1 · 58.2 GB"; quality is the tier from the picture, so an episode
+' whose filename says nothing still has one). Keyed by file id. The page never
+' waits on it: until it answers, or if it fails, the filename's description
+' above stands.
+function versionInfoMap(data as dynamic) as dynamic
+    if data = invalid or type(data) <> "roArray" then return invalid
+    map = {}
+    for each v in data
+        if v <> invalid and type(v) = "roAssociativeArray" and v.fileId <> invalid then map[str0(v.fileId)] = v
+    end for
+    return map
+end function
+
+function versionInfoOf(map as dynamic, f as object) as dynamic
+    if map = invalid or f = invalid then return invalid
+    return map[str0(f.id)]
+end function
+
+' The picker list: the server's full description.
+function versionFullLabel(map as dynamic, f as object, i as integer) as string
+    v = versionInfoOf(map, f)
+    if v <> invalid and str0(v.label) <> "" then return str0(v.label)
+    return versionLabel(f, i)
+end function
+
+' The closed select has little room: the tier and the size, as the Apple TV's
+' row shows it.
+function versionShortLabel(map as dynamic, f as object, i as integer) as string
+    v = versionInfoOf(map, f)
+    if v = invalid then return versionLabel(f, i)
+    q = str0(v.quality)
+    if q = "" then q = str0(f.quality)
+    if q = "" then q = "Version " + str0(i + 1)
+    sz = fmtSize(f.size)
+    if sz <> "" then return q + " · " + sz
+    return q
+end function
+
+sub fetchVersions(kind as string, id as dynamic)
+    apiGet("/api/versions/" + kind + "/" + str0(id), onVersions, { kind: kind, id: str0(id), seq: m.detailSeq })
+end sub
+
+sub onVersions(res as object, req as object)
+    ' The page may have been closed or replaced by another while it was asked.
+    if not isT(m.detailOpen) or m.detailSeq <> req.seq then return
+    map = versionInfoMap(res.data)
+    if map = invalid then return
+    if req.kind = "movie"
+        d = m.dPage
+        if d = invalid or str0(d.m.id) <> req.id then return
+        d.ver = map
+        versionsRebuild("dAction")
+    else
+        d = m.ePage
+        if d = invalid or str0(d.ep.id) <> req.id then return
+        d.ver = map
+        versionsRebuild("eAction")
+    end if
+end sub
+
+' The select's width follows its text, so the action row is rebuilt; focus
+' stays where it was (on the select, or on the same button).
+sub versionsRebuild(flag as string)
+    was = m.fCur
+    wasAct = was <> invalid and isT(was[flag])
+    wasSel = wasAct and str0(was.kind) = "select"
+    wasLabel = ""
+    if wasAct and was.btn <> invalid then wasLabel = was.btn.parts[0]
+    if flag = "dAction"
+        detailMovieActions()
+    else
+        epActions()
+    end if
+    if not wasAct then return
+    for each it in m.fItems["detail"]
+        if isT(it[flag])
+            hit = wasSel and str0(it.kind) = "select"
+            if not hit and wasLabel <> "" and it.btn <> invalid then hit = it.btn.parts[0] = wasLabel
+            if hit
+                m.fCur = invalid
+                fSet(it)
+                return
+            end if
+        end if
+    end for
+end sub
+
 ' app.js preferredFile(): an explicit choice wins; a remote viewer gets the
 ' smallest version at or under the cap; then the last quality picked; then the first.
 function preferredFile(files as object, key as dynamic) as dynamic
@@ -318,6 +409,7 @@ sub movieDetailBuild(req as object)
     end if
     by = detailMovieSections(extra, mv, by)
     detailFinish(by + 70)
+    if files.Count() > 1 then fetchVersions("movie", mv.id)
     if req.autoplay then moviePlay(d.resumeAt)
 end sub
 
@@ -387,7 +479,7 @@ sub detailMovieActions()
         for i = 0 to d.files.Count() - 1
             if d.current <> invalid and d.files[i].id = d.current.id then idx = i
         end for
-        selText = versionLabel(d.files[idx], idx)
+        selText = versionShortLabel(d.ver, d.files[idx], idx)
         sst = { v: "A600", s: 13, c: m.c.onDark, lh: 15.3 }
         sw = textWidth(selText, sst) + 24 + 2 + 20
         w = 4 + lw + 8 + sw
@@ -440,7 +532,7 @@ sub dVersionPick(it as object)
     labels = []
     sel = 0
     for i = 0 to d.files.Count() - 1
-        labels.Push(versionLabel(d.files[i], i))
+        labels.Push(versionFullLabel(d.ver, d.files[i], i))
         if d.current <> invalid and d.files[i].id = d.current.id then sel = i
     end for
     m.dSelItem = it
@@ -455,7 +547,7 @@ sub dVersionChosen(idx as integer)
     rememberVersion("m" + str0(d.m.id), f)
     it = m.dSelItem
     if it <> invalid
-        it.sel.text = versionLabel(f, idx)
+        it.sel.text = versionShortLabel(d.ver, f, idx)
         selectPaint(it.sel, m.fCur <> invalid and m.fCur.fid = it.fid)
     end if
 end sub

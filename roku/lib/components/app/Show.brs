@@ -445,6 +445,7 @@ sub onEpisodeExtra(res as object, req as object)
     people = extra.people
     if people <> invalid and people.Count() > 0 then by = detailPeople(people, by)
     detailFinish(by + 70)
+    if files.Count() > 1 then fetchVersions("episode", ep.id)
 end sub
 
 sub epActions()
@@ -494,7 +495,7 @@ sub epActions()
         for i = 0 to d.files.Count() - 1
             if d.current <> invalid and d.files[i].id = d.current.id then idx = i
         end for
-        selText = versionLabel(d.files[idx], idx)
+        selText = versionShortLabel(d.ver, d.files[idx], idx)
         sw = textWidth(selText, { v: "A600", s: 13 }) + 46
         w = 4 + lw + 8 + sw
         if cx + w > x + 640 and cx > x
@@ -524,7 +525,7 @@ sub eVersionPick(it as object)
     labels = []
     sel = 0
     for i = 0 to d.files.Count() - 1
-        labels.Push(versionLabel(d.files[i], i))
+        labels.Push(versionFullLabel(d.ver, d.files[i], i))
         if d.current <> invalid and d.files[i].id = d.current.id then sel = i
     end for
     m.eSelItem = it
@@ -539,7 +540,7 @@ sub eVersionChosen(idx as integer)
     rememberVersion("e" + str0(d.ep.id), f)
     it = m.eSelItem
     if it <> invalid
-        it.sel.text = versionLabel(f, idx)
+        it.sel.text = versionShortLabel(d.ver, f, idx)
         selectPaint(it.sel, m.fCur <> invalid and m.fCur.fid = it.fid)
     end if
 end sub

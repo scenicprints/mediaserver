@@ -158,8 +158,12 @@ app changes, this file changes with it and the Roku app follows.
 - [ ] Art band, poster, title, chips (year, ★, runtime h m, quality), genres, actions:
       ▶ RESUME + ↺ FROM BEGINNING (resume > 5s) or ▶ PLAY; ☆ Favorite/★ Favorited;
       Mark watched/✓ Watched (clears resume, redraws play buttons); provider buttons
-      "Netflix ▸"; Version picker (>1 file, label = quality · size · tags) remembered via
-      `verid:m<id>` + `pq`.
+      "Netflix ▸"; Version picker (>1 file) remembered via `verid:m<id>` + `pq`. With >1
+      file, `/api/versions/movie/<id>` is fetched after the page is built (never blocks it):
+      the picker list shows each file's `label` ("4K · HEVC HDR10 · TrueHD Atmos 7.1 ·
+      58.2 GB"), the closed select `quality · size`; until it answers, or if it fails, both
+      use the filename label (quality · size · tags). Same on the episode page
+      (`/api/versions/episode/<id>`).
 - [ ] Tagline, overview, filename (mono).
 - [ ] Cast & Crew (directors first, circle-less square photos 118px, placeholders), franchise
       strip (owned ones open, others dimmed, "▸ in library"), More Like This. No Trailers & Extras section.
@@ -185,6 +189,8 @@ play to `PlayerActivity.kt`, and the web app only chains what happens after. So 
 player copies PlayerActivity (sizes in dp = CSS px, x2 on the Roku canvas) and the web's
 native-handoff chain. The web player (caption delay, online subtitle search, in-player
 version switch, soundtrack chooser, Up Next card, end card) is Android's FALLBACK only.
+Exception, by the owner's rule that every client has them: the in-player Audio and Version
+sections (see the player menu below), which the Apple TV and web player already have.
 
 - [ ] Direct plays `/api/stream/...` (Roku Video node). If the Roku can't decode it, the
       fallback is the server's `/api/hls/...` path at the same position (Android: native
@@ -202,8 +208,8 @@ version switch, soundtrack chooser, Up Next card, end card) is Android's FALLBAC
       choice stands). No track that device can play (TrueHD + DTS only on a Roku): starts on
       the `/api/hls/...` converted stream instead.
       The list is waited on for 3s at most, then direct play starts as before (a late
-      answer still sets the track). The Roku player has no audio menu yet (Android's
-      PlayerActivity has none either), so there is nothing to mark as selected.
+      answer still sets the track). The list is fetched on the converted stream too (no
+      pick there), for the Audio menu below.
 - [ ] Pre-roll (`/api/preroll/stream`) before a movie started from 0; locked (only Back,
       which exits everything); a broken pre-roll just starts the movie. The fallback
       path plays it too (on Android the fallback is the web player, which does).
@@ -216,9 +222,11 @@ version switch, soundtrack chooser, Up Next card, end card) is Android's FALLBAC
       34/30/34/24dp, black 78%->0 gradient: 4dp scrub (track white 18%, fill signal), 10dp
       gap, row: play icon "❚❚"/"▶" 15sp bold (hidden on live), time "0:00 / 0:00" 13sp
       .06 tracking (live: "LIVE" signal .3 tracking), hint right-aligned 12sp .08 tracking
-      text-3: "OK play/pause · ◀ ▶ ±10s · ▼ subtitles · Back exit" (live: "▼ subtitles · Back exit").
+      text-3: "OK play/pause · ◀ ▶ ±10s · ▼ subtitles · Back exit" (live: "▼ subtitles · Back exit");
+      "subtitles" becomes "subtitles, audio" / "subtitles, audio, version" when those
+      sections exist (audio once the track list is in).
 - [ ] Keys: OK = Skip Intro if showing, else Skip Credits if showing, else play/pause;
-      ⏯ = play/pause; ◀/⏪ = -10s; ▶/⏩ = +10s; ▲ = show HUD; ▼ = subtitles menu;
+      ⏯ = play/pause; ◀/⏪ = -10s; ▶/⏩ = +10s; ▲ = show HUD; ▼ = player menu;
       Back = hide HUD if showing, else save progress and exit. Live: no pause, no seek.
 - [ ] Skip Intro pill "SKIP INTRO ▸  (OK)" / Skip Credits "SKIP CREDITS ▸  (OK)": bottom
       right 40dp/90dp, 20x11dp padding, bold 14sp .18 tracking, dark rgba(20,20,22,.82)
@@ -229,6 +237,24 @@ version switch, soundtrack chooser, Up Next card, end card) is Android's FALLBAC
       rows 14sp text-2, selected row panel-2 fill + signal text, "✓ " prefix on the current
       one. Rows: "✨ Generate with AI…" (-> "✨ Generating… N% (phase)", "✨ Failed — try
       again"), "Off", every server track. Up/Down move, OK picks, Back closes.
+- [ ] Same panel, after Subtitles (the Apple TV's order), each section under its own
+      header with a 1dp rule above it; headers are skipped by Up/Down. The panel grows past
+      340dp only to fit a long row (max 560); when the rows don't fit 540 it scrolls to keep
+      the focused row in view, ▲/▼ marking hidden rows.
+      Audio (only when `/api/audio/list` has >1 track): every track, "CODEC · layout · LANG ·
+      title" (+ "commentary" when the title doesn't say it), "✓ " on the playing one (the
+      viewer's or auto-pick's choice; on the converted stream the server's `pickAudioIndex`
+      default; else the Roku's own, matched by position; unknown = no tick). OK: on direct
+      play, a track `playable[device]` is switched in place via `audioTrack` by position
+      (only when the Roku lists as many tracks as the server); otherwise, and always on the
+      converted stream, the `/api/hls/.../index.m3u8?start=<pos>&atrack=<index>` stream
+      restarts at the current position (the server converts TrueHD/DTS). Subtitles carry on.
+      The pick is kept on the handoff, so a later direct-play failure falls back on it.
+      Version (only when the title has >1 file; web player's version list): every file,
+      `/api/versions/<kind>/<id>` label (filename label until it answers), "✓ " on the
+      playing file. OK on another file: remembered (`verid:` + `pq`), then a new handoff of
+      that file at the current position with the same title/progress URL/chain (no pre-roll),
+      so it gets its own soundtrack auto-pick, subtitle list and direct-play attempt.
 - [ ] Chain (web `__marqueeNativeDone`): episode ended -> next episode plays (next
       episode's preferred version); movie ended -> back to its detail page, Continue
       Watching refreshed; failure -> fallback path from the same position. Live TV

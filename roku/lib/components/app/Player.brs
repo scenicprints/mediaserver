@@ -29,7 +29,13 @@ sub openPlayer(ctx as object)
     preroll = invalid
     ' The fallback still plays it: on Android the fallback is the web player,
     ' which runs the pre-roll for a movie started at 0 (Classic included).
-    if kind = "movie" and not (num(ctx.startAt, 0) > 0) and m.prerollInfo <> invalid then preroll = "/api/preroll/stream"
+    ' A version switch restarts the film mid-play: never a pre-roll then.
+    if kind = "movie" and not (num(ctx.startAt, 0) > 0) and not isT(ctx.noPreroll) and m.prerollInfo <> invalid then preroll = "/api/preroll/stream"
+    ' /api/versions describes a title by its own id (the movie or episode, not
+    ' the file), which the version key already carries: "m12" / "e34".
+    verPath = invalid
+    vk = str0(ctx.verKey)
+    if files.Count() > 1 and Len(vk) > 1 and (kind = "movie" or kind = "episode") then verPath = "/api/versions/" + kind + "/" + Mid(vk, 2)
     spec = {
         title: str0(ctx.title), subtitle: str0(ctx.subtitle), kind: kind, fileId: f.id, filename: str0(f.filename),
         startAt: num(ctx.startAt, 0), live: isT(ctx.live),
@@ -41,6 +47,8 @@ sub openPlayer(ctx as object)
         prerollPath: preroll,
         hasUpNext: ctx.chain <> invalid,
         fallback: isT(ctx.fallback),
+        files: files, verKey: ctx.verKey, versionsPath: verPath,
+        atrack: ctx.atrack,
         deviceId: m.teleDevice
     }
     m.pctx = ctx
@@ -62,8 +70,12 @@ sub playerStart(spec as object)
         sessionId: newUuid(), rebufferStartedAt: 0, rebufferCount: 0, seekGateUntil: 0,
         subTracks: [], currentSubIdx: -1, aiJobRunning: false, menuOpen: false, menuSel: 1,
         base: 0.0, finished: false, wasPlaying: false, cues: [], errShown: false,
-        audState: "none", audT0: 0, audWaiting: false, audPick: -1, audCount: 0, audApplied: false, audMismatch: false
+        audState: "none", audT0: 0, audWaiting: false, audPick: -1, audCount: 0, audApplied: false, audMismatch: false,
+        audTracks: [], audCur: -1, versions: invalid, menuTop: 0
     }
+    ' A soundtrack the viewer chose before this restart (the fallback after a
+    ' failed direct play) is the one playing, not the server's own pick.
+    if spec.atrack <> invalid and num(spec.atrack, -1) >= 0 then pl.audCur = num(spec.atrack, -1)
     m.pl = pl
     m.playerOpen = true
     playerBuildUi()
@@ -77,6 +89,7 @@ sub playerStart(spec as object)
         playerStartMain()
     end if
     playerFetchInfo()
+    playerFetchVersions()
     if m.plNet = invalid
         m.plNet = CreateObject("roSGNode", "Timer")
         m.plNet.duration = 10
@@ -124,6 +137,9 @@ sub playerStartMain()
         pl.base = sp.startAt
         q = "?start=" + fixed2(sp.startAt)
         if regRead("audioMode", "stereo") = "surround" then q = q + "&audio=surround"
+        ' A soundtrack picked from the Audio menu: the route carries one audio
+        ' rendition, so the choice is part of the request.
+        if sp.atrack <> invalid and num(sp.atrack, -1) >= 0 then q = q + "&atrack=" + str0(num(sp.atrack, -1))
         url = absUrl(withToken("/api/hls/" + sp.kind + "/" + str0(sp.fileId) + "/index.m3u8" + q))
         playerPlayUrl(url, "hls")
         pl.resumeApplied = true
@@ -219,12 +235,26 @@ sub playerBuildHud()
     m.plTimeX = tx
     if live
         m.plTime = uiText(h, "LIVE", { v: "R400t30", s: 13, c: m.pc.signal, lh: rowH }, tx, ry)
-        hint = "▼ subtitles · Back exit"
     else
         m.plTime = uiText(h, "0:00 / 0:00", { v: "R400t06", s: 13, c: m.pc.ink, lh: rowH }, tx, ry)
-        hint = "OK play/pause · ◀ ▶ ±10s · ▼ subtitles · Back exit"
     end if
-    uiText(h, hint, { v: "R400t08", s: 12, c: m.pc.ink3, lh: rowH, w: 892, align: "right" }, 34, ry)
+    m.plHint = uiText(h, playerHintText(), { v: "R400t08", s: 12, c: m.pc.ink3, lh: rowH, w: 892, align: "right" }, 34, ry)
+end sub
+
+' The hint names what ▼ opens. The Audio section appears only once the track
+' list is in, so the hint is rewritten then.
+function playerHintText() as string
+    pl = m.pl
+    holds = ["subtitles"]
+    if pl.audTracks.Count() > 1 then holds.Push("audio")
+    if pl.spec.files <> invalid and pl.spec.files.Count() > 1 then holds.Push("version")
+    menu = "▼ " + joinArr(holds, ", ")
+    if pl.live then return menu + " · Back exit"
+    return "OK play/pause · ◀ ▶ ±10s · " + menu + " · Back exit"
+end function
+
+sub playerRefreshHint()
+    if m.plHint <> invalid and m.pl <> invalid then m.plHint.text = playerHintText()
 end sub
 
 function playerPill(g as object, text as string) as object
@@ -387,29 +417,37 @@ end sub
 ' Direct play hands the Roku the raw file, and the Roku plays whichever track
 ' the file marks as default: often TrueHD or DTS, which it can't decode. So ask
 ' the server what is in the file (app.js chooseAudioTrackThen) and pick one the
-' device named in Settings plays as-is. The converted stream needs none of this: the server picks
-' a copyable track for it.
+' device named in Settings plays as-is. The converted stream needs no pick:
+' the server chooses a copyable track for it. The list is still fetched there,
+' for the Audio menu.
 sub playerFetchAudio()
     pl = m.pl
     sp = pl.spec
-    if sp.fallback then return
     if sp.kind <> "movie" and sp.kind <> "episode" then return
-    pl.audState = "pending"
-    pl.audT0 = nowMs()
+    if not sp.fallback
+        pl.audState = "pending"
+        pl.audT0 = nowMs()
+        ' Playback never depends on this: a slow answer is let go after 3 seconds.
+        playerAfter(3.0, "playerAudioTimeout")
+    end if
     apiGet("/api/audio/list/" + sp.kind + "/" + str0(sp.fileId), onAudioList, pl.sessionId)
-    ' Playback never depends on this: a slow answer is let go after 3 seconds.
-    playerAfter(3.0, "playerAudioTimeout")
 end sub
 
 sub onAudioList(res as object, sid as string)
     pl = m.pl
     if pl = invalid or pl.finished or pl.sessionId <> sid then return
+    tracks = invalid
+    if res.data <> invalid and type(res.data) = "roAssociativeArray" then tracks = res.data.tracks
+    if tracks <> invalid and type(tracks) = "roArray" then pl.audTracks = tracks
+    playerRefreshHint()
+    if pl.menuOpen then playerRenderMenu()
+    ' Started on the converted stream: nothing waits on the list, it only
+    ' feeds the Audio menu.
+    if pl.audState = "none" then return
     ' After the timeout the film is already playing: a pick can still be
     ' applied, but it is too late to switch to the converted stream.
     late = pl.audState <> "pending"
     pl.audState = "done"
-    tracks = invalid
-    if res.data <> invalid and type(res.data) = "roAssociativeArray" then tracks = res.data.tracks
     if tracks <> invalid and type(tracks) = "roArray" and tracks.Count() > 0
         dev = audioDeviceKey()
         pick = audioAutoPick(tracks, dev)
@@ -539,8 +577,192 @@ sub playerApplyAudio()
     id = str0(t.Track)
     if id = "" then return
     pl.audApplied = true
+    pl.audCur = pl.audPick
     if str0(v.currentAudioTrack) <> id then v.audioTrack = id
     tele("player", { ev: "audio", result: "set", title: pl.spec.title, idx: pl.audPick, of: pl.audCount, dev: audioDeviceKey() })
+end sub
+
+' src/hls.js pickAudioIndex(): the track the converted stream sends when none
+' was asked for (copyable first, then not commentary, the most channels,
+' E-AC-3 over AC-3 over AAC, the default flag). Only used to tick the right
+' row in the Audio menu, so it must stay the server's rule.
+function audioHlsDefault(tracks as object) as integer
+    pref = ["eac3", "ac3", "aac", "alac", "mp3"]
+    best = 0
+    bestKey = invalid
+    for i = 0 to tracks.Count() - 1
+        t = tracks[i]
+        codec = LCase(str0(t.codec))
+        rank = -1
+        for r = 0 to pref.Count() - 1
+            if pref[r] = codec then rank = r
+        end for
+        if rank >= 0
+            ch = num(t.channels, 0)
+            if ch > 8 then ch = 8
+            notComm = 1
+            if isT(t.commentary) then notComm = 0
+            def = 0
+            if isT(t.default) then def = 1
+            k = [notComm, ch, -rank, def]
+            if bestKey = invalid or audioKeyAbove(k, bestKey)
+                best = num(t.index, i)
+                bestKey = k
+            end if
+        end if
+    end for
+    return best
+end function
+
+function audioKeyAbove(a as object, b as object) as boolean
+    for i = 0 to a.Count() - 1
+        if a[i] <> b[i] then return a[i] > b[i]
+    end for
+    return false
+end function
+
+' Which of the server's tracks is playing, for the tick in the Audio menu: the
+' viewer's or the auto-pick's choice; on the converted stream the server's
+' default; otherwise whatever the Roku chose, when its list lines up with the
+' server's. Unknown is -1, and then nothing is ticked rather than a guess.
+function playerAudioCurrent() as integer
+    pl = m.pl
+    if pl.audCur >= 0 then return pl.audCur
+    if pl.spec.fallback then return audioHlsDefault(pl.audTracks)
+    v = m.video
+    if v = invalid then return -1
+    avail = v.availableAudioTracks
+    if avail = invalid or type(avail) <> "roArray" or avail.Count() <> pl.audTracks.Count() then return -1
+    cur = str0(v.currentAudioTrack)
+    if cur = "" then return -1
+    for i = 0 to avail.Count() - 1
+        if str0(avail[i].Track) = cur then return i
+    end for
+    return -1
+end function
+
+' The menu row: CODEC · layout · LANG · title, and a commentary tag when the
+' title doesn't already say so.
+function audioTrackLabel(t as object, i as integer) as string
+    parts = []
+    c = UCase(str0(t.codec))
+    if c <> "" then parts.Push(c)
+    ly = str0(t.layout)
+    if ly = "" and num(t.channels, 0) > 0 then ly = str0(num(t.channels, 0)) + "ch"
+    if ly <> "" then parts.Push(ly)
+    lang = str0(t.language)
+    if lang <> "" and LCase(lang) <> "und" then parts.Push(UCase(lang))
+    ti = str0(t.title)
+    if ti <> "" then parts.Push(ti)
+    if isT(t.commentary) and not CreateObject("roRegex", "comment", "i").IsMatch(ti) then parts.Push("commentary")
+    if parts.Count() = 0 then return "Track " + str0(i + 1)
+    return joinArr(parts, " · ")
+end function
+
+' The viewer's pick from the Audio menu. A track the chosen device plays as-is
+' is switched in place on direct play, matched by position the same way the
+' auto-pick is (so only when the Roku lists the same number of tracks). Any
+' other case, and every switch on the converted stream, is a new converted
+' stream at the same position asking for that track: the server converts what
+' the device can't decode (TrueHD, DTS on a Roku), and its HLS route carries
+' one soundtrack, so there is no switching inside it.
+sub playerSelectAudio(idx as integer)
+    pl = m.pl
+    playerCloseMenu()
+    if idx = playerAudioCurrent() then return
+    t = invalid
+    for each x in pl.audTracks
+        if num(x.index, -1) = idx then t = x
+    end for
+    if t = invalid then return
+    ' Kept on the handoff too: if direct play later fails, the fallback stream
+    ' plays this track rather than the server's own pick.
+    if m.pctx <> invalid then m.pctx.atrack = idx
+    dev = audioDeviceKey()
+    if not pl.spec.fallback and audioPlayable(t, dev)
+        v = m.video
+        avail = v.availableAudioTracks
+        if avail <> invalid and type(avail) = "roArray" and avail.Count() = pl.audTracks.Count() and idx < avail.Count()
+            id = str0(avail[idx].Track)
+            if id <> ""
+                ' Also stops a late auto-pick from undoing the viewer's choice.
+                pl.audApplied = true
+                pl.audCur = idx
+                if str0(v.currentAudioTrack) <> id then v.audioTrack = id
+                tele("player", { ev: "audio", result: "user", how: "track", title: pl.spec.title, idx: idx, of: pl.audTracks.Count(), dev: dev })
+                return
+            end if
+        end if
+    end if
+    tele("player", { ev: "audio", result: "user", how: "convert", title: pl.spec.title, idx: idx, of: pl.audTracks.Count(), dev: dev, at: Int(pl.positionSec) })
+    playerRestartConverted(idx)
+end sub
+
+' The fallback's own start (playerStartMain: ?start= and pl.base), from where
+' the viewer is now, with the soundtrack named. Captions are drawn here from
+' positionSec, so a chosen subtitle carries straight on.
+sub playerRestartConverted(atrack as integer)
+    pl = m.pl
+    sp = pl.spec
+    atSec = pl.positionSec
+    if atSec < 0 then atSec = 0
+    sp.fallback = true
+    sp.atrack = atrack
+    sp.startAt = atSec
+    pl.startAt = atSec
+    pl.audApplied = true
+    pl.audCur = atrack
+    ' The reload's buffering is the viewer's doing, not a stall.
+    playerMarkSeek()
+    m.video.control = "stop"
+    playerStartMain()
+end sub
+
+' ------------------------------------------------------------ versions
+' /api/versions: what each file actually is ("4K · HEVC HDR10 · TrueHD Atmos
+' 7.1 · 58.2 GB"). Until it answers (or if it never does) the rows use the
+' filename's description, as the detail page does.
+sub playerFetchVersions()
+    pl = m.pl
+    p = pl.spec.versionsPath
+    if p = invalid then return
+    apiGet(p, onPlayerVersions, pl.sessionId)
+end sub
+
+sub onPlayerVersions(res as object, sid as string)
+    pl = m.pl
+    if pl = invalid or pl.finished or pl.sessionId <> sid then return
+    pl.versions = versionInfoMap(res.data)
+    if pl.menuOpen then playerRenderMenu()
+end sub
+
+' app.js loadFile() from the version list: the other file, from the same
+' position, under the same title (same progress URL, same chain). It is a new
+' handoff, so the new file gets its own soundtrack pick, subtitle list and
+' direct-play attempt; the old file's fallback and soundtrack don't carry over.
+sub playerSelectVersion(fileId as dynamic)
+    pl = m.pl
+    sp = pl.spec
+    playerCloseMenu()
+    ctx = m.pctx
+    if ctx = invalid or str0(fileId) = str0(sp.fileId) then return
+    f = invalid
+    for each x in sp.files
+        if str0(x.id) = str0(fileId) then f = x
+    end for
+    if f = invalid then return
+    rememberVersion(sp.verKey, f)
+    atSec = pl.positionSec
+    tele("player", { ev: "version", title: sp.title, from: sp.fileId, to: f.id, at: Int(atSec) })
+    ' Silent: reports progress and ends the session, with no native-done chain.
+    playerFinish(false, false, true)
+    ctx.startFileId = f.id
+    ctx.startAt = 0
+    if atSec > 1 then ctx.startAt = atSec
+    ctx.fallback = false
+    ctx.atrack = invalid
+    ctx.noPreroll = true
+    openPlayer(ctx)
 end sub
 
 ' ------------------------------------------------------------ ticks
@@ -630,62 +852,169 @@ sub onSubList(res as object, sid as string)
     end if
 end sub
 
-' Right-side panel, 340dp, 30 from the edge, centred vertically.
+' Right-side panel, 340dp, 30 from the edge, centred vertically. Subtitles
+' first, as before (so ▼ still lands on the same row), then Audio when the
+' file has more than one soundtrack and Version when the title has more than
+' one file: the Apple TV's order, sections under their own heading. Headings
+' are never focused.
 sub playerRenderMenu()
     pl = m.pl
     g = m.plMenu
     clearChildren(g)
     rows = []
+    rows.Push({ head: true, text: "Subtitles" })
     ai = "✨ Generate with AI…"
     if pl.aiJobRunning then ai = "✨ Generating…"
     if pl.aiText <> invalid then ai = pl.aiText
-    rows.Push({ text: ai, idx: -2, ai: true })
-    rows.Push({ text: "Off", idx: -1 })
+    rows.Push({ kind: "sub", text: ai, idx: -2, ai: true })
+    rows.Push({ kind: "sub", text: "Off", idx: -1, on: pl.currentSubIdx = -1 })
     for i = 0 to pl.subTracks.Count() - 1
         t = pl.subTracks[i]
         idx = i
         if t.idx <> invalid then idx = t.idx
         lbl = str0(t.label)
         if lbl = "" then lbl = "Track " + str0(i + 1)
-        rows.Push({ text: lbl, idx: idx })
+        rows.Push({ kind: "sub", text: lbl, idx: idx, on: idx = pl.currentSubIdx })
     end for
+    if pl.audTracks.Count() > 1
+        rows.Push({ head: true, text: "Audio" })
+        cur = playerAudioCurrent()
+        for i = 0 to pl.audTracks.Count() - 1
+            t = pl.audTracks[i]
+            idx = num(t.index, i)
+            rows.Push({ kind: "aud", text: audioTrackLabel(t, i), idx: idx, on: idx = cur })
+        end for
+    end if
+    files = pl.spec.files
+    if files <> invalid and files.Count() > 1
+        rows.Push({ head: true, text: "Version" })
+        for i = 0 to files.Count() - 1
+            f = files[i]
+            rows.Push({ kind: "ver", text: versionFullLabel(pl.versions, f, i), fileId: f.id, on: str0(f.id) = str0(pl.spec.fileId) })
+        end for
+    end if
     pl.menuRows = rows
     if pl.menuSel > rows.Count() then pl.menuSel = rows.Count()
+    if pl.menuSel < 1 then pl.menuSel = 1
+    while pl.menuSel < rows.Count() and isT(rows[pl.menuSel - 1].head)
+        pl.menuSel = pl.menuSel + 1
+    end while
     headH = tvLineH(11) + 16
     rowH = tvLineH(14) + 22
-    h = 10 + headH + rows.Count() * rowH + 10 + 2
-    if h > 540 then h = 540
-    x = 960 - 30 - 340
-    y = (540 - h) / 2
-    uiRect(g, x, y, 340, h, "0x1D1D20F6")
-    uiFrame(g, x, y, 340, h, 1, m.pc.rule)
-    uiText(g, "Subtitles", { v: "R700t24", s: 11, c: m.pc.ink3, lh: tvLineH(11) }, x + 1 + 6 + 14, y + 1 + 10 + 8)
-    ry = y + 1 + 10 + headH
+    ' A later section starts 10 lower, under a hairline.
+    gapH = 10
+    hts = []
+    total = 0
     for i = 0 to rows.Count() - 1
-        r = rows[i]
-        on = (i + 1 = pl.menuSel)
-        if on then uiRect(g, x + 7, ry, 326, rowH, m.pc.panel2)
-        ink = m.pc.ink2
-        if on then ink = m.pc.signal
-        t = r.text
-        if not isT(r.ai) and r.idx = pl.currentSubIdx then t = "✓ " + t
-        st = { v: "R400", s: 14, c: ink, lh: tvLineH(14) }
-        if isT(r.ai)
-            parts = [{ e: "2728" }, Mid(t, 2)]
-            uiRich(g, parts, st, x + 7 + 14, ry + 11)
-        else
-            uiText(g, t, { v: "R400", s: 14, c: ink, lh: tvLineH(14), w: 298 }, x + 7 + 14, ry + 11)
+        rh = rowH
+        if isT(rows[i].head)
+            rh = headH
+            if i > 0 then rh = rh + gapH
         end if
-        ry = ry + rowH
+        hts.Push(rh)
+        total = total + rh
     end for
+    ' 340 wide like PlayerActivity's panel; wider only so a long row (a version
+    ' description runs to "4K · HEVC HDR10 · TrueHD Atmos 7.1 · 58.2 GB") isn't
+    ' cut short. The text keeps 7 + 14 in from the left and 21 from the right.
+    w = 340
+    for each r in rows
+        if not isT(r.head) and not isT(r.ai)
+            need = measure("✓ " + r.text, "R400", 14) + 42
+            if need > w then w = need
+        end if
+    end for
+    if w > 560 then w = 560
+    tw = w - 42
+    ' Too many rows for the screen: the list scrolls to keep the focused row in
+    ' view, with a ▲ / ▼ where rows are hidden. A heading stays with its
+    ' section's first row.
+    inner = 540 - 2 - 20
+    arrowH = 0
+    top = 0
+    if total > inner
+        arrowH = tvLineH(11)
+        inner = inner - 2 * arrowH
+        top = pl.menuTop
+        sel = pl.menuSel - 1
+        if sel < top then top = sel
+        if top = sel and top > 0 and isT(rows[top - 1].head) then top = top - 1
+        used = 0
+        for i = top to sel
+            used = used + hts[i]
+        end for
+        while used > inner and top < sel
+            used = used - hts[top]
+            top = top + 1
+        end while
+        h = 540
+    else
+        h = 10 + total + 10 + 2
+    end if
+    pl.menuTop = top
+    x = 960 - 30 - w
+    y = (540 - h) / 2
+    uiRect(g, x, y, w, h, "0x1D1D20F6")
+    uiFrame(g, x, y, w, h, 1, m.pc.rule)
+    arrowSt = { v: "R400", s: 11, c: m.pc.ink3, lh: arrowH, w: w, align: "center" }
+    if top > 0 then uiText(g, "▲", arrowSt, x, y + 1 + 10)
+    ry = y + 1 + 10 + arrowH
+    bottom = ry + inner
+    if arrowH = 0 then bottom = ry + total
+    last = top - 1
+    for i = top to rows.Count() - 1
+        if ry + hts[i] > bottom + 0.5 then exit for
+        r = rows[i]
+        if isT(r.head)
+            ty = ry
+            if i > 0
+                uiRect(g, x + 7, ry + gapH / 2, w - 14, 1, m.pc.rule)
+                ty = ry + gapH
+            end if
+            uiText(g, r.text, { v: "R700t24", s: 11, c: m.pc.ink3, lh: tvLineH(11) }, x + 1 + 6 + 14, ty + 8)
+        else
+            on = (i + 1 = pl.menuSel)
+            if on then uiRect(g, x + 7, ry, w - 14, rowH, m.pc.panel2)
+            ink = m.pc.ink2
+            if on then ink = m.pc.signal
+            t = r.text
+            if isT(r.on) then t = "✓ " + t
+            st = { v: "R400", s: 14, c: ink, lh: tvLineH(14) }
+            if isT(r.ai)
+                parts = [{ e: "2728" }, Mid(t, 2)]
+                uiRich(g, parts, st, x + 7 + 14, ry + 11)
+            else
+                uiText(g, t, { v: "R400", s: 14, c: ink, lh: tvLineH(14), w: tw }, x + 7 + 14, ry + 11)
+            end if
+        end if
+        last = i
+        ry = ry + hts[i]
+    end for
+    if last < rows.Count() - 1 then uiText(g, "▼", arrowSt, x, y + h - 1 - 10 - arrowH)
+end sub
+
+' Up/Down step over the headings.
+sub playerMenuMove(dir as integer)
+    pl = m.pl
+    rows = pl.menuRows
+    i = pl.menuSel + dir
+    while i >= 1 and i <= rows.Count() and isT(rows[i - 1].head)
+        i = i + dir
+    end while
+    if i >= 1 and i <= rows.Count() then pl.menuSel = i
+    playerRenderMenu()
 end sub
 
 sub playerMenuClick()
     pl = m.pl
     r = pl.menuRows[pl.menuSel - 1]
-    if r = invalid then return
+    if r = invalid or isT(r.head) then return
     if isT(r.ai)
         playerStartAiSubs()
+    else if r.kind = "aud"
+        playerSelectAudio(r.idx)
+    else if r.kind = "ver"
+        playerSelectVersion(r.fileId)
     else
         playerSelectSub(r.idx)
     end if
@@ -849,11 +1178,9 @@ function playerKey(key as string, press as boolean) as boolean
         if key = "back"
             playerCloseMenu()
         else if key = "up"
-            if pl.menuSel > 1 then pl.menuSel = pl.menuSel - 1
-            playerRenderMenu()
+            playerMenuMove(-1)
         else if key = "down"
-            if pl.menuSel < pl.menuRows.Count() then pl.menuSel = pl.menuSel + 1
-            playerRenderMenu()
+            playerMenuMove(1)
         else if key = "OK"
             playerMenuClick()
         end if
@@ -964,6 +1291,7 @@ sub playerFinish(ended as boolean, failed as boolean, silent as boolean)
     end if
     clearChildren(m.playerG)
     m.video = invalid
+    m.plHint = invalid
     m.playerOpen = false
     posS = pl.positionSec
     endedAll = ended or pl.endedNaturally
