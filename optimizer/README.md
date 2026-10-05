@@ -80,6 +80,10 @@ Double-click the executable. It opens a window and puts an icon in the tray.
 - **Start with Windows** is a tray-menu checkbox. It launches hidden, so the
   machine does not boot to a window nobody asked for.
 - **Change library folder…** in the tray if Marquee moves.
+- **Restart it if it stops** is another tray checkbox. It registers a Windows
+  Scheduled Task that checks every five minutes and starts the optimizer again if
+  it is not running — after a crash, or after something else took it down. It
+  needs no administrator rights and stores no password.
 - The window is at `http://localhost:8097`, bound to `127.0.0.1` only — it is
   not reachable from the network, which is why it has no password.
 

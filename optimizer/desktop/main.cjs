@@ -17,6 +17,7 @@ const { app, BrowserWindow, Tray, Menu, nativeImage, shell, dialog } = require('
 const path = require('node:path');
 const fs = require('node:fs');
 const { rootProblems, loadSavedRoot, saveRoot } = require('./locate.cjs');
+const watchdog = require('./watchdog.cjs');
 
 // Not const: setup can change where the library is, and everything downstream
 // reads these.
@@ -334,6 +335,24 @@ function setStartsWithWindows(on) {
   buildTray(); // redraw, so the tick shows what actually happened rather than what was asked
 }
 
+// Restart it if it stops — a Scheduled Task, see desktop/watchdog.cjs for why
+// that rather than a second process.
+function watchdogOn() {
+  try { return watchdog.isEnabled(); } catch { return false; }
+}
+
+function setWatchdog(on) {
+  try {
+    if (on) watchdog.enable(app.getPath('exe'));
+    else watchdog.disable();
+  } catch (e) {
+    dialog.showErrorBox('Marquee Optimizer',
+      'Could not change the restart setting.\n\n' + (e.message || String(e)) +
+      '\n\nThis needs Windows Task Scheduler, which some systems lock down.');
+  }
+  buildTray();   // redraw so the tick shows what happened, not what was asked
+}
+
 function buildTray() {
   // Reused on redraw: a second `new Tray` leaves two icons in the notification
   // area, both live, and only one of them ever goes away.
@@ -347,6 +366,12 @@ function buildTray() {
       type: 'checkbox',
       checked: startsWithWindows(),
       click: (item) => setStartsWithWindows(item.checked)
+    },
+    {
+      label: 'Restart it if it stops',
+      type: 'checkbox',
+      checked: watchdogOn(),
+      click: (item) => setWatchdog(item.checked)
     },
     { type: 'separator' },
     {
@@ -372,7 +397,13 @@ function buildTray() {
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  app.on('second-instance', showWindow);
+  // A person double-clicking the exe wants the window. The watchdog task, which
+  // fires every few minutes whether or not anything is wrong, does not — without
+  // this it would raise the window in the owner's face for ever.
+  app.on('second-instance', (_e, argv) => {
+    if (watchdog.startedByWatchdog(argv)) return;
+    showWindow();
+  });
 
   app.whenReady().then(async () => {
     // Before anything else: can this even find a library? If not, ask — and if
