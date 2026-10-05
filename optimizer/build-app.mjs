@@ -19,11 +19,17 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
 const OUT = path.join(ROOT, 'dist');
 
+// One version, from package.json, which is the copy Windows shows in the file
+// properties anyway. It was written out here as well, and two hardcoded strings
+// that have to agree eventually do not — the build would have quietly shipped
+// "1.0.0" in the executable's metadata long after package.json said otherwise.
+const APP_VERSION = JSON.parse(fs.readFileSync(path.join(HERE, 'package.json'), 'utf8')).version;
+
 const opts = {
   dir: HERE,
   out: OUT,
   name: 'Marquee Optimizer',
-  appVersion: '1.0.0',
+  appVersion: APP_VERSION,
   // Stated explicitly rather than inferred from the app package.json: the
   // optimizer is not an npm project with electron as a dependency, it is a
   // folder of source that happens to be launched by one.
@@ -41,6 +47,11 @@ const opts = {
     /^\/build-exe\.mjs$/,
     /^\/build-app\.mjs$/,
     /^\/run\.mjs$/,          // the CLI stays a CLI; the app does not shell out to it
+    // The headless entry point, for running as a service. package.json's `main`
+    // is desktop/main.cjs, so inside the asar this can never be started — it
+    // was shipping to every user as a file that cannot run. It stays in the
+    // repository, where `node optimizer/app.mjs` is the point of it.
+    /^\/app\.mjs$/,
     // Seven analysis scripts written for one afternoon each, against this
     // machine's drive letters. They were being shipped to every user.
     /^\/tools($|\/)/,
