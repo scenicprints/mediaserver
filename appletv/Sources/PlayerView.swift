@@ -645,13 +645,18 @@ final class PlayerModel: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     // alternative is another round trip before playback to ask a question whose
     // answer is five lines of logic. If the server's PREF list changes, change
     // this with it.
+    // Must stay the same rule as pickAudioIndex in src/hls.js: a copyable
+    // codec, then not a commentary, then the most channels, then E-AC-3 over
+    // AC-3 over AAC, then the file's default. Else the first track.
     static func hlsDefaultTrack(_ tracks: [AudioTrack]) -> Int {
         let pref = ["eac3", "ac3", "aac", "alac", "mp3"]
-        var bestRank = Int.max
         var chosen = tracks.first?.index ?? 0
+        var bestKey: [Int]? = nil
         for t in tracks {
             guard let r = pref.firstIndex(of: t.codec.lowercased()) else { continue }
-            if r < bestRank { bestRank = r; chosen = t.index }
+            let key = [t.commentary ? 0 : 1, min(t.channels, 8), -r, t.isDefault ? 1 : 0]
+            if let b = bestKey, !b.lexicographicallyPrecedes(key) { continue }
+            chosen = t.index; bestKey = key
         }
         return chosen
     }

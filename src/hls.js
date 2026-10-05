@@ -85,6 +85,30 @@ function key(kind, fileId, opts) {
   return `${kind}-${fileId}-${opts.forceStereo ? 's' : 'x'}${opts.forceAac ? 'a' : ''}${at}${st}`.replace(/[^a-z0-9-]/gi, '');
 }
 
+// Which audio stream to send when the client hasn't asked for one: the one the
+// Apple TV (and Roku, which plays the same codecs) can take AS IS, so the audio
+// is copied and nothing is converted. Among those: not a commentary, then the
+// most channels (the feature mix, not a stereo extra; on stereo speakers the
+// device folds it down itself), then E-AC-3 over AC-3 over AAC, then the file's
+// own default. Ranking on codec alone used to pick a 2.0 commentary in E-AC-3
+// over the AC-3 5.1 film. With no Apple-native track at all it falls back to
+// the first, which is then transcoded, as before.
+const AUDIO_PREF = ['eac3', 'ac3', 'aac', 'alac', 'mp3'];
+const compareKeys = (a, b) => { for (let k = 0; k < a.length; k++) if (a[k] !== b[k]) return a[k] - b[k]; return 0; };
+export function pickAudioIndex(audio) {
+  let best = 0, bestKey = null;
+  (audio || []).forEach((s, i) => {
+    const codec = String(s.codec_name || '').toLowerCase();
+    const rank = AUDIO_PREF.indexOf(codec);
+    if (rank === -1) return;
+    const title = String((s.tags && (s.tags.title || s.tags.TITLE)) || '');
+    const commentary = /comment/i.test(title) || !!(s.disposition && s.disposition.comment);
+    const key = [commentary ? 0 : 1, Math.min(+s.channels || 0, 8), -rank, s.disposition && s.disposition.default ? 1 : 0];
+    if (!bestKey || compareKeys(key, bestKey) > 0) { best = i; bestKey = key; }
+  });
+  return best;
+}
+
 // Probe once (cached ~10 min): the video/audio codec names + duration decide
 // copy-vs-transcode and feed the subtitle rendition timing.
 async function codecInfo(filePath) {
@@ -100,12 +124,8 @@ async function codecInfo(filePath) {
   // the whole stream — and (b) keep real surround instead of a stereo AAC
   // re-encode. `aMap` is the 0-based audio-stream index for `-map 0:a:N`.
   const audio = streams.filter((s) => s.codec_type === 'audio');
-  const PREF = ['eac3', 'ac3', 'aac', 'alac', 'mp3'];
-  let aMap = 0, aStream = audio[0], bestRank = Infinity;
-  audio.forEach((s, i) => {
-    const rank = PREF.indexOf(String(s.codec_name || '').toLowerCase());
-    if (rank !== -1 && rank < bestRank) { bestRank = rank; aMap = i; aStream = s; }
-  });
+  const aMap = pickAudioIndex(audio);
+  const aStream = audio[aMap];
 
   // HDR signalling for the HLS master. Apple TV rejects an HDR variant that
   // doesn't advertise VIDEO-RANGE; RESOLUTION is also required for a video
