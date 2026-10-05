@@ -103,9 +103,15 @@ test('the viewer check fails CLOSED', () => {
     'nothing listening is the one case that safely means nobody is watching');
 });
 
+// `workWindow` became a function when the window moved into settings, so that
+// switching "around the clock" on in the window applies on the next cycle
+// instead of at the next restart. These check the gate is still there, so they
+// accept either form rather than pinning the one that happened to be written
+// first — what matters is that the loop asks.
+const GATE = /if \(!withinWindow\(workWindow\(?\)?\)\) return;/;
+
 test('the work loop checks the window before and during a job', () => {
-  assert.match(SRC, /if \(!withinWindow\(workWindow\)\) return;/,
-    'a run must not start outside the window');
+  assert.match(SRC, GATE, 'a run must not start outside the window');
   assert.match(SRC, /working hours are over — finishing up/,
     'a job in flight must be stopped when the window closes');
   assert.match(SRC, /engine\.worker\.stop = true/,
@@ -117,7 +123,7 @@ test('scanning is not gated — only the encoding is', () => {
   // it is rewriting files that has to wait for the small hours.
   const once = SRC.slice(SRC.indexOf('async function once()'));
   const scanAt = once.indexOf('runProbeScan');
-  const gateAt = once.indexOf('if (!withinWindow(workWindow)) return;');
+  const gateAt = once.search(GATE);
   assert.ok(scanAt !== -1 && gateAt !== -1);
   assert.ok(scanAt < gateAt, 'the probe scan should happen before the window check, not after it');
 });

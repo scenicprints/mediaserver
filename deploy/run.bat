@@ -22,6 +22,12 @@ REM readable when you come to find out why.
 
 set /a CRASHES=0
 
+REM libuv's threadpool (async fs, dns, zlib) is 4 threads by default, and a
+REM read stuck on a hung disk holds one for as long as the disk hangs - it
+REM cannot be cancelled. src/diskguard.js caps a hung volume at 4 of them; this
+REM makes sure that is not all of them. Read once at startup, so set it here.
+set UV_THREADPOOL_SIZE=16
+
 :loop
 echo(
 echo ============================================

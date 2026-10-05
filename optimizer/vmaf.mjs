@@ -171,10 +171,13 @@ export async function measureVmaf(ref, dis, {
     ok, samples,
     mean: Math.round(mean * 100) / 100,
     min: Math.round(min * 100) / 100,
+    // Two decimals, because one produced "VMAF 95.0 is below the 95 pass mark"
+    // — a true statement (94.95 rounds to 95.0) that reads as a bug and makes
+    // the gate look arbitrary. If a file misses by five hundredths, say so.
     reason: ok ? null
       : mean < VMAF.min
-        ? `VMAF ${mean.toFixed(1)} is below the ${VMAF.min} pass mark`
-        : `worst scene scored VMAF ${min.toFixed(1)}, below the ${VMAF.floor} floor (mean was ${mean.toFixed(1)})`
+        ? `VMAF ${mean.toFixed(2)} is below the ${VMAF.min} pass mark`
+        : `worst scene scored VMAF ${min.toFixed(2)}, below the ${VMAF.floor} floor (mean was ${mean.toFixed(2)})`
   };
 }
 

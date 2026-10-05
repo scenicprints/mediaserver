@@ -6,6 +6,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFile, spawn } from 'node:child_process';
+import * as disk from './diskguard.js';
 
 // A static Windows build with libx264 + h264_nvenc; ~90 MB zip, extracts to
 // <version>_build/bin/{ffmpeg,ffprobe}.exe. Downloaded into tools/ (git-ignored).
@@ -23,11 +24,18 @@ let remoteMaxHeight = 1080;
 let remoteMaxKbps = 6000;
 const probeCache = new Map(); // path+mtime -> probe json
 
+// Answers null after RUN_LIMIT_MS whatever the child is doing. ffprobe reading
+// a file on a hung disk never exits, and cannot be killed while it is blocked
+// in the kernel either - so the kill is a courtesy and the timer is the answer.
+const RUN_LIMIT_MS = 30000;
 function tryRun(cmd, args) {
   return new Promise((resolve) => {
     if (!cmd) return resolve(null);
-    execFile(cmd, args, { windowsHide: true, maxBuffer: 8 * 1024 * 1024 }, (err, stdout) =>
-      resolve(err ? null : String(stdout)));
+    const t = setTimeout(() => { try { child.kill(); } catch {} resolve(null); }, RUN_LIMIT_MS);
+    const child = execFile(cmd, args, { windowsHide: true, maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
+      clearTimeout(t);
+      resolve(err ? null : String(stdout));
+    });
   });
 }
 
@@ -138,7 +146,7 @@ export async function installFfmpeg(root, config) {
 export async function probe(filePath) {
   if (!ffprobePath) return null;
   let key;
-  try { key = filePath + ':' + fs.statSync(filePath).mtimeMs; } catch { return null; }
+  try { key = filePath + ':' + (await disk.stat(filePath)).mtimeMs; } catch { return null; }
   if (probeCache.has(key)) return probeCache.get(key);
   const out = await tryRun(ffprobePath, [
     // -show_data exposes each stream's codec `extradata` (e.g. the HEVC hvcC),
@@ -308,7 +316,7 @@ export async function playInfo(filePath, { forceStereo = false, night = false, n
   // is the ONLY place quality is reduced, and only for remote; local is untouched.
   if (remote && (remoteMaxHeight || remoteMaxKbps)) {
     let srcKbps = Math.round((+(p.format && p.format.bit_rate) || 0) / 1000);
-    if (!srcKbps && duration) { try { srcKbps = Math.round(fs.statSync(filePath).size * 8 / duration / 1000); } catch {} }
+    if (!srcKbps && duration) { try { srcKbps = Math.round((await disk.stat(filePath)).size * 8 / duration / 1000); } catch {} }
     const overRes = remoteMaxHeight && srcH > remoteMaxHeight;
     const overRate = remoteMaxKbps && srcKbps > Math.round(remoteMaxKbps * 1.15); // small headroom before we bother
     if (overRes || overRate) {

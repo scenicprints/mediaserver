@@ -29,6 +29,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { ffmpegBin, probe, status as ffStatus } from './ffmpeg.js';
+import * as disk from './diskguard.js';
 
 const ROOT = path.join(os.tmpdir(), 'marquee-hls');
 const IDLE_MS = 120 * 1000;     // kill a session this long after its last request
@@ -138,7 +139,7 @@ async function codecInfo(filePath) {
   let fps = null;
   const fr = /^(\d+)\/(\d+)$/.exec(String((v && (v.avg_frame_rate || v.r_frame_rate)) || ''));
   if (fr && +fr[2]) fps = +fr[1] / +fr[2];
-  let size = 0; try { size = fs.statSync(filePath).size; } catch {}
+  let size = 0; try { size = (await disk.stat(filePath)).size; } catch {}
   const duration = parseFloat(p && p.format && p.format.duration) || 0;
 
   const info = {
@@ -381,6 +382,10 @@ function spawnFfmpeg(s, filePath, opts, ci) {
 async function ensureSession(k, filePath, opts, ci) {
   let s = sessions.get(k);
   if (s) { s.lastAccess = Date.now(); return s; }
+  // Ask the disk before spawning: ffmpeg on a hung disk never exits (it cannot
+  // even be killed), so it would sit in a session slot while the playlist wait
+  // runs out. A stalled volume answers at once; the error reaches the client.
+  await disk.stat(filePath);
   if (sessions.size >= MAX_SESSIONS) {
     const oldest = [...sessions.entries()].sort((a, b) => a[1].lastAccess - b[1].lastAccess)[0];
     if (oldest) killSession(oldest[0]);

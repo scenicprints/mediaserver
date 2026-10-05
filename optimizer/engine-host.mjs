@@ -14,7 +14,9 @@ import { DatabaseSync } from 'node:sqlite';
 import * as engine from './engine.mjs';
 import * as ff from './ffmpeg.mjs';
 import { startUI } from './ui.mjs';
-import { writeBadFileList } from './badfiles.mjs';
+import { readSettings } from './settings.mjs';
+import { setVmaf } from './vmaf.mjs';
+import { ensureLibrarySchema, syncLibrary } from './scanner.mjs';
 
 const LOG_MAX = 8 * 1024 * 1024;
 
@@ -26,8 +28,8 @@ const LOG_MAX = 8 * 1024 * 1024;
 // notices, it is already mid-encode on a 30 GB file.
 //
 // So the heavy work is confined to hours when nobody is realistically watching.
-// The application itself keeps running the whole time — the window, the log,
-// the duplicate finder are always there — only the encoding is scheduled.
+// The application itself keeps running the whole time — the window and the log
+// are always there — only the encoding is scheduled.
 const DEFAULT_WINDOW = { from: '00:00', to: '05:00' };
 
 // How many of each kind of job to line up per cycle. Separate numbers, because
@@ -144,7 +146,6 @@ function takeEngineLock(lockPath, { onStale = () => {} } = {}) {
 
 export async function startEngine({ root, port = 8097 } = {}) {
   const LOG_FILE = path.join(root, 'data', 'optimizer.log');
-  const BAD_LIST = path.join(root, 'data', 'needs-redownload.txt');
 
   function log(m) {
     const line = `[${stamp()}] ${m}`;
@@ -171,24 +172,42 @@ export async function startEngine({ root, port = 8097 } = {}) {
   const cfgPath = path.join(root, 'config.json');
   const config = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
 
+  // Read on every use rather than captured once, so changing a setting in the
+  // window takes effect on the next cycle instead of at the next restart. The
+  // file is tiny and this is asked a few times an hour.
+  const settings = () => readSettings(root);
+
+  // Standalone: the optimizer scans folders itself and owns the library tables,
+  // so its database is created rather than required. With Marquee the database
+  // must already exist — being handed the wrong folder is the common mistake,
+  // and creating an empty one there would silently look like an empty library.
+  const standalone = settings().libraryFolders.length > 0;
   const dbPath = path.resolve(root, config.dbPath || './data/library.db');
-  if (!fs.existsSync(dbPath)) throw new Error(`No library database at ${dbPath}`);
+  if (!fs.existsSync(dbPath)) {
+    if (!standalone) throw new Error(`No library database at ${dbPath}`);
+    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+  }
   const db = new DatabaseSync(dbPath);
   engine.ensureSchema(db);
+  if (standalone) ensureLibrarySchema(db);
 
   const st = await ff.detect(root, config);
   if (!st.available) throw new Error('ffmpeg not found — nothing can run');
   log(`ffmpeg ready, hardware encoding ${st.nvenc ? 'available' : 'NOT available (CPU only)'}`);
 
+  // The pass mark is a module-level value in vmaf.mjs, so it is pushed in rather
+  // than read. Re-applied whenever settings are saved; see /api/settings.
+  const applyVmaf = () => setVmaf({ min: settings().vmafPassMark });
+  applyVmaf();
+
+  // What the encoder is allowed to touch. `poolRoot` and `isWatching` were also
+  // here and are gone with the pool migration, which was the only thing that
+  // read either: runQueue destructures allow4kVideo and allowHdrVideo and
+  // ignores the rest, and the playback check reaches the queue through
+  // worker.stop from the interval below, not through this object.
   const policy = {
     allow4kVideo: config.optimizeAllow4kVideo === true,
-    allowHdrVideo: config.optimizeAllowHdrVideo === true,
-    poolRoot: config.poolRoot || 'P:\\',
-    // The migration saturates the same disks playback reads from, so it obeys
-    // the same rule as the encoder — and shares the one implementation of it,
-    // rather than growing a second copy that can rot separately. Declared
-    // below and hoisted; the reference is taken lazily either way.
-    isWatching: () => someoneWatching()
+    allowHdrVideo: config.optimizeAllowHdrVideo === true
   };
   engine.setThrottle({
     pauseBetweenJobsMs: 60_000,
@@ -198,10 +217,12 @@ export async function startEngine({ root, port = 8097 } = {}) {
     ...(config.optimizeThrottle || {})
   });
 
-  startUI(db, { port, logFile: LOG_FILE, policy, log });
+  startUI(db, { port, logFile: LOG_FILE, policy, log, root, onSettingsSaved: applyVmaf });
 
   const profiles = Array.isArray(config.optimizeAutoProfiles) ? config.optimizeAutoProfiles : ['audio'];
-  const workWindow = { ...DEFAULT_WINDOW, ...(config.optimizeWindow || {}) };
+  // The working window is read fresh on each check (see withinWindow calls),
+  // so turning "around the clock" on or off in the window takes effect at once.
+  const workWindow = () => ({ ...DEFAULT_WINDOW, ...(settings().optimizeWindow || {}) });
   // Healthiest drive first. See setDriveOrder in engine.mjs for why this is a
   // stated judgement rather than a measurement.
   engine.setDriveOrder(config.optimizeDriveOrder || []);
@@ -220,7 +241,12 @@ export async function startEngine({ root, port = 8097 } = {}) {
   // machine. The one exception is a server that is not running at all, which
   // genuinely means nobody is watching.
   async function someoneWatching() {
-    const p = config.port || 8096;
+    // Turned off, so there is nothing to ask and nothing to wait for. This is
+    // the switch for a machine with no Marquee on it: the check below fails
+    // closed, which for anyone running Plex, Jellyfin or nothing at all means an
+    // optimizer that never does a single job and only says "standing down".
+    if (settings().pauseWhileWatching === false) return false;
+    const p = settings().mediaServerPort || config.port || 8096;
     try {
       const res = await fetch(`http://127.0.0.1:${p}/api/local/activity`, { signal: AbortSignal.timeout(3000) });
       if (res.ok) {
@@ -241,16 +267,30 @@ export async function startEngine({ root, port = 8097 } = {}) {
   }
 
   async function once() {
+    // Standalone only: find what is on disk before probing it. Reading directory
+    // entries is cheap next to everything else here, and it has to come first —
+    // a probe scan can only look at rows that exist.
+    const folders = settings().libraryFolders;
+    if (folders.length) {
+      try {
+        const r = syncLibrary(db, folders, { log });
+        if (r.added || r.removed || r.updated) {
+          log(`Library scan: ${r.added} added, ${r.updated} changed, ${r.removed} gone — ${r.seen} file(s) on disk.`);
+        }
+      } catch (e) {
+        // Never fatal. A scan that fails must not stop the work already queued.
+        log('Library scan failed — ' + e.message);
+      }
+    }
+
     // Scanning is cheap — it reads headers, not whole files — so the library
     // stays up to date around the clock. Only the encoding is scheduled.
     await engine.runProbeScan(db, { log });
-    const bad = writeBadFileList(db, BAD_LIST);
-    if (bad.length) log(`${bad.length} file(s) need re-downloading — see ${BAD_LIST}`);
 
-    if (!withinWindow(workWindow)) return;
+    if (!withinWindow(workWindow())) return;
 
     for (;;) {
-      if (!withinWindow(workWindow)) { log('outside the working hours — stopping for tonight'); return; }
+      if (!withinWindow(workWindow())) { log('outside the working hours — stopping for tonight'); return; }
       if (await someoneWatching() === true) { log('someone is watching — standing down'); return; }
       // The two halves of this program get SEPARATE budgets.
       //
@@ -288,7 +328,7 @@ export async function startEngine({ root, port = 8097 } = {}) {
       // window closing. Either returns the file in flight to the queue with its
       // temp cleaned up, so nothing is left half-done at five in the morning.
       const watcher = setInterval(async () => {
-        if (!withinWindow(workWindow)) { log('working hours are over — finishing up'); engine.worker.stop = true; return; }
+        if (!withinWindow(workWindow())) { log('working hours are over — finishing up'); engine.worker.stop = true; return; }
         if (await someoneWatching() === true) engine.worker.stop = true;
       }, 20000);
       try { await engine.runQueue(db, { log, ...policy }); } finally { clearInterval(watcher); }
@@ -298,10 +338,11 @@ export async function startEngine({ root, port = 8097 } = {}) {
   // Deliberately not awaited: the host has a window to put on screen and must
   // not sit behind a library scan to do it.
   (async () => {
-    log(workWindow.always === true ? 'Working hours: around the clock.' : `Working hours: ${workWindow.from} to ${workWindow.to}.`);
-    if (!withinWindow(workWindow)) {
-      const mins = minutesUntilOpen(workWindow);
-      log(`Outside those hours — next run in ${Math.floor(mins / 60)}h ${mins % 60}m. The window and the duplicate finder work regardless.`);
+    const w = workWindow();
+    log(w.always === true ? 'Working hours: around the clock.' : `Working hours: ${w.from} to ${w.to}.`);
+    if (!withinWindow(w)) {
+      const mins = minutesUntilOpen(w);
+      log(`Outside those hours — next run in ${Math.floor(mins / 60)}h ${mins % 60}m. The window still works regardless.`);
     }
     for (;;) {
       try { await once(); } catch (e) { log('error: ' + (e && e.message ? e.message : e)); }
@@ -310,5 +351,5 @@ export async function startEngine({ root, port = 8097 } = {}) {
     }
   })();
 
-  return { db, log, port, window: workWindow, withinWindow: () => withinWindow(workWindow) };
+  return { db, log, port, window: workWindow, withinWindow: () => withinWindow(workWindow()) };
 }

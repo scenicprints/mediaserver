@@ -3,13 +3,11 @@
 // Everything this program does was reachable only by typing node commands at
 // it, which is not a program so much as a set of instructions for operating
 // one. This is the interface: what it is doing, what it has done, what it has
-// given up on, and the one manual control — find duplicates, and delete the
-// copies you choose.
+// given up on, and which files it cannot read.
 //
 // It is served BY the watch process rather than being a second program. One
 // process means one database handle and no chance of the window and the worker
-// disagreeing about what is happening, or of a "drop" landing mid-encode from a
-// different connection.
+// disagreeing about what is happening.
 //
 // Deliberately not part of Marquee: separate program, separate port, separate
 // process. A crash here cannot take down playback, and the media server has no
@@ -18,22 +16,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import * as engine from './engine.mjs';
-import { findDuplicates, confirmDropSafe } from './duplicates.mjs';
-import { badFiles } from './badfiles.mjs';
-import { planMigration, writePlan, journalPlan, preflight, runMigration, migrationStatus } from './migrate.mjs';
-
-// Duplicate scanning reads real bytes across the library and takes minutes, so
-// it runs in the background and the page polls it. One at a time.
-const dupes = { running: false, done: 0, total: 0, groups: [], error: null, ranAt: 0 };
-
-// The pool migration, likewise: planning reads bytes and moving is hours. Both
-// are background jobs the page watches rather than requests it waits on.
-const migration = {
-  planning: false, running: false, stop: false,
-  done: 0, total: 0, error: null,
-  report: null, summary: null, overwrites: null, collisions: [],
-  stats: null
-};
+import { readSettings, writeSettings, SETTING_NAMES } from './settings.mjs';
 
 const GB = (b) => (Number(b) / 2 ** 30).toFixed(2) + ' GB';
 
@@ -55,7 +38,9 @@ export function startUI(db, {
   port = 8097,
   logFile = null,
   policy = {},
-  log = () => {}
+  log = () => {},
+  root = null,
+  onSettingsSaved = () => {}
 } = {}) {
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
@@ -84,7 +69,7 @@ export function startUI(db, {
         }
         return json(res, 200, {
           jobs: s.jobs, reclaimedBytes: s.reclaimedBytes, probed: s.probed, scannable: s.scannable,
-          nvenc: s.nvenc, scan: s.scan,
+          nvenc: s.nvenc, canProveQuality: s.canProveQuality, scan: s.scan,
           worker: { running: engine.worker.running, current: engine.worker.current },
           stuck: {
             retry: stk.jobs.filter((j) => j.state === 'retry').length,
@@ -93,13 +78,8 @@ export function startUI(db, {
             jobs: stk.jobs.slice(0, 40),
             probes: stk.probes.slice(0, 40)
           },
-          plan,
-          dupes: { running: dupes.running, done: dupes.done, total: dupes.total, error: dupes.error, ranAt: dupes.ranAt, count: dupes.groups.length }
+          plan
         });
-      }
-
-      if (p === '/api/badfiles') {
-        return json(res, 200, { items: badFiles(db) });
       }
 
       if (p === '/api/log') {
@@ -113,124 +93,33 @@ export function startUI(db, {
         return json(res, 200, { text });
       }
 
-      if (p === '/api/duplicates' && req.method === 'GET') {
-        return json(res, 200, { ...dupes, groups: dupes.groups });
-      }
-
-      // ---- Pool migration ------------------------------------------------
-      // Planning reads bytes across the library and moving is hours of work,
-      // so both run in the background and the page polls. Neither is ever
-      // started implicitly: this moves twenty thousand files and it happens
-      // when someone presses the button, not when the program feels ready.
-      if (p === '/api/migrate' && req.method === 'GET') {
-        const st = migrationStatus(db);
-        let ready = null;
-        try { ready = preflight(db, { poolRoot: policy.poolRoot || 'P:\\' }); } catch (e) { ready = { ok: false, problems: [e.message] }; }
-        return json(res, 200, { ...migration, status: st, preflight: ready, poolRoot: policy.poolRoot || 'P:\\' });
-      }
-
-      if (p === '/api/migrate/plan' && req.method === 'POST') {
-        if (migration.planning || migration.running) return json(res, 409, { error: 'already busy' });
-        migration.planning = true; migration.error = null; migration.done = 0; migration.total = 0;
-        (async () => {
-          try {
-            const plan = await planMigration(db, {
-              log: (m) => log('migrate: ' + m),
-              onProgress: (d, n) => { migration.done = d; migration.total = n; }
-            });
-            migration.report = writePlan(plan, path.join(path.dirname(logFile || '.'), 'pool-migration-plan.txt'));
-            migration.summary = plan.stats;
-            migration.overwrites = plan.overwrites.length;
-            migration.collisions = plan.collisions;
-            journalPlan(db, plan, { replace: true });
-            log(`migrate: planned ${plan.stats.moves} move(s), ${plan.overwrites.length} would overwrite`);
-          } catch (e) { migration.error = e.message; log('migrate: planning failed — ' + e.message); }
-          finally { migration.planning = false; }
-        })();
-        return json(res, 200, { ok: true });
-      }
-
-      if (p === '/api/migrate/start' && req.method === 'POST') {
-        if (migration.planning || migration.running) return json(res, 409, { error: 'already busy' });
-        const ready = preflight(db, { poolRoot: policy.poolRoot || 'P:\\' });
-        if (!ready.ok) return json(res, 409, { error: 'not ready', problems: ready.problems });
-        migration.running = true; migration.stop = false; migration.error = null;
-        (async () => {
-          try {
-            migration.stats = await runMigration(db, {
-              log: (m) => log('migrate: ' + m),
-              isWatching: policy.isWatching || (async () => true),
-              shouldStop: () => migration.stop,
-              onProgress: (s) => { migration.stats = s; }
-            });
-          } catch (e) { migration.error = e.message; log('migrate: run failed — ' + e.message); }
-          finally { migration.running = false; }
-        })();
-        return json(res, 200, { ok: true });
-      }
-
-      if (p === '/api/migrate/stop' && req.method === 'POST') {
-        migration.stop = true;
-        return json(res, 200, { ok: true, note: 'will stop after the file in flight finishes' });
-      }
-
-      if (p === '/api/duplicates/scan' && req.method === 'POST') {
-        if (dupes.running) return json(res, 409, { error: 'already scanning' });
-        const body = await readBody(req);
-        dupes.running = true; dupes.error = null; dupes.done = 0; dupes.total = 0; dupes.groups = [];
-        // Not awaited: this is minutes of reading and the page polls for it.
-        (async () => {
-          try {
-            const r = await findDuplicates(db, {
-              log,
-              full: !!body.full,
-              onProgress: (n, total) => { dupes.done = n; dupes.total = total; }
-            });
-            // Pass the full description of every copy through. This used to
-            // send two bare paths, which is not enough for anyone to judge
-            // which copy to keep — and for a byte-identical pair the scoring
-            // could not tell them apart either.
-            dupes.groups = r.confirmed.map((d) => ({
-              title: d.title, size: d.size, reclaimable: d.reclaimable, is4k: d.is4k, note: d.note,
-              copies: d.copies, differs: d.differs
-            }));
-            dupes.ranAt = Date.now();
-          } catch (e) { dupes.error = e.message; }
-          finally { dupes.running = false; }
-        })();
-        return json(res, 202, { started: true });
-      }
-
-      if (p === '/api/drop' && req.method === 'POST') {
-        const body = await readBody(req);
-        const id = String(body.id || '');
-        if (!/^(movie|episode):\d+$/.test(id)) return json(res, 400, { error: 'bad id' });
-        const [kind, idStr] = id.split(':');
-        const fileId = parseInt(idStr, 10);
-
-        const row = db.prepare('SELECT path, size FROM media_info WHERE file_kind = ? AND file_id = ?').get(kind, fileId);
-        // Re-proved here, not trusted from the list on screen — that list may
-        // be minutes or days old and the library moves underneath it.
-        const check = await confirmDropSafe(db, kind, fileId);
-        if (!check.ok) return json(res, 409, { error: check.reason });
-
-        try { fs.rmSync(row.path, { force: true }); }
-        catch (e) { return json(res, 500, { error: 'could not delete: ' + e.message }); }
-
-        const table = kind === 'episode' ? 'episode_files' : 'movie_files';
-        try { db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(fileId); } catch { /* library row may already be gone */ }
-        try { db.prepare('DELETE FROM media_info WHERE file_kind = ? AND file_id = ?').run(kind, fileId); } catch {}
-
-        log(`Deleted duplicate ${path.basename(row.path)} (${GB(row.size)}); kept ${check.keeper.path}`);
-        // Take it off the list on screen as well.
-        for (const g of dupes.groups) g.drop = g.drop.filter((x) => x.id !== id);
-        return json(res, 200, { ok: true, freed: Number(row.size) || 0, keeper: check.keeper.path });
-      }
-
       if (p === '/api/retry' && req.method === 'POST') {
         const body = await readBody(req);
         const r = engine.retryStuck(db, { id: Number(body.id) || 0, includeJudged: !!body.judged });
         return json(res, 200, r);
+      }
+
+      // ---- Settings --------------------------------------------------------
+      // Only the keys settings.mjs knows about can be written, and each one is
+      // validated there. A rejected value returns 400 with the reason and
+      // changes nothing, rather than being quietly clamped into something the
+      // owner did not ask for.
+      if (p === '/api/settings' && req.method === 'GET') {
+        if (!root) return json(res, 200, { unavailable: true });
+        return json(res, 200, readSettings(root));
+      }
+
+      if (p === '/api/settings' && req.method === 'POST') {
+        if (!root) return json(res, 503, { error: 'settings are not available in this build' });
+        const body = await readBody(req);
+        try {
+          const now = writeSettings(root, body);
+          onSettingsSaved(now);            // the pass mark lives in a module, so it is pushed
+          log('Settings changed: ' + Object.keys(body).filter((k) => SETTING_NAMES.includes(k)).join(', '));
+          return json(res, 200, now);
+        } catch (e) {
+          return json(res, 400, { error: e.message });
+        }
       }
 
       res.writeHead(404, { 'content-type': 'text/plain' });
@@ -286,40 +175,43 @@ export const PAGE = `<!doctype html>
   button:disabled { color:var(--ink3); cursor:default; }
   button.sig { background:var(--signal); border-color:var(--signal); color:#141416; }
   button.sig:hover:not(:disabled) { background:#C85410; border-color:#C85410; color:#fff; }
-  button.danger:hover:not(:disabled) { border-color:var(--signal); color:var(--signal); }
   .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
-  .dupe { border:1px solid var(--rule); background:var(--panel); padding:16px 18px; margin-bottom:1px; }
-  .dupe .h { display:flex; justify-content:space-between; gap:16px; align-items:baseline; }
-  .dupe .title { font-weight:600; font-size:15px; }
-  .dupe .size { color:var(--ink3); font-variant-numeric:tabular-nums; font-size:12px; letter-spacing:.1em; }
+  .card { border:1px solid var(--rule); background:var(--panel); padding:16px 18px; margin-bottom:1px; }
+  .card .h { display:flex; justify-content:space-between; gap:16px; align-items:baseline; }
+  .card .title { font-weight:600; font-size:15px; }
+  .card .size { color:var(--ink3); font-variant-numeric:tabular-nums; font-size:12px; letter-spacing:.1em; }
   .keepline, .dropline { display:flex; gap:12px; align-items:center; margin-top:10px; font-size:12.5px; }
   .tag { font-size:10px; font-weight:700; letter-spacing:.16em; padding:3px 8px; border:1px solid var(--rule); white-space:nowrap; }
   .tag.keep { color:var(--ink2); }
   .tag.drop { color:var(--signal); border-color:var(--signal); }
-  .tag.locked { color:var(--ink3); }
   .path { color:var(--ink2); word-break:break-all; font-family:ui-monospace,Consolas,monospace; font-size:11.5px; }
   .why { color:var(--ink3); font-size:11.5px; }
-  /* What the file is — stated once, because every copy in a group shares it. */
-  .spec { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:2px 22px;
-    margin:14px 0 12px; padding:12px 14px; background:var(--sunk); border:1px solid var(--rule); }
-  .spec > div { display:flex; gap:10px; align-items:baseline; min-width:0; }
-  .spec .k { color:var(--ink3); font-size:10px; letter-spacing:.16em; text-transform:uppercase; white-space:nowrap; }
-  .spec .v { color:var(--ink); font-size:12.5px; font-variant-numeric:tabular-nums; word-break:break-word; }
-  /* The verdict on how the copies relate. One signal colour, used for state. */
-  .differs { border-left:2px solid var(--signal); padding:8px 12px; margin-bottom:12px;
-    font-size:12px; color:var(--ink); background:var(--panel2); }
-  .same { border-left:2px solid var(--rule); padding:8px 12px; margin-bottom:12px;
-    font-size:12px; color:var(--ink3); }
-  .copy { border:1px solid var(--rule); padding:10px 12px; margin-top:8px; background:var(--panel2); }
-  .copy.rec { border-color:var(--ink3); }
-  .copyhead { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
-  .drive { font-size:11px; font-weight:700; letter-spacing:.14em; color:var(--signal); }
-  .fname { margin-top:6px; font-size:12.5px; color:var(--ink); word-break:break-all; }
   pre { background:var(--sunk); border:1px solid var(--rule); padding:14px 16px; margin:0;
     max-height:340px; overflow:auto; font-family:ui-monospace,Consolas,monospace; font-size:11.5px;
     color:var(--ink2); white-space:pre-wrap; word-break:break-word; }
   .empty { color:var(--ink3); padding:16px 18px; border:1px solid var(--rule); background:var(--panel); }
-  .warn { color:var(--signal); }
+  /* A standing explanation, not an error: the program is fine, it just cannot
+     do the part the owner is waiting for. */
+  .note { border-left:2px solid var(--signal); background:var(--panel); color:var(--ink2);
+    padding:11px 14px; margin-top:1px; font-size:12px; line-height:1.5; }
+  .note b { color:var(--ink); }
+  /* Settings. Each switch carries its own explanation, because the ones here
+     change whether the program does anything at all and a bare label would
+     leave the owner guessing. */
+  .opt { display:flex; gap:12px; align-items:flex-start; padding:10px 0; }
+  .opt + .opt { border-top:1px solid var(--rule); }
+  .opt input[type=checkbox] { margin-top:3px; width:15px; height:15px; accent-color:var(--signal); flex:none; }
+  .opt b { display:block; font-weight:600; font-size:13.5px; }
+  .opt i { display:block; color:var(--ink3); font-size:11.5px; font-style:normal; margin-top:3px; max-width:70ch; }
+  .fields { display:flex; gap:20px; flex-wrap:wrap; align-items:baseline; }
+  .fields label { color:var(--ink3); font-size:11px; letter-spacing:.14em; text-transform:uppercase; }
+  .fields input { background:var(--sunk); border:1px solid var(--rule); color:var(--ink); padding:6px 8px;
+    font-family:ui-monospace,Consolas,monospace; font-size:12.5px; margin-left:8px; }
+  .fields input:focus { outline:none; border-color:var(--signal); }
+  .opt textarea { display:block; width:100%; margin-top:8px; background:var(--sunk);
+    border:1px solid var(--rule); color:var(--ink); padding:8px 10px; resize:vertical;
+    font-family:ui-monospace,Consolas,monospace; font-size:12.5px; }
+  .opt textarea:focus { outline:none; border-color:var(--signal); }
 </style></head>
 <body>
 <header>
@@ -336,36 +228,7 @@ export const PAGE = `<!doctype html>
 <section>
   <h2>Library</h2>
   <div class="grid" id="stats"></div>
-</section>
-
-<section>
-  <h2>Pool migration <span class="sub">— manual. Nothing moves until you say so.</span></h2>
-  <div class="row" style="margin-bottom:14px">
-    <button id="mplan">Plan the move</button>
-    <button id="mgo" class="sig">Start moving</button>
-    <button id="mstop">Stop</button>
-    <span class="sub" id="mstate"></span>
-  </div>
-  <div id="migrate"></div>
-</section>
-
-<section>
-  <h2>Duplicates <span class="sub">— manual. Nothing here is automatic.</span></h2>
-  <div class="row" style="margin-bottom:14px">
-    <button id="scan" class="sig">Find duplicates</button>
-    <button id="scanfull">Find duplicates (full hash)</button>
-    <span class="sub" id="dupstate"></span>
-  </div>
-  <div id="dupes"></div>
-</section>
-
-<section>
-  <h2>Needs re-downloading <span class="sub">— files that cannot be read</span></h2>
-  <div class="row" style="margin-bottom:14px">
-    <button id="copybad">Copy list</button>
-    <span class="sub" id="badstate"></span>
-  </div>
-  <div id="bad"></div>
+  <div id="statsnote"></div>
 </section>
 
 <section>
@@ -375,6 +238,51 @@ export const PAGE = `<!doctype html>
     <span class="sub" id="stuckstate"></span>
   </div>
   <div id="stuck"></div>
+</section>
+
+<section>
+  <h2>Settings</h2>
+  <div id="settings" class="card">
+    <label class="opt">
+      <input type="checkbox" id="s_pause">
+      <span>
+        <b>Pause while someone is watching</b>
+        <i>Asks the media server before starting work. Turn this off if you do not
+        run Marquee — the check treats "no answer" as "someone is watching", so
+        with another server, or none, nothing will ever run.</i>
+      </span>
+    </label>
+    <label class="opt">
+      <input type="checkbox" id="s_always">
+      <span>
+        <b>Work around the clock</b>
+        <i>Off means only between the hours below. Encoding is heavy; playback always wins either way.</i>
+      </span>
+    </label>
+    <div class="opt">
+      <span class="fields">
+        <label>From <input type="text" id="s_from" size="5" placeholder="00:00"></label>
+        <label>To <input type="text" id="s_to" size="5" placeholder="05:00"></label>
+        <label>Media server port <input type="text" id="s_port" size="6" placeholder="8096"></label>
+        <label>Quality pass mark <input type="text" id="s_vmaf" size="5" placeholder="95"></label>
+      </span>
+    </div>
+    <div class="opt">
+      <span style="flex:1;min-width:0">
+        <b>Folders to scan</b>
+        <i>One per line, full paths. Sub-folders are included. Leave this EMPTY to
+        take the library from Marquee instead — the two are never mixed, because
+        scanning into Marquee's database would put rows there that Marquee did
+        not make and would remove on its next scan.</i>
+        <textarea id="s_folders" rows="4" spellcheck="false"
+          placeholder="D:\Media\Movies&#10;\\NAS\media\TV"></textarea>
+      </span>
+    </div>
+    <div class="row" style="margin-top:4px">
+      <button id="ssave" class="sig">Save</button>
+      <span class="sub" id="sstate"></span>
+    </div>
+  </div>
 </section>
 
 <section>
@@ -419,117 +327,57 @@ function renderStats(s) {
   const cells = [
     ['Reclaimed', GB(s.reclaimedBytes), true],
     ['Queued', (q.queued||0) + (q.retry||0), false],
-    ['Done', q.done||0, false],
-    ['Files', s.scannable.toLocaleString(), false],
-    ['Unreadable', s.stuck.unreadable, false]
+    ['Shrunk', q.done||0, false],
+    // Files the program looked at and chose to leave alone — either already
+    // playable everywhere, or the re-encode was not good enough to keep. This
+    // is a result, not a problem, and it used to be reported as 800 failures.
+    ['Left as they were', (q.kept||0) + (q.skipped||0), false],
+    ['Files', s.scannable.toLocaleString(), false]
   ];
   if (s.plan) cells.push(['Still to reclaim', GB(s.plan.totalBytes), false]);
   cells.push(['Hardware encode', s.nvenc ? 'Yes' : 'CPU only', false]);
   $('stats').innerHTML = cells.map(([k,v,sig]) =>
     '<div class="cell"><div class="k">' + k + '</div><div class="v' + (sig?' sig':'') + '">' + esc(v) + '</div></div>').join('');
-}
 
-function renderDupes(d) {
-  if (d.running) {
-    $('dupstate').textContent = 'reading bytes — ' + d.done + ' of ' + d.total + ' candidate groups';
-    $('scan').disabled = true; $('scanfull').disabled = true;
-    return;
+  // Two states where the program is working correctly and yet nothing appears
+  // to happen. Both were only explainable from the log, and "it does nothing
+  // and does not say why" is the complaint that matters most to a new user.
+  const notes = [];
+  if (s.canProveQuality === false) {
+    notes.push('This ffmpeg has no <b>libvmaf</b>, so there is no way to prove a re-encode ' +
+      'still looks right — video is left alone and only audio is converted. Point ' +
+      '<span class="path">ffmpegPath</span> at a build with libvmaf to shrink video.');
   }
-  $('scan').disabled = false; $('scanfull').disabled = false;
-  if (d.error) { $('dupstate').innerHTML = '<span class="warn">' + esc(d.error) + '</span>'; return; }
-  if (!d.ranAt) { $('dupstate').textContent = 'not looked yet'; return; }
-
-  const groups = d.groups || [];
-  const total = groups.reduce((n,g) => n + (g.drop.length ? g.reclaimable : 0), 0);
-  $('dupstate').textContent = groups.length + ' genuine duplicate group(s)' + (total ? ' — ' + GB(total) + ' reclaimable' : '');
-  if (!groups.length) { $('dupes').innerHTML = '<div class="empty">Nothing is duplicated. Metadata matches were checked byte for byte and were different files.</div>'; return; }
-
-  $('dupes').innerHTML = groups.map((g) => {
-    const copies = g.copies || [];
-    const first = copies[0] || {};
-    // What the file IS. Identical across every copy — that is what made them a
-    // group — so it is stated once rather than repeated in every row.
-    const mins = first.duration ? Math.round(first.duration / 60) + ' min' : null;
-    const res = first.width && first.height ? first.width + '×' + first.height : null;
-    const vid = [first.vcodec, res, first.vkbps ? (Math.round(first.vkbps / 100) / 10) + ' Mbps' : null,
-                 first.hdr ? 'HDR' : null].filter(Boolean).join(' · ');
-    const aud = (first.audio || []).map((a) =>
-      [a.codec, a.ch ? a.ch + 'ch' : null, a.kbps ? a.kbps + 'k' : null, a.lang].filter(Boolean).join(' ')).join('  +  ');
-
-    const spec = '<div class="spec">' +
-      '<div><span class="k">Video</span><span class="v">' + esc(vid || '—') + '</span></div>' +
-      '<div><span class="k">Audio</span><span class="v">' + esc(aud || '—') + '</span></div>' +
-      '<div><span class="k">Runtime</span><span class="v">' + esc(mins || '—') + '</span></div>' +
-      '<div><span class="k">Each copy</span><span class="v">' + GB(g.size) + '</span></div>' +
-    '</div>';
-
-    // The honest headline: for a byte-identical group nothing differs except
-    // where the files live, and saying so beats a table of matching numbers.
-    const diff = (g.differs && g.differs.length)
-      ? '<div class="differs"><b>These copies differ:</b> ' +
-          g.differs.map((d) => esc(d.field) + ' (' + d.values.map((v) => esc(String(v))).join(' vs ') + ')').join(' · ') + '</div>'
-      : '<div class="same">Byte-for-byte identical — same picture, same sound, same everything. Only the location differs.</div>';
-
-    const rows = copies.map((c) => {
-      const tag = c.recommended
-        ? '<span class="tag keep">Keep</span>'
-        : (g.is4k ? '<span class="tag locked">4K — kept</span>'
-                  : '<button class="danger" data-drop="' + esc(c.id) + '">Delete</button>');
-      return '<div class="copy' + (c.recommended ? ' rec' : '') + '">' +
-        '<div class="copyhead">' + tag + '<span class="drive">' + esc(c.drive) + '</span>' +
-        '<span class="path">' + esc(c.folder) + '</span></div>' +
-        '<div class="fname">' + esc(c.filename) + '</div>' +
-        (c.reasons && c.reasons.length ? '<div class="why">' + esc(c.reasons.join(' · ')) + '</div>' : '') +
-      '</div>';
-    }).join('');
-
-    return '<div class="dupe"><div class="h"><span class="title">' + esc(g.title) + '</span>' +
-      '<span class="size">' + GB(g.reclaimable) + ' reclaimable' + (g.is4k ? ' · 4K' : '') + '</span></div>' +
-      spec + diff + rows +
-      (g.note ? '<div class="why">' + esc(g.note) + '</div>' : '') +
-    '</div>';
-  }).join('');
+  if (s.scannable === 0) {
+    notes.push('<b>No files are visible.</b> Either the library has not been scanned yet, or the ' +
+      'drive or share it lives on is not reachable from here.');
+  }
+  $('statsnote').innerHTML = notes.map((n) => '<div class="note">' + n + '</div>').join('');
 }
 
+// Only things that actually went wrong. A file the program decided to leave
+// alone is in 'kept' and never reaches here, which is the point: this list is
+// for faults someone may need to act on, and when it is padded with 800
+// correct decisions nobody reads it at all.
 function renderStuck(s) {
   const k = s.stuck;
-  $('stuckstate').textContent = k.retry + ' waiting to retry · ' + k.failed + ' given up on · ' + k.unreadable + ' unreadable';
+  const total = k.failed + k.retry + k.unreadable;
+  $('stuckstate').textContent = total === 0
+    ? 'nothing went wrong'
+    : [k.retry ? k.retry + ' waiting to retry' : null,
+       k.failed ? k.failed + ' gave up' : null,
+       k.unreadable ? k.unreadable + ' unreadable' : null].filter(Boolean).join(' · ');
   const rows = [];
   for (const j of k.jobs) rows.push([j.state === 'retry' ? 'Retry' : 'Gave up', String(j.path||'').split(/[\\\\/]/).pop(), j.error]);
+  // A file that will not even probe is a genuine fault, so it belongs in this
+  // list rather than in a panel of its own.
   for (const p of k.probes) rows.push(['Unreadable', String(p.path||'').split(/[\\\\/]/).pop(), p.probe_error]);
   $('stuck').innerHTML = rows.length
     ? rows.map(([tag,name,err]) =>
-        '<div class="dupe"><div class="keepline"><span class="tag ' + (tag==='Retry'?'keep':'drop') + '">' + tag + '</span>' +
+        '<div class="card"><div class="keepline"><span class="tag ' + (tag==='Retry'?'keep':'drop') + '">' + tag + '</span>' +
         '<span class="title" style="font-size:13px">' + esc(name) + '</span></div>' +
         '<div class="why">' + esc(String(err||'').split('\\n')[0].slice(0,220)) + '</div></div>').join('')
-    : '<div class="empty">Nothing stuck.</div>';
-}
-
-let badCache = [];
-async function renderBad() {
-  const r = await get('/api/badfiles');
-  badCache = r.items || [];
-  const empties = badCache.filter((i) => i.sizeMB === 0).length;
-  $('badstate').textContent = badCache.length
-    ? badCache.length + ' file(s)' + (empties ? ' · ' + empties + ' are 0 bytes' : '')
-    : 'nothing broken';
-  if (!badCache.length) { $('bad').innerHTML = '<div class="empty">Every file in the library reads.</div>'; return; }
-
-  // Grouped by show, because a broken season is one job rather than twelve.
-  const groups = {};
-  for (const i of badCache) {
-    const g = i.what.includes(' - S') ? i.what.slice(0, i.what.indexOf(' - S')) : 'Films';
-    (groups[g] = groups[g] || []).push(i);
-  }
-  $('bad').innerHTML = Object.entries(groups).map(([g, items]) =>
-    '<div class="dupe"><div class="h"><span class="title">' + esc(g) + '</span>' +
-    '<span class="size">' + items.length + ' file(s)</span></div>' +
-    items.map((i) =>
-      '<div class="dropline"><span class="tag ' + (i.sizeMB === 0 ? 'drop' : 'keep') + '">' +
-      (i.sizeMB === 0 ? 'Empty' : 'Damaged') + '</span>' +
-      '<span class="path">' + esc(i.what) + '</span></div>' +
-      '<div class="why">' + esc(i.why) + '</div>').join('') +
-    '</div>').join('');
+    : '<div class="empty">Nothing went wrong.</div>';
 }
 
 async function tick() {
@@ -537,105 +385,47 @@ async function tick() {
     const s = await get('/api/status');
     $('head').textContent = s.worker.running ? 'working' : 'idle';
     renderNow(s); renderStats(s); renderStuck(s);
-    if (s.dupes.running) renderDupes(s.dupes);
-    else if (s.dupes.ranAt && s.dupes.ranAt !== window.__dupAt) {
-      window.__dupAt = s.dupes.ranAt;
-      renderDupes(await get('/api/duplicates'));
-    } else if (!s.dupes.ranAt) renderDupes(s.dupes);
-    await renderBad();
-    renderMigrate(await get('/api/migrate'));
     const l = await get('/api/log');
     $('log').textContent = l.text || 'nothing logged yet';
     $('log').scrollTop = $('log').scrollHeight;
   } catch (e) { $('head').textContent = 'not running'; }
 }
 
-function renderMigrate(m) {
-  const st = m.status || {};
-  const pf = m.preflight || {};
-  $('mplan').disabled = !!(m.planning || m.running);
-  $('mgo').disabled = !!(m.planning || m.running) || !pf.ok;
-  $('mstop').disabled = !m.running;
-
-  if (m.planning) {
-    $('mstate').textContent = 'reading bytes — ' + m.done + ' of ' + m.total + ' contested name(s)';
-  } else if (m.running) {
-    const s = m.stats || {};
-    $('mstate').textContent = (s.done||0) + ' moved, ' + (s.failed||0) + ' failed — ' + GB(s.bytes||0);
-  } else if (m.error) {
-    $('mstate').textContent = m.error;
-  } else {
-    $('mstate').textContent = st.total ? st.done + ' of ' + st.total + ' moved' : 'nothing planned yet';
-  }
-
-  const out = [];
-  if (st.total) {
-    out.push('<div class="bar"><i style="width:' + (st.percent||0) + '%"></i></div>');
-    out.push('<div class="grid">' + [
-      ['Planned', st.total.toLocaleString()],
-      ['Moved', st.done.toLocaleString()],
-      ['Left', st.remaining.toLocaleString()],
-      ['Failed', st.failed]
-    ].map(([k,v]) => '<div class="cell"><div class="k">' + k + '</div><div class="v">' + esc(v) + '</div></div>').join('') + '</div>');
-  }
-
-  // The plan's own verdict on the contested names, which is the part worth
-  // reading before pressing anything.
-  if (m.summary) {
-    out.push('<p class="sub">' + m.summary.versions + ' kept as separate versions · ' +
-      m.summary.duplicates + ' identical copies left in place · ' +
-      m.summary.unknown + ' unreadable · ' +
-      (m.overwrites ? '<b style="color:var(--signal)">' + m.overwrites + ' WOULD OVERWRITE</b>' : 'nothing would be overwritten') +
-      (m.report ? ' · <span class="path">' + esc(m.report) + '</span>' : '') + '</p>');
-  }
-
-  // Why the button is off. A disabled control with no reason is a bug report
-  // waiting to happen.
-  if (!pf.ok && (pf.problems||[]).length) {
-    out.push('<p class="sub">Not ready:</p><ul class="sub">' +
-      pf.problems.slice(0, 8).map((x) => '<li>' + esc(x) + '</li>').join('') + '</ul>');
-  }
-  if ((st.failures||[]).length) {
-    out.push('<p class="sub">Failed:</p>' + st.failures.slice(0, 10).map((f) =>
-      '<div class="row"><span class="path">' + esc(f.src) + '</span><span class="sub">' + esc(f.error) + '</span></div>').join(''));
-  }
-  $('migrate').innerHTML = out.join('');
-}
-
-$('mplan').onclick = async () => { await post('/api/migrate/plan', {}); tick(); };
-$('mstop').onclick = async () => { await post('/api/migrate/stop', {}); tick(); };
-$('mgo').onclick = async () => {
-  if (!confirm('Move the library into the pool?\\n\\nFiles are copied and verified before the original is deleted, and it stops whenever anyone starts watching. You can stop it at any time and it picks up where it left off.')) return;
-  const r = await post('/api/migrate/start', {});
-  if (!r.ok) alert('Not ready:\\n\\n' + ((r.data.problems||[r.data.error]).join('\\n')));
-  tick();
-};
-
-$('scan').onclick = async () => { await post('/api/duplicates/scan', {}); tick(); };
-$('scanfull').onclick = async () => { await post('/api/duplicates/scan', { full:true }); tick(); };
-$('copybad').onclick = async () => {
-  const text = badCache.map((i) => i.what).join('\\n');
-  try { await navigator.clipboard.writeText(text); $('copybad').textContent = 'Copied'; }
-  catch { $('copybad').textContent = 'Could not copy'; }
-  setTimeout(() => { $('copybad').textContent = 'Copy list'; }, 1800);
-};
 $('retry').onclick = async () => { const r = await post('/api/retry', {}); alert('Requeued ' + (r.data.jobs||0) + ' job(s).'); tick(); };
 
-document.addEventListener('click', async (e) => {
-  const b = e.target.closest('[data-drop]');
-  if (!b) return;
-  const id = b.getAttribute('data-drop');
-  const card = b.closest('.copy');
-  const folder = card.querySelector('.path').textContent;
-  const name = card.querySelector('.fname').textContent;
-  if (!confirm('Delete this copy?\\n\\n' + name + '\\n' + folder + '\\n\\nThe copy marked Keep stays. This cannot be undone.')) return;
-  b.disabled = true; b.textContent = 'checking';
-  const r = await post('/api/drop', { id });
-  if (!r.ok) { b.disabled = false; b.textContent = 'Delete'; alert('Refused: ' + (r.data.error || 'unknown')); return; }
-  card.remove();
-  tick();
-});
+// ---- Settings ----------------------------------------------------------
+// Loaded once rather than on every poll: the fields are editable, and
+// overwriting them three seconds into someone typing is its own bug.
+async function loadSettings() {
+  const s = await get('/api/settings');
+  if (s.unavailable) { $('settings').innerHTML = '<div class="empty">Settings are not available in this build.</div>'; return; }
+  $('s_pause').checked = s.pauseWhileWatching !== false;
+  $('s_always').checked = !!(s.optimizeWindow && s.optimizeWindow.always);
+  $('s_from').value = (s.optimizeWindow && s.optimizeWindow.from) || '00:00';
+  $('s_to').value = (s.optimizeWindow && s.optimizeWindow.to) || '05:00';
+  $('s_port').value = s.mediaServerPort || 8096;
+  $('s_vmaf').value = s.vmafPassMark != null ? s.vmafPassMark : 95;
+  $('s_folders').value = (s.libraryFolders || []).join('\\n');
+}
 
+$('ssave').onclick = async () => {
+  $('ssave').disabled = true;
+  $('sstate').textContent = 'saving…';
+  const r = await post('/api/settings', {
+    pauseWhileWatching: $('s_pause').checked,
+    mediaServerPort: $('s_port').value.trim(),
+    vmafPassMark: $('s_vmaf').value.trim(),
+    libraryFolders: $('s_folders').value,
+    optimizeWindow: { always: $('s_always').checked, from: $('s_from').value.trim(), to: $('s_to').value.trim() }
+  });
+  $('ssave').disabled = false;
+  if (!r.ok) { $('sstate').innerHTML = '<span class="tag drop">' + esc(r.data.error || 'could not save') + '</span>'; return; }
+  $('sstate').textContent = 'saved';
+  await loadSettings();                       // show what was actually stored
+  setTimeout(() => { $('sstate').textContent = ''; }, 2500);
+};
+
+loadSettings();
 tick();
 setInterval(tick, 3000);
 </script>

@@ -132,6 +132,13 @@ export function originalOf(tempPath) {
   return path.join(dir, base.slice(0, i) + ext);
 }
 
+/** The pid baked into a temp name, or null if it does not carry one. */
+export function pidOf(tempPath) {
+  const m = path.basename(tempPath).match(
+    new RegExp(TMP_SUFFIX.replace(/\./g, '\\.') + '\\.(\\d+)\\.'));
+  return m ? Number(m[1]) : null;
+}
+
 // Clear temp files left by runs that are no longer alive. Best-effort by
 // design: one that is still locked is skipped and tried again next time, which
 // is exactly right — it costs nothing and it cannot block the work.
@@ -167,6 +174,64 @@ export function sweepTempFiles(dir, { log = () => {} } = {}) {
     } catch { /* still held: leave it, we will try again next time */ }
   }
   return freed;
+}
+
+/**
+ * Sweep the whole library once, rather than a folder at a time.
+ *
+ * sweepTempFiles() above only ever looks in the folder of the job about to
+ * start, so a temp left by a killed run sits where it is until something else
+ * in that same directory happens to need encoding. That can be never. A run
+ * stopped mid-encode on a 4K film left 14 GB behind that way, and the comment on
+ * the swap below records nine films — 188 GiB — that waited in exactly this
+ * state. Called at startup, which is when leftovers exist and when nothing of
+ * ours is in flight yet.
+ *
+ * Folders come from the library itself, so it visits only places the optimizer
+ * has actually worked and never walks a whole drive.
+ *
+ * It keeps the same rule, which is the one that matters: a temp whose ORIGINAL
+ * IS MISSING is not litter, it is the only copy of that film, and deleting it is
+ * the data loss this is meant to clean up after. Those are left for
+ * recoverOrphanedTemps() and reported loudly here.
+ *
+ * It also skips anything carrying THIS process's pid. At startup there should be
+ * none, but pids are reused across reboots, and the one unacceptable outcome is
+ * a sweeper that deletes a live encode out from under the encoder.
+ */
+export function sweepLibraryTemps(db, { log = () => {} } = {}) {
+  ensureSchema(db);
+  const dirs = new Set();
+  for (const r of db.prepare('SELECT DISTINCT path FROM media_info').all()) {
+    try { dirs.add(path.dirname(r.path)); } catch { /* unusable row */ }
+  }
+
+  let freed = 0, cleared = 0;
+  const orphans = [];
+  for (const dir of dirs) {
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch { continue; }
+    for (const n of names) {
+      if (!n.includes(TMP_SUFFIX)) continue;
+      const p = path.join(dir, n);
+      if (pidOf(p) === process.pid) continue;          // ours, in flight
+
+      const orig = originalOf(p);
+      if (orig && !fs.existsSync(orig)) { orphans.push(p); continue; }
+
+      try {
+        const size = fs.statSync(p).size;
+        fs.rmSync(p, { force: true });
+        freed += size; cleared++;
+      } catch { /* held open by something: next startup will get it */ }
+    }
+  }
+
+  if (cleared) log(`Cleared ${cleared} leftover temp file(s), ${(freed / 2 ** 30).toFixed(2)} GiB.`);
+  for (const p of orphans) {
+    log(`KEEPING ${path.basename(p)} — the file it came from is gone, so this is the only copy. Recover it, do not delete it.`);
+  }
+  return { cleared, freed, orphans };
 }
 
 /**
@@ -338,37 +403,6 @@ export function copyNoClobber(src, dst) {
   if (a !== b) { fs.rmSync(tmp, { force: true }); throw new Error(`size mismatch after copy: ${a} vs ${b}`); }
   fs.renameSync(tmp, dst);
   return b;
-}
-
-/**
- * The same thing, without stopping the world.
- *
- * copyFileSync blocks the single thread for the whole copy, which for a 50 GB
- * remux off a USB disk is minutes. That is survivable in the one-shot CLI tool
- * that uses the synchronous version above, and NOT survivable in the migration:
- * it copies twenty thousand files from inside the process that also serves the
- * window and runs the encoder, so the program would appear dead for hours.
- *
- * The same mistake — an async-looking function doing synchronous reads —
- * already shipped once in the duplicate finder and read to the owner as a
- * crash. See the note above fingerprint() in duplicates.mjs.
- */
-export async function copyNoClobberAsync(src, dst) {
-  const exists = await fs.promises.access(dst).then(() => true, () => false);
-  if (exists) throw new Error(`destination already exists, refusing to overwrite: ${dst}`);
-
-  await fs.promises.mkdir(path.dirname(dst), { recursive: true });
-  const tmp = dst + '.partial';
-  await fs.promises.rm(tmp, { force: true });
-  await fs.promises.copyFile(src, tmp);
-
-  const [a, b] = await Promise.all([fs.promises.stat(src), fs.promises.stat(tmp)]);
-  if (a.size !== b.size) {
-    await fs.promises.rm(tmp, { force: true });
-    throw new Error(`size mismatch after copy: ${a.size} vs ${b.size}`);
-  }
-  await fs.promises.rename(tmp, dst);
-  return b.size;
 }
 
 // Pre-flight for any batch of moves: find every collision BEFORE a single file
@@ -629,26 +663,57 @@ async function probeOne(filePath) {
   };
 }
 
-// Every file the optimizer is allowed to look at. Files on a drive that isn't
-// mounted are excluded outright — the F: library is offline, and a missing
-// drive must never be mistaken for a missing file.
+// The volume a path lives on: a drive letter, or a UNC share.
+//
+// Network shares are the reason this exists. The old test was
+// `path.slice(0, 2)` against a list of drive letters, which for
+// \\NAS\media\Movies\Film.mkv is "\\" — never a drive letter, so EVERY file on
+// a NAS was silently excluded. For a media server that is not an edge case; a
+// library on a share is one of the normal ways to own one, and the result was
+// an optimizer reporting zero files and never saying why.
+export function volumeKeyOf(p) {
+  const s = String(p || '').replace(/\//g, '\\');
+  if (s.startsWith('\\\\')) {
+    // \\server\share\rest -> \\server\share. The share, not the server: two
+    // shares on one box can be mounted independently.
+    const m = /^\\\\([^\\]+)\\([^\\]+)/.exec(s);
+    return m ? `\\\\${m[1]}\\${m[2]}`.toUpperCase() : null;
+  }
+  return /^[A-Za-z]:/.test(s) ? s.slice(0, 2).toUpperCase() : null;
+}
+
+// Is that volume present AND readable right now?
+//
+// statSync + isDirectory, deliberately, and the same test `pruneMissing` in
+// scan.js uses — not existsSync: on Windows a drive letter can answer existsSync
+// while the volume behind it is not really usable. An external USB disk that has
+// dropped out, or a share that is unreachable, must read as unavailable so the
+// optimizer leaves those files completely alone rather than drawing conclusions
+// about media it cannot currently see.
+export function volumeAvailable(key, cache = null) {
+  if (!key) return false;
+  if (cache && cache.has(key)) return cache.get(key);
+  let ok = false;
+  try { ok = fs.statSync(key + '\\').isDirectory(); } catch { ok = false; }
+  if (cache) cache.set(key, ok);
+  return ok;
+}
+
+// Every file the optimizer is allowed to look at. Files on a volume that is not
+// reachable are excluded outright — an offline drive or an unreachable share
+// must never be mistaken for a missing file.
 export function scannableFiles(db) {
-  const roots = mountedRoots();
+  const seen = new Map();   // one stat per volume, not per file
   const rows = [
     ...db.prepare('SELECT id AS file_id, path, size FROM movie_files').all().map((r) => ({ ...r, file_kind: 'movie' })),
     ...db.prepare('SELECT id AS file_id, path, size FROM episode_files').all().map((r) => ({ ...r, file_kind: 'episode' }))
   ];
-  return rows.filter((r) => roots.has(String(r.path).slice(0, 2).toUpperCase()));
+  return rows.filter((r) => volumeAvailable(volumeKeyOf(r.path), seen));
 }
 
-// Drive letters that are actually present AND readable right now.
-//
-// This is deliberately the same test `pruneMissing` in scan.js uses (statSync +
-// isDirectory), not `existsSync`: on Windows a drive letter can answer
-// existsSync while the volume behind it is not really usable. An external USB
-// disk that has dropped out must read as "not mounted" here, so the optimizer
-// leaves its files completely alone rather than drawing conclusions about
-// media it cannot currently see.
+// Drive letters that are actually present AND readable right now. Kept for the
+// drive-health reporting, which is about physical disks and so has no business
+// with shares.
 export function mountedRoots() {
   const set = new Set();
   for (let c = 65; c <= 90; c++) {
@@ -859,12 +924,15 @@ export function analyze(db, { allow4kVideo = false, allowHdrVideo = false } = {}
     LEFT JOIN shows         s  ON s.id  = e.show_id
     WHERE (mf.id IS NOT NULL OR ef.id IS NOT NULL)`).all();
 
-  const mounted = mountedRoots();
+  // Same reachability test as scannableFiles, for the same reason: planning
+  // against a share it cannot see is as wrong as planning against an unplugged
+  // disk, and excluding every share outright was wronger still.
+  const seen = new Map();
   const items = [];
   const totals = { files: 0, bytes: 0, saveBytes: 0, byProfile: {}, byTier: {} };
 
   for (const r of rows) {
-    if (!mounted.has(String(r.path).slice(0, 2).toUpperCase())) continue;
+    if (!volumeAvailable(volumeKeyOf(r.path), seen)) continue;
     const plan = planFor(r, { allow4kVideo, allowHdrVideo });
     const size = Number(r.size) || 0;
     totals.files++; totals.bytes += size;
@@ -918,6 +986,28 @@ function freeSpaceOn(filePath) {
 // The files that hit this carry PGS (image) subtitles, where fonts do nothing.
 const DROP_ATTACHMENTS = ['-map', '-0:t?'];
 
+// How far the muxer may let streams drift apart before writing a packet anyway,
+// in microseconds.
+//
+// This was `0`, which does not mean "no buffering" - it means no limit:
+// libavformat keeps queueing packets until it holds one for every stream,
+// however long that takes. In these jobs the video is copied at disk speed while
+// an audio track is encoded in real time, so the video runs minutes ahead and
+// all of those packets wait in RAM for the audio to catch up.
+//
+// On a 2-hour 4K file that reached ~6 GB resident. This box has 15.9 GB, and on
+// 2026-09-24 it ran out of commit: qBittorrent, DrivePool's service, Explorer
+// and Defender all died inside the same second with 0xc00000fd - a stack
+// overflow, which is what a thread gets when no stack page can be committed.
+// The Incredible Hulk retried the same job four times across two days and never
+// finished it.
+//
+// One second is bounded and far more than ordinary A/V interleaving needs. The
+// only cost of a tighter limit is interleave tightness for sparse streams - PGS
+// subtitles with minutes between cues get written less neatly. The file stays
+// valid, and every verification gate downstream still has to pass.
+const MAX_INTERLEAVE = ['-max_interleave_delta', '1000000'];
+
 // Build the ffmpeg command for a profile.
 //
 // Audio profile: `-map 0 -c copy` keeps every stream — video, subtitles, chapters,
@@ -932,7 +1022,7 @@ function buildArgs(info, plan, src, dst, { audioMode = 'convert', crf = null } =
   // times realtime. Uncapped it will pull as hard as the drive allows, which is
   // what these USB disks did not enjoy.
   if (throttle.readRate > 0) args.push('-readrate', String(throttle.readRate));
-  args.push('-i', src, '-map', '0', '-map', '-0:d?', ...DROP_ATTACHMENTS, '-max_interleave_delta', '0');
+  args.push('-i', src, '-map', '0', '-map', '-0:d?', ...DROP_ATTACHMENTS, ...MAX_INTERLEAVE);
   const doVideo = plan.profile === 'video' || plan.profile === 'both';
   const doAudio = plan.profile === 'audio' || plan.profile === 'both';
   if (doAudio && audioMode === 'drop') {
@@ -1156,6 +1246,15 @@ export async function runQueue(db, { log = () => {}, allow4kVideo = false, allow
   if (revived) log(`Optimizer: requeued ${revived} job(s) left behind by an interrupted run.`);
 
   if (worker.running) return;
+
+  // Those same interrupted jobs each left a temp file behind, and the per-folder
+  // sweep further down only finds one if a later job happens to land in the same
+  // directory. Do it here instead, once, while nothing of ours is encoding.
+  if (revived) {
+    try { sweepLibraryTemps(db, { log }); }
+    catch (e) { log('Optimizer: could not sweep leftover temp files — ' + e.message); }
+  }
+
   worker.running = true; worker.stop = false;
 
   // Baseline for the disk-health watch: anything Windows logs from here on is
@@ -1254,6 +1353,10 @@ async function runJob(db, job, { log, allow4kVideo, allowHdrVideo }) {
         new_size: res.newSize, pct: 100, ended_at: Date.now(),
         reason: `added E-AC-3 surround; video bitstream verified identical (${res.beforeHash})`
       });
+    }
+    if (res.nothingToDo) {
+      note(`Left alone ${path.basename(info.path)} — ${res.error}`);
+      return setState('kept', { error: res.error, ended_at: Date.now() });
     }
     note(`FAILED ${path.basename(info.path)}: ${res.error}`);
     return setState('failed', { error: res.error, ended_at: Date.now() });
@@ -1425,7 +1528,11 @@ async function runJob(db, job, { log, allow4kVideo, allowHdrVideo }) {
     fs.rmSync(dst, { force: true });
     note(`REJECTED ${path.basename(src)}: ${bad} — original untouched.`);
     log(`Optimizer rejected ${path.basename(src)}: ${bad}`);
-    return setState('failed', { error: 'verification failed: ' + bad, ended_at: Date.now() });
+    // 'kept', not 'failed'. The gate did its job: the re-encode was not good
+    // enough and the original stayed. That is the program working, and listing
+    // it under "given up on" told the owner 700 of their files were broken when
+    // in fact 700 of their files were already as good as they can be.
+    return setState('kept', { error: 'kept the original: ' + bad, ended_at: Date.now() });
   }
 
   // Verified. Replace the source, keeping its exact name where possible so
@@ -1610,7 +1717,10 @@ export async function addCompatibleAudio(db, kind, fileId, { log = () => {}, dry
   if (!fs.existsSync(src)) return { ok: false, error: 'file is gone' };
 
   const plan = planAddAudio(info);
-  if (!plan.need) return { ok: false, error: plan.reason };
+  // Not a failure. The file is already fine, which is the outcome this whole
+  // feature is trying to reach — flagged so the caller records a decision
+  // rather than a fault. See the `kept` state in runJob().
+  if (!plan.need) return { ok: false, nothingToDo: true, error: plan.reason };
 
   const st = fs.statSync(src);
   if (st.size !== Number(info.size)) return { ok: false, error: 'file changed since it was probed — rescan first' };
@@ -1630,7 +1740,7 @@ export async function addCompatibleAudio(db, kind, fileId, { log = () => {}, dry
     ...(throttle.readRate > 0 ? ['-readrate', String(throttle.readRate)] : []),
     '-i', src,
     '-map', '0', '-map', `0:a:${plan.srcIndex}`, '-map', '-0:d?', ...DROP_ATTACHMENTS,
-    '-max_interleave_delta', '0',
+    ...MAX_INTERLEAVE,
     '-c', 'copy',                                 // everything copied, including video
     `-c:a:${n}`, AUDIO_CODEC, `-b:a:${n}`, `${plan.channels > 2 ? AUDIO_KBPS : 320}k`,
     `-ac:a:${n}`, String(plan.channels),
@@ -1871,15 +1981,22 @@ export function stuck(db) {
 // own judgement, so it is deliberate and explicit: nothing here happens on its
 // own, and a job that was rejected on QUALITY is only reconsidered when asked
 // for by id.
+//
+// `kept` has to be reachable from here even though it is not a failure. It is
+// where a quality rejection now lands, and "reconsider the ones you judged" is
+// exactly what --judged means — lowering the pass mark and asking again is a
+// real thing the owner does. Without it in this list, --judged would silently
+// have nothing to work on.
 export function retryStuck(db, { id = 0, includeJudged = false } = {}) {
   ensureSchema(db);
   const reset = (where, args) => db.prepare(
     `UPDATE optimize_jobs SET state='queued', attempts=0, next_try_at=NULL, error=NULL, pct=0 ${where}`).run(...args).changes;
 
-  if (id) return { jobs: reset('WHERE id = ? AND state IN (\'failed\',\'retry\')', [id]), probes: 0 };
+  if (id) return { jobs: reset("WHERE id = ? AND state IN ('failed','retry','kept')", [id]), probes: 0 };
 
+  const states = includeJudged ? "('failed','retry','kept')" : "('failed','retry')";
   let jobs = 0;
-  for (const r of db.prepare("SELECT id, error FROM optimize_jobs WHERE state IN ('failed','retry')").all()) {
+  for (const r of db.prepare(`SELECT id, error FROM optimize_jobs WHERE state IN ${states}`).all()) {
     if (!includeJudged && !isRetryableFailure(String(r.error || '').replace(/^gave up after \d+ attempts: /, ''))) continue;
     jobs += reset('WHERE id = ?', [r.id]);
   }
@@ -1903,6 +2020,13 @@ export function status(db) {
     probed,
     scannable: scannableFiles(db).length,
     nvenc: nvencAvailable(),
+    // Without libvmaf there is no way to prove a re-encode looks the same, so
+    // video shrinking is vetoed and only audio work happens. That is the right
+    // call, but it was invisible: the window showed jobs running and nothing
+    // ever getting smaller, and the explanation lived in a per-file plan reason
+    // nobody reads. Most ffmpeg builds on PATH have no libvmaf, so for anyone
+    // who did not install the bundled one this is the normal state.
+    canProveQuality: !VMAF.enabled || vmafAvailable(),
     log: worker.log.slice(-60)
   };
 }

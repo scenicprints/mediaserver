@@ -28,6 +28,7 @@ import { rematchMovies } from './rematch.js';
 import { upcoming, heroUpcoming } from './upcoming.js';
 import { describe } from './versions.js';
 import { isOnline, onChange as onInternetChange, startWatching as watchInternet, netFetch } from './online.js';
+import * as disk from './diskguard.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -658,7 +659,7 @@ app.get('/api/movies/:id', async (req, reply) => {
   ).all(req.params.id);
   // Highest quality first, so it's the default version to play.
   files.sort((a, b) => qualityRank(b.quality) - qualityRank(a.quality));
-  for (const f of files) { f.subtitles = listSubtitles(f.path).map((s, i) => ({ label: s.label, idx: i })); delete f.path; }
+  for (const f of files) { f.subtitles = (await listSubtitles(f.path)).map((s, i) => ({ label: s.label, idx: i })); delete f.path; }
   // Overlay this user's watch state onto the logical movie.
   Object.assign(row, wsGet(req.user.id, 'movie', row.id));
   row.files = files;
@@ -868,7 +869,7 @@ app.get('/api/shows/:id', async (req, reply) => {
   for (const e of eps) {
     const files = filesStmt.all(e.id);
     files.sort((a, b) => qualityRank(b.quality) - qualityRank(a.quality));
-    for (const f of files) { f.subtitles = listSubtitles(f.path).map((s, i) => ({ label: s.label, idx: i })); delete f.path; }
+    for (const f of files) { f.subtitles = (await listSubtitles(f.path)).map((s, i) => ({ label: s.label, idx: i })); delete f.path; }
     e.files = files;
   }
 
@@ -1048,7 +1049,7 @@ app.post('/api/libraries', async (req, reply) => {
   const body = req.body || {};
   const p = body.path;
   if (!p) return reply.code(400).send({ error: 'path required' });
-  if (!fs.existsSync(p)) return reply.code(400).send({ error: 'folder not found on server' });
+  if (!(await disk.exists(p).catch(() => false))) return reply.code(400).send({ error: 'folder not found on server (or its disk is not responding)' });
   const type = body.type === 'tv' ? 'tv' : 'movie';
   const name = body.name || path.basename(p) || p;
 
@@ -1124,7 +1125,7 @@ app.delete('/api/file/:kind/:fileId', async (req, reply) => {
   const row = fileRow(kind, fileId);
   if (!row) return reply.code(404).send({ error: 'not found' });
   try {
-    fs.rmSync(row.path, { force: true }); // force: don't error if already gone
+    await disk.rm(row.path, { force: true }); // force: don't error if already gone
   } catch (e) {
     return reply.code(500).send({ error: 'could not delete file: ' + e.message });
   }
@@ -1146,8 +1147,8 @@ app.get('/api/fs', async (req, reply) => {
   if (!requireAdmin(req, reply)) return;
   const p = req.query.path;
   try {
-    if (!p) return { path: null, parent: null, drives: listDrives(), dirs: [] };
-    return listDirs(p);
+    if (!p) return { path: null, parent: null, drives: await listDrives(), dirs: [] };
+    return await listDirs(p);
   } catch (e) {
     return reply.code(400).send({ error: e.message });
   }
@@ -1155,11 +1156,14 @@ app.get('/api/fs', async (req, reply) => {
 
 // ---- Video streaming with HTTP Range support (seeking) ----
 
-function streamFile(filePath, req, reply) {
+async function streamFile(filePath, req, reply) {
   let stat;
   try {
-    stat = fs.statSync(filePath);
-  } catch {
+    stat = await disk.stat(filePath);
+  } catch (e) {
+    // A hung disk is not a missing file: 503, so a client retries rather than
+    // concluding the title is gone.
+    if (disk.isStall(e)) return reply.code(503).send({ error: 'disk not responding' });
     return reply.code(404).send({ error: 'file missing on disk' });
   }
 
@@ -1198,14 +1202,14 @@ function streamFile(filePath, req, reply) {
 }
 
 // Stream a specific movie file (version) by its file id.
-app.get('/api/stream/:fileId', (req, reply) => {
+app.get('/api/stream/:fileId', async (req, reply) => {
   const row = db.prepare('SELECT path FROM movie_files WHERE id = ?').get(req.params.fileId);
   if (!row) return reply.code(404).send({ error: 'not found' });
   return streamFile(row.path, req, reply);
 });
 
 // Stream a specific TV episode file (version) by its file id.
-app.get('/api/stream/episode/:fileId', (req, reply) => {
+app.get('/api/stream/episode/:fileId', async (req, reply) => {
   const row = db.prepare('SELECT path FROM episode_files WHERE id = ?').get(req.params.fileId);
   if (!row) return reply.code(404).send({ error: 'not found' });
   return streamFile(row.path, req, reply);
@@ -1274,7 +1278,7 @@ app.get('/api/play/:kind/:fileId', async (req, reply) => {
     info.reason = null;
   }
   const directUrl = (kind === 'episode' ? '/api/stream/episode/' : '/api/stream/') + fileId;
-  let fileSize = null; try { fileSize = fs.statSync(row.path).size; } catch {} // lets the client estimate throughput (size×8/duration = avg bitrate)
+  let fileSize = null; try { fileSize = (await disk.stat(row.path)).size; } catch {} // lets the client estimate throughput (size×8/duration = avg bitrate)
   // Remember the server's authoritative engine decision so the admin monitor can
   // report accurate direct/transcode details for this viewer (see /api/session/*).
   playDecisions.set(`${req.user.id}:${kind}:${fileId}`, { mode: info.mode, engine: info.engine || null, at: Date.now() });
@@ -1391,7 +1395,7 @@ app.get('/api/mediainfo/:kind/:fileId', async (req, reply) => {
   else if (transfer === 'arib-std-b67') hdr = 'hlg';
   const pix = v.pix_fmt || '';
   const bitDepth = /10le|10be|p010/.test(pix) ? 10 : /12le|12be/.test(pix) ? 12 : 8;
-  let size = null; try { size = fs.statSync(row.path).size; } catch {}
+  let size = null; try { size = (await disk.stat(row.path)).size; } catch {}
   let videoKbps = null;
   if (v.bit_rate) videoKbps = Math.round(+v.bit_rate / 1000);
   else if (size && p?.format?.duration) videoKbps = Math.round((size * 8) / +p.format.duration / 1000);
@@ -1777,7 +1781,7 @@ app.get('/api/preroll', async (req) => {
     url: info.mode === 'transcode' ? '/api/preroll/transcode' : '/api/preroll/stream'
   };
 });
-app.get('/api/preroll/stream', (req, reply) => {
+app.get('/api/preroll/stream', async (req, reply) => {
   const f = prerollFile();
   if (!f) return reply.code(404).send({ error: 'no preroll' });
   return streamFile(f, req, reply);
@@ -1900,7 +1904,7 @@ async function runSubJob(job, kind, fileId, target) {
         config, onProgress: (p) => { job.pct = 70 + Math.round(p * 30); }
       });
     }
-    const list = listSubtitles(row.path);
+    const list = await listSubtitles(row.path);
     const idx = Math.max(0, list.findIndex((s) => s.path === vttPath));
     job.result = { subtitles: list.map((s, i) => ({ label: s.label, idx: i })), idx };
     job.pct = 100; job.status = 'done';
@@ -2024,7 +2028,7 @@ app.post('/api/settings/arr', async (req, reply) => {
 // endpoints use), then text subtitles embedded in the container (mkv rips).
 // Embedded ones ride on the same ?idx= addressing, appended after the sidecars.
 async function allSubtitleTracks(videoPath) {
-  const side = listSubtitles(videoPath).map((s) => ({ ...s, embedded: false }));
+  const side = (await listSubtitles(videoPath)).map((s) => ({ ...s, embedded: false }));
   let emb = [];
   try { emb = (await embeddedSubtitles(videoPath)).map((e) => ({ ...e, embedded: true })); } catch {}
   return [...side, ...emb];
@@ -2044,7 +2048,7 @@ app.get('/api/subtitles/list/:kind/:fileId', async (req, reply) => {
 const SUBCACHE_DIR = path.resolve(ROOT, 'data', 'subcache');
 async function embeddedVtt(videoPath, sIndex) {
   let st;
-  try { st = fs.statSync(videoPath); } catch { return null; }
+  try { st = await disk.stat(videoPath); } catch { return null; }
   const key = crypto.createHash('sha1').update(`${videoPath}:${st.mtimeMs}:${sIndex}`).digest('hex');
   const cached = path.join(SUBCACHE_DIR, key + '.vtt');
   if (!fs.existsSync(cached)) {
@@ -2066,7 +2070,7 @@ async function serveSubtitle(videoPath, idx, reply) {
     return reply.send(vtt);
   }
   let text;
-  try { text = readSubtitleFile(sub.path); } catch { return reply.code(404).send({ error: 'unreadable' }); }
+  try { text = await readSubtitleFile(sub.path); } catch { return reply.code(404).send({ error: 'unreadable' }); }
   // Every sidecar format reaches the player as WebVTT — a browser renders
   // nothing else, and SubStation Alpha least of all.
   return reply.send(sidecarToVtt(sub.path, text));
