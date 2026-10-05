@@ -320,7 +320,14 @@ export async function playInfo(filePath, { forceStereo = false, night = false, n
       };
     }
   }
-  if (DIRECT_EXT.has(ext) && vOK && aOK && !needAudio) {
+  // A browser playing the raw file plays the file's default audio stream (most
+  // have no way to pick another), so a request for any OTHER stream has to be
+  // remuxed with that stream mapped, or choosing a soundtrack silently does
+  // nothing. The native players are unaffected: /api/play?native=1 forces
+  // direct and they switch tracks themselves.
+  const browserTrack = Math.max(0, audioStreams.findIndex((s) => s.disposition && s.disposition.default));
+  const otherTrack = atrack != null && audioStreams.length > 1 && atrack !== browserTrack;
+  if (DIRECT_EXT.has(ext) && vOK && aOK && !needAudio && !otherTrack) {
     return { mode: 'direct', duration, chapters, engine: { ...src, mode: 'direct', videoAction: 'direct play', audioAction: 'direct play' } };
   }
   const videoAction = vcopy ? 'copy (remux)' : (scaleH ? `transcode → ${scaleH}p` : (bf > 0 ? 'transcode (de-B-frame)' : 'transcode'));

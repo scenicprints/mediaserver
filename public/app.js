@@ -1597,10 +1597,50 @@ function fileTags(name) {
   return t;
 }
 function versionLabel(f, i) {
+  if (f.vlabel) return f.vlabel; // what the file really is, from /api/versions
   const parts = [f.quality || 'Version ' + (i + 1)];
   const sz = fmtSize(f.size); if (sz) parts.push(sz);
   const tags = fileTags(f.filename); if (tags.length) parts.push(tags.join(' · '));
   return parts.join('   ·   ');
+}
+// The single-version span on a detail page has no room for the full line.
+function shortVersionLabel(f) {
+  return [f.quality || 'Version', fmtSize(f.size)].filter(Boolean).join(' · ');
+}
+// The picker's lines from the file itself ("4K · HEVC HDR10 · TrueHD Atmos 7.1 ·
+// 58.2 GB"), asked for only when a title has more than one file. Keyed by the
+// version key (m12 / e34), the id of the TITLE, not a file. Never blocks: until
+// (or unless) it answers, versionLabel() keeps today's filename-based line.
+const versionLabelCache = new Map();
+function loadVersionLabels(verKey, files) {
+  if (!verKey || !files || files.length < 2) return Promise.resolve(false);
+  let p = versionLabelCache.get(verKey);
+  if (!p) {
+    const kind = verKey[0] === 'e' ? 'episode' : 'movie';
+    p = fetch(`/api/versions/${kind}/${verKey.slice(1)}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((rows) => (Array.isArray(rows) ? rows : null))
+      .catch(() => null);
+    versionLabelCache.set(verKey, p);
+    p.then((rows) => { if (!rows) versionLabelCache.delete(verKey); }); // a failure is retried next time
+  }
+  return p.then((rows) => {
+    if (!rows) return false;
+    for (const f of files) {
+      const row = rows.find((x) => x.fileId === f.id);
+      if (row && row.label) f.vlabel = row.label;
+    }
+    return true;
+  });
+}
+// Rewrite a detail page's <select> options in place once the labels arrive.
+// Values (file ids) are untouched, so the select behaves exactly as before.
+function relabelVersionSelect(sel, files) {
+  if (!sel || !sel.isConnected) return;
+  [...sel.options].forEach((o, i) => {
+    const f = files.find((x) => String(x.id) === o.value);
+    if (f) o.textContent = versionLabel(f, i);
+  });
 }
 // Version memory (server-backed): this title's last-played version first
 // (verid:m12 / verid:e34 → file id), then the last quality picked anywhere
@@ -1673,7 +1713,7 @@ async function openDetail(id, autoplay = true) {
 
   const versionControl = files.length > 1
     ? `<span class="dp-version"><span>Version</span><select class="dp-select" id="ver-select">${files.map((f, i) => `<option value="${f.id}">${escapeHtml(versionLabel(f, i))}</option>`).join('')}</select></span>`
-    : (current ? `<span class="dp-version"><span>${escapeHtml(versionLabel(current, 0))}</span></span>` : '');
+    : (current ? `<span class="dp-version"><span>${escapeHtml(shortVersionLabel(current))}</span></span>` : '');
 
   detailInner.innerHTML = `
     <div class="dp-splash${(m.backdrop || m.poster) ? '' : ' no-art'}" id="dp-splash" style="background-image:url('${m.backdrop || m.poster || ''}')">
@@ -1715,6 +1755,7 @@ async function openDetail(id, autoplay = true) {
   const sel = document.getElementById('ver-select');
   if (sel && current) sel.value = String(current.id); // reflect the remembered version
   if (sel) sel.addEventListener('change', () => { const f = files.find((x) => String(x.id) === sel.value); if (f) { current = f; rememberVersion('m' + m.id, f); } });
+  if (sel) loadVersionLabels('m' + m.id, files).then((ok) => { if (ok) relabelVersionSelect(sel, files); });
 
   // Admin: delete the currently-selected version's file from the server, then
   // close the detail and refresh the library (the movie vanishes if that was its
@@ -1839,8 +1880,8 @@ function playEpisodeAt(show, flat, i, opts = {}) {
       // For the idle-bandwidth prefetch: the next episode's chosen file id (same
       // streamBase as the current episode). Null if that episode has no file yet.
       prefetch: (next.ep.files && next.ep.files.length) ? { kind: 'episode', fileId: preferredFile(next.ep.files, 'e' + next.ep.id).id } : null } : null,
-    // Marks this play as part of a chain, so the soundtrack chooser stays out
-    // of the way and the previous choice carries forward.
+    // Marks this play as part of a chain (the audio pick carries a viewer's
+    // override forward through `bingeTrack`).
     autoAdvance: !!opts.autoAdvance,
     onEnded: next ? () => playEpisodeAt(show, flat, i + 1, { autoAdvance: true }) : null
   });
@@ -1856,7 +1897,7 @@ async function openEpisodeDetail(show, flat, i) {
   const overview = extra.overview || ep.overview || 'No description.';
   const versionControl = files.length > 1
     ? `<span class="dp-version"><span>Version</span><select class="dp-select" id="ep-ver">${files.map((f, k) => `<option value="${f.id}">${escapeHtml(versionLabel(f, k))}</option>`).join('')}</select></span>`
-    : (current ? `<span class="dp-version"><span>${escapeHtml(versionLabel(current, 0))}</span></span>` : '');
+    : (current ? `<span class="dp-version"><span>${escapeHtml(shortVersionLabel(current))}</span></span>` : '');
 
   detailInner.innerHTML = `
     <div class="dp-splash${still ? '' : ' no-art'}" style="background-image:url('${still}')">
@@ -1901,6 +1942,7 @@ async function openEpisodeDetail(show, flat, i) {
   const sel = document.getElementById('ep-ver');
   if (sel && current) sel.value = String(current.id); // reflect the remembered version
   if (sel) sel.addEventListener('change', () => { const f = files.find((x) => String(x.id) === sel.value); if (f) { current = f; rememberVersion('e' + ep.id, f); } });
+  if (sel) loadVersionLabels('e' + ep.id, files).then((ok) => { if (ok) relabelVersionSelect(sel, files); });
   // Admin: delete this episode file from the server, then reopen the show (the
   // episode drops off if that was its last version).
   const epDelBtn = document.getElementById('ep-del-file');
@@ -2103,6 +2145,8 @@ const ICONS = {
   volHigh: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 10v4h4l5 5V5L7 10H3zm13 2a4 4 0 0 0-2-3.46v6.92A4 4 0 0 0 16 12zm-2-7.5v2.06a6 6 0 0 1 0 10.88v2.06a8 8 0 0 0 0-15z"/></svg>',
   volMute: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 10v4h4l5 5V5L7 10H3zm18.3 2 1.4-1.4L21.4 9 20 10.6 18.4 9 17 10.4 18.6 12 17 13.6 18.4 15 20 13.4 21.6 15 23 13.6z"/></svg>',
   gear: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M19.4 13a7.6 7.6 0 0 0 0-2l2-1.5-2-3.4-2.3.9a7 7 0 0 0-1.7-1l-.4-2.5H10.9l-.3 2.5a7 7 0 0 0-1.7 1l-2.4-.9-2 3.4L6.6 11a7.6 7.6 0 0 0 0 2l-2 1.5 2 3.4 2.4-.9c.5.4 1.1.7 1.7 1l.3 2.5h4.2l.4-2.5c.6-.3 1.2-.6 1.7-1l2.3.9 2-3.4-2-1.5zM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7z"/></svg>',
+  // Audio track menu: a plain waveform (no emoji; Google TV's font drops them).
+  audio: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 10h2v4H3zm4-3h2v10H7zm4-4h2v18h-2zm4 4h2v10h-2zm4 3h2v4h-2z"/></svg>',
   fullscreen: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>',
   // Skip-to-next glyph for the Skip Intro/Credits labels (was the ⏭ emoji, which
   // renders blank on Google TV's stripped font — same bug the nav gear had).
@@ -2149,7 +2193,11 @@ function tryNativeHandoff(ctx) {
     // libVLC plays the pre-roll file raw, whatever its format.
     prerollPath: (ctx.searchKind === 'movie' && !(ctx.startAt > 0) && prerollInfo) ? '/api/preroll/stream' : null,
     hasUpNext: !!ctx.onEnded,
-    deviceId
+    deviceId,
+    // The movie/episode id (verKey is m12 / e34) and this device's speakers
+    // setting, both read by the native player when present.
+    titleId: ctx.verKey ? +String(ctx.verKey).slice(1) || null : null,
+    audioMode: audioGet('audioMode') === 'surround' ? 'surround' : 'stereo'
   }));
   return true;
 }
@@ -2161,6 +2209,12 @@ window.__marqueeNativeDone = (res) => {
   if (!ctx) return;
   res = res || {};
   tele('player', { ev: 'native-done', title: ctx.title, ended: !!res.ended, failed: !!res.failed, at: Math.round(res.position || 0) });
+  // The native player can switch version mid-film: `res.fileId` is the file it
+  // closed on, and it saved verid:/pq through /api/prefs. Re-read the prefs so
+  // the next play on this TV opens the file just chosen.
+  const closedOn = res.fileId != null ? ctx.files.find((f) => f.id === +res.fileId) : null;
+  if (closedOn) ctx.startFileId = closedOn.id;
+  const prefsFresh = loadPrefs().catch(() => {});
   if (res.failed) {
     // libVLC couldn't play this file — fall straight back to the web player
     // (which can ask the server to transcode), resuming where native got to.
@@ -2169,7 +2223,7 @@ window.__marqueeNativeDone = (res) => {
     openPlayer(ctx);
     return;
   }
-  if (res.ended && ctx.onEnded) { ctx.onEnded(); return; } // Up Next chain (re-enters native)
+  if (res.ended && ctx.onEnded) { prefsFresh.then(() => ctx.onEnded()); return; } // Up Next chain (re-enters native)
   // Watch-state was written server-side by the native player; refresh the
   // in-memory copy so Continue Watching / resume bars are current.
   fetch('/api/continue').then((r) => r.json()).then((c) => { continueItems = c; if (currentView === 'home') renderView(); }).catch(() => {});
@@ -2279,6 +2333,7 @@ function openPlayer(ctx) {
         <span class="vp-liveind"><span class="lt-live-dot"></span>LIVE</span>
         <div class="vp-spacer"></div>
         <button class="vp-cc" data-pf title="Subtitles">CC</button>
+        <button class="vp-aud hidden" data-pf title="Audio">${ICONS.audio}</button>
         <button class="vp-gear" data-pf title="Settings">${ICONS.gear}</button>
         <button class="vp-fs" data-pf title="Fullscreen">${ICONS.fullscreen}</button>
       </div>
@@ -2292,7 +2347,6 @@ function openPlayer(ctx) {
     <button class="vp-skipbtn vp-skipcredits hidden" data-pf>Skip Credits ${ICONS.skipnext}</button>
     <div class="vp-menu hidden"></div>
     <div class="vp-upnext hidden"></div>
-    <div class="vp-atrack hidden"></div>
     <div class="vp-endcard hidden"></div>
     <div class="vp-buffering hidden">
       <div class="vp-buf-brand">MARQUEE</div>
@@ -2611,8 +2665,9 @@ function openPlayer(ctx) {
     ov.addEventListener('click', (e) => { if (e.target === ov) ov.remove(); });
   }
 
-  async function loadFile(f, at) {
+  async function loadFile(f, at, opts) {
     current = f;
+    paintAudioBtn();
     errEl.classList.add('hidden');
     // Ask the server how to play this file (direct vs ffmpeg transcode) and
     // for its real duration. Falls back to direct if the endpoint fails.
@@ -2651,8 +2706,11 @@ function openPlayer(ctx) {
       if (video.src) resetPipeline();
       video.preload = 'auto'; // let the browser fill its forward buffer for the head start
       video.src = withToken(play.url);
-      video.addEventListener('loadedmetadata', () => { if (at) video.currentTime = at; playWithHeadStart(); }, { once: true });
+      video.addEventListener('loadedmetadata', () => { applyBrowserAudioTrack(); if (at) video.currentTime = at; playWithHeadStart(); }, { once: true });
     }
+    // An audio switch reloads the SAME file: its subtitle track, visibility and
+    // delay stay exactly as the viewer had them.
+    if (opts && opts.keepSubs) return;
     // The detail payload only knows sidecar files; ask for the FULL track list
     // (embedded mkv subtitles included) now that we're actually playing this file.
     try {
@@ -2675,11 +2733,9 @@ function openPlayer(ctx) {
     if (ctx.searchKind === 'movie' && !(ctx.startAt > 0) && prerollInfo) playPrerollThen(startMain);
     else startMain();
   }
-  // The soundtrack is chosen BEFORE the pre-roll — the pre-roll is theatre and
-  // should not be followed by a dialog. `ctx.autoAdvance` is set when this play
-  // came from an Up Next chain and suppresses the chooser entirely: a binge must
-  // never turn into a quiz.
-  chooseAudioTrackThen(vp, current.id, ctx.searchKind, !!ctx.autoAdvance, afterTrackChoice);
+  // The soundtrack is picked silently BEFORE the pre-roll (so the first stream
+  // request already names it). The Audio menu overrides it during playback.
+  pickAudioTrackThen(current.id, ctx.searchKind, tracksArrived(current.id), afterTrackChoice);
 
   function playPrerollThen(done) {
     const pv = vp.querySelector('.vp-preroll-vid');
@@ -2881,10 +2937,76 @@ function openPlayer(ctx) {
     else { subVisible = !subVisible; renderSub(); }
   });
 
+  // ---- Audio tracks ----
+  // The server's list for each file this player has loaded (fileId → tracks).
+  // The Audio button shows only when the playing file has more than one.
+  const audBtn = vp.querySelector('.vp-aud');
+  const tracksByFile = new Map();
+  const curTracks = () => tracksByFile.get(current.id) || [];
+  function tracksArrived(fileId) {
+    return (tracks) => {
+      tracksByFile.set(fileId, tracks);
+      paintAudioBtn();
+      if (!menu.classList.contains('hidden')) buildMenu();
+    };
+  }
+  function paintAudioBtn() {
+    const show = curTracks().length > 1;
+    const wasFocused = audBtn.classList.contains('pfocus');
+    audBtn.classList.toggle('hidden', !show);
+    if (!show && wasFocused) pfSet(0);
+    else paintPf();
+  }
+  // Which track is playing: the one named for this file, else the server's
+  // default (the first audio stream, which is what /api/play serves unasked).
+  function curAudioIndex() {
+    return sessionTrack && sessionTrack.fileId === current.id ? sessionTrack.index : 0;
+  }
+  function audioSection(tracks) {
+    if (tracks.length < 2) return '';
+    const codecs = deviceCodecs(), on = curAudioIndex();
+    return '<h4>Audio</h4>' + tracks.map((t) =>
+      `<button class="vp-opt atk${t.index === on ? ' active' : ''}" data-ai="${t.index}">` +
+        `<span class="vp-optl">${escapeHtml(trackLabel(t))}` +
+          (t.commentary ? '<span class="vp-tag">commentary</span>' : '') +
+          (codecs.includes(t.codec) ? '' : '<span class="vp-tag">converted</span>') +
+        `</span><span class="tick">${t.index === on ? '✓' : ''}</span></button>`).join('');
+  }
+  function wireAudioSection() {
+    menu.querySelectorAll('.atk').forEach((b) => b.addEventListener('click', () => switchAudio(+b.dataset.ai)));
+  }
+  // Switch at the current position. The new track changes what /api/play
+  // decides (a direct file may now need a remux, a remux may need an audio
+  // re-encode), so this is a full reload of the same file, the same path a
+  // version switch takes: loadFile asks /api/play again, snaps a transcode
+  // start through /api/seekpoint (base = the real keyframe) and resets the
+  // pipeline. Subtitles stay as they are.
+  function switchAudio(idx) {
+    menu.classList.add('hidden');
+    if (idx === curAudioIndex()) return;
+    const t = curTracks().find((x) => x.index === idx);
+    sessionTrack = { fileId: current.id, index: idx };
+    if (t) bingeTrack = { codec: t.codec, channels: t.channels, language: t.language };
+    tele('player', { ev: 'audio', title: ctx.title, codec: t ? t.codec : undefined, at: Math.round(cur()) });
+    loadFile(current, cur(), { keepSubs: true });
+  }
+  // A direct-played file is the browser's to decode, so the server can't swap
+  // its track. Where the browser exposes the file's audio tracks (Safari), turn
+  // on the chosen one; the lists must match one for one or nothing is touched.
+  function applyBrowserAudioTrack() {
+    const at = video.audioTracks, tracks = curTracks();
+    if (!at || at.length < 2 || at.length !== tracks.length) return;
+    const on = curAudioIndex();
+    try { for (let i = 0; i < at.length; i++) at[i].enabled = i === on; } catch (_e) {}
+  }
+  // The picker lines for the in-player Version list (shared with the detail page).
+  loadVersionLabels(ctx.verKey, ctx.files).then((ok) => { if (ok && !menu.classList.contains('hidden')) buildMenu(); });
+
   // settings menu — navigable by remote: Up/Down move a highlighted option,
   // Enter activates, Left/Right nudge the caption delay, Back closes.
   const gear = vp.querySelector('.vp-gear');
   let menuIdx = 0;
+  let menuMode = 'all'; // 'all' = the gear's full menu, 'audio' = the Audio button's track list
   const menuBtns = () => [...menu.querySelectorAll('button')];
   function paintMenu() {
     const btns = menuBtns();
@@ -2893,10 +3015,19 @@ function openPlayer(ctx) {
     if (btns[menuIdx]) btns[menuIdx].scrollIntoView({ block: 'nearest' });
   }
   function buildMenu() {
-    const audio = video.audioTracks && video.audioTracks.length > 1 ? [...video.audioTracks] : [];
+    const tracks = curTracks();
+    // The browser's own list is only a fallback for when the server's is missing.
+    const audio = tracks.length < 2 && video.audioTracks && video.audioTracks.length > 1 ? [...video.audioTracks] : [];
+    if (menuMode === 'audio') {
+      menu.innerHTML = audioSection(tracks);
+      wireAudioSection();
+      paintMenu();
+      return;
+    }
     const subs = current.subtitles || [];
     menu.innerHTML = `
       ${ctx.files.length > 1 ? `<h4>Version</h4>${ctx.files.map((f, i) => `<button class="vp-opt ver" data-fid="${f.id}">${escapeHtml(versionLabel(f, i))}<span class="tick">${current.id === f.id ? '✓' : ''}</span></button>`).join('')}` : ''}
+      ${audioSection(tracks)}
       ${audio.length ? `<h4>Audio</h4>${audio.map((a, i) => `<button class="vp-opt aud" data-i="${i}">${escapeHtml(a.label || a.language || 'Track ' + (i + 1))}<span class="tick">${a.enabled ? '✓' : ''}</span></button>`).join('')}` : ''}
       <h4>Subtitles</h4>
       <button class="vp-opt subt" data-i="-1">Off<span class="tick">${!(subVisible && currentSubIdx >= 0) ? '✓' : ''}</span></button>
@@ -2906,9 +3037,14 @@ function openPlayer(ctx) {
       <div class="vp-offset"><span style="color:var(--muted);font-size:12px">Delay</span><button data-o="-0.25">−</button><span class="val">${subOffset.toFixed(2)}s</span><button data-o="0.25">+</button></div>`;
     menu.querySelectorAll('.ver').forEach((b) => b.addEventListener('click', () => {
       const f = ctx.files.find((x) => String(x.id) === b.dataset.fid);
-      if (f && f.id !== current.id) { rememberVersion(ctx.verKey, f); loadFile(f, cur()); }
+      if (f && f.id !== current.id) {
+        rememberVersion(ctx.verKey, f);
+        // A different file has its own tracks: pick for it the same silent way.
+        pickAudioTrackThen(f.id, ctx.searchKind, tracksArrived(f.id), () => loadFile(f, cur()));
+      }
       buildMenu();
     }));
+    wireAudioSection();
     menu.querySelectorAll('.aud').forEach((b) => b.addEventListener('click', () => { [...video.audioTracks].forEach((a, i) => (a.enabled = i === +b.dataset.i)); buildMenu(); }));
     menu.querySelectorAll('.subt').forEach((b) => b.addEventListener('click', () => {
       const i = +b.dataset.i;
@@ -2926,11 +3062,24 @@ function openPlayer(ctx) {
     menu.querySelectorAll('.vp-offset button').forEach((b) => b.addEventListener('click', () => { subOffset = Math.round((subOffset + +b.dataset.o) * 100) / 100; saveDelay(); renderSub(); buildMenu(); }));
     paintMenu();
   }
-  gear.addEventListener('click', () => { if (menu.classList.contains('hidden')) { menuIdx = 0; buildMenu(); menu.classList.remove('hidden'); } else menu.classList.add('hidden'); });
+  gear.addEventListener('click', () => { if (menu.classList.contains('hidden') || menuMode !== 'all') openMenu('all'); else menu.classList.add('hidden'); });
+  audBtn.addEventListener('click', () => { if (menu.classList.contains('hidden') || menuMode !== 'audio') openMenu('audio'); else menu.classList.add('hidden'); });
+  function openMenu(mode) {
+    menuMode = mode;
+    menuIdx = 0;
+    buildMenu();
+    // The Audio button lands the remote on the track that is playing now.
+    if (mode === 'audio') {
+      const i = menuBtns().findIndex((b) => b.classList.contains('atk') && b.classList.contains('active'));
+      if (i >= 0) { menuIdx = i; paintMenu(); }
+    }
+    menu.classList.remove('hidden');
+    showUI();
+  }
   // Close on outside click. Buttons inside the menu re-render it, so their
   // e.target is detached by the time this runs — a detached target must NOT
   // count as "outside" (that's what made the delay popup close on every press).
-  vp.addEventListener('click', (e) => { if (!e.target.isConnected) return; if (!menu.contains(e.target) && !gear.contains(e.target)) menu.classList.add('hidden'); });
+  vp.addEventListener('click', (e) => { if (!e.target.isConnected) return; if (!menu.contains(e.target) && !gear.contains(e.target) && !audBtn.contains(e.target)) menu.classList.add('hidden'); });
 
   // AI subtitle generation: pick a target language, kick off a background job on
   // the server, and poll its progress. The job keeps running even if you close
@@ -3269,7 +3418,8 @@ function openPlayer(ctx) {
     else if (e.key === 'f') vp.querySelector('.vp-fs').click();
     else if (e.key === 'h') { e.preventDefault(); hideUINow(); }
     else if (e.key === 'c') vp.querySelector('.vp-cc').click();
-    else if (e.key === 's') { menuIdx = 0; buildMenu(); menu.classList.remove('hidden'); showUI(); }
+    else if (e.key === 's') openMenu('all');
+    else if (e.key === 'a' && curTracks().length > 1) openMenu('audio');
     // Admin caption-timing debug overlay (helps diagnose a "frozen subtitle").
     else if (e.key === 'd' && document.body.classList.contains('is-admin')) { subDbgOn = !subDbgOn; if (subDbg) subDbg.classList.toggle('hidden', !subDbgOn); renderSub(); showUI(); }
   };
@@ -4366,10 +4516,13 @@ function paintDeviceType() {
 }
 
 // ---- Choosing a track ------------------------------------------------------
+// The owner's rule, the same on every client: play the track this device plays
+// as-is (no server conversion), for movies and episodes, without asking. The
+// viewer can override it from the Audio menu inside the player.
 // Session-only. Nothing is remembered between visits, by design: a stored track
-// index goes stale the moment a file changes, and a remembered wrong choice is
-// worse than asking again. `bingeTrack` carries a choice down an Up Next chain
-// so a binge is never interrupted by the same question.
+// index goes stale the moment a file changes. `bingeTrack` carries a viewer's
+// override down an Up Next chain so the next episode starts on the same kind
+// of track.
 let sessionTrack = null;   // { fileId, index } for the file being played
 let bingeTrack = null;     // { codec, channels, language } carried along a chain
 
@@ -4406,79 +4559,34 @@ function autoPickTrack(tracks) {
   return usable.slice().sort((a, b) => score(b) - score(a))[0];
 }
 
-// Runs BEFORE the pre-roll. Shows a chooser only when there is a real decision
-// to make; otherwise picks and gets out of the way. `auto` is true when this is
-// an Up Next advance — those must never be interrupted.
-async function chooseAudioTrackThen(vp, fileId, kind, auto, done) {
+// The file's audio tracks, one request per file per player. Never throws.
+function fetchAudioTracks(kind, fileId) {
+  return fetch(`/api/audio/list/${kind === 'episode' ? 'episode' : 'movie'}/${fileId}`)
+    .then((r) => (r.ok ? r.json() : null))
+    .then((d) => (d && d.tracks) || [])
+    .catch(() => []);
+}
+
+// Runs BEFORE the pre-roll and before every file load. Picks silently and
+// gets out of the way: no dialog, ever. Playback never waits on the list for
+// more than AUDIO_PICK_WAIT; a late answer still fills the Audio menu (via
+// `onTracks`) but leaves the stream alone, since it has already started.
+const AUDIO_PICK_WAIT = 3000;
+function pickAudioTrackThen(fileId, kind, onTracks, done) {
   sessionTrack = null;
-  let tracks = [];
-  try {
-    const r = await fetch(`/api/audio/list/${kind === 'episode' ? 'episode' : 'movie'}/${fileId}`);
-    if (r.ok) tracks = (await r.json()).tracks || [];
-  } catch (_e) { /* fall through — playback must never depend on this */ }
-
-  if (tracks.length <= 1) { done(); return; }
-  const usable = playableTracks(tracks);
-
-  // Nothing this device can play: let the server transcode as it always has.
-  if (!usable.length) { done(); return; }
-
-  const pick = autoPickTrack(tracks);
-  if (pick) sessionTrack = { fileId, index: pick.index };
-
-  // One real option, or an auto-advance: don't ask.
-  if (usable.length === 1 || auto) { done(); return; }
-
-  const box = vp.querySelector('.vp-atrack');
-  if (!box) { done(); return; }
-
-  box.innerHTML =
-    '<div class="at-card">' +
-      '<div class="at-title">Choose a soundtrack</div>' +
-      '<div class="at-sub">' + usable.length + ' available on ' + (DEVICE_LABEL[deviceType()] || 'this device') + '</div>' +
-      '<div class="at-list">' +
-        usable.map((t, i) =>
-          '<button class="at-opt' + (pick && t.index === pick.index ? ' at-best' : '') + '" data-i="' + t.index + '">' +
-            '<span class="at-opt-label">' + escapeHtml(trackLabel(t)) + '</span>' +
-            (pick && t.index === pick.index ? '<span class="at-tag">best for this device</span>' : '') +
-            (t.commentary ? '<span class="at-tag">commentary</span>' : '') +
-          '</button>').join('') +
-      '</div>' +
-      '<div class="at-foot muted">Just for this session — nothing is remembered.</div>' +
-    '</div>';
-  box.classList.remove('hidden');
-
-  let settled = false;
-  const finish = (idx) => {
-    if (settled) return;
-    settled = true;
-    if (idx != null) {
-      sessionTrack = { fileId, index: idx };
-      const t = tracks.find((x) => x.index === idx);
-      if (t) bingeTrack = { codec: t.codec, channels: t.channels, language: t.language };
+  let started = false;
+  const go = () => { if (!started) { started = true; done(); } };
+  const timer = setTimeout(go, AUDIO_PICK_WAIT);
+  fetchAudioTracks(kind, fileId).then((tracks) => {
+    if (!started && tracks.length > 1) {
+      // Nothing this device can play: no pick, the server converts as always.
+      const pick = autoPickTrack(tracks);
+      if (pick) sessionTrack = { fileId, index: pick.index };
     }
-    box.classList.add('hidden');
-    box.innerHTML = '';
-    document.removeEventListener('keydown', onKey, true);
-    done();
-  };
-
-  // Remote-friendly: arrows move, Enter picks, Back/Escape takes the default.
-  let focus = Math.max(0, usable.findIndex((t) => pick && t.index === pick.index));
-  const opts = () => [...box.querySelectorAll('.at-opt')];
-  const paint = () => opts().forEach((b, i) => b.classList.toggle('at-focus', i === focus));
-  paint();
-  function onKey(e) {
-    if (settled) return;
-    if (e.key === 'ArrowDown' || e.key === 'ArrowRight') { focus = Math.min(focus + 1, opts().length - 1); paint(); }
-    else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') { focus = Math.max(focus - 1, 0); paint(); }
-    else if (e.key === 'Enter') { finish(+opts()[focus].dataset.i); }
-    else if (e.key === 'Escape' || e.key === 'Backspace' || e.key === 'GoBack') { finish(null); }
-    else return;
-    e.preventDefault(); e.stopPropagation();
-  }
-  document.addEventListener('keydown', onKey, true);
-  opts().forEach((b) => b.addEventListener('click', () => finish(+b.dataset.i)));
+    onTracks(tracks);
+    clearTimeout(timer);
+    go();
+  });
 }
 
 // Device type buttons in Settings ▸ Audio. Stored per device, in localStorage —

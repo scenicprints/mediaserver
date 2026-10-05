@@ -744,6 +744,10 @@ button { font-family: inherit; }
 .vp-opt:hover { background: var(--panel-2); }
 .vp-opt.active { color: var(--accent-2); }
 .vp-opt .tick { color: var(--accent-2); }
+/* Audio track rows: the label wraps (track titles run long) and carries small
+   outlined tags, "commentary" / "converted". */
+.vp-optl { flex: 1 1 auto; min-width: 0; line-height: 1.35; }
+.vp-tag { display: inline-block; margin-left: 8px; vertical-align: 1px; font-size: 9.5px; font-weight: 800; letter-spacing: 0.4px; text-transform: uppercase; color: var(--muted); border: 1px solid var(--line); padding: 1px 5px; }
 .vp-offset { display: flex; align-items: center; gap: 10px; padding: 6px 10px; }
 .vp-offset button { width: 34px; height: 30px; border-radius: 0; border: 1px solid var(--line); background: var(--panel-2); color: #fff; cursor: pointer; font-size: 16px; }
 .vp-offset .val { flex: 1; text-align: center; font-size: 13px; font-variant-numeric: tabular-nums; }
@@ -1205,6 +1209,7 @@ body.tv-nav .card:not(.tv-focus) { opacity: 1; }
   background: var(--accent); box-shadow: none;
 }
 .vp-menu button.focused { background: var(--inverse); color: var(--on-inverse); box-shadow: none; }
+.vp-menu button.focused .vp-tag { color: inherit; border-color: currentColor; }
 .vp-upnext .un-focus { transform: none; box-shadow: inset 0 0 0 3px var(--accent); }
 
 /* Nav: the tab you are on carries the signal underline; hover/focus is ink. */
@@ -1495,21 +1500,6 @@ body.tv-nav .card:not(.tv-focus) { opacity: 1; }
 .dp-splash.no-art { padding-top: 0; }
 .dp-splash.no-art::before { content: none; }
 
-/* ---- Soundtrack chooser (shown before the pre-roll, only when there's a real
-       choice this device can make) ---- */
-.vp-atrack { position: absolute; inset: 0; z-index: 40; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.82); }
-.at-card { width: min(92vw, 560px); background: var(--panel); border: 1px solid var(--line); padding: 22px 24px; }
-.at-title { font-size: 19px; font-weight: 800; letter-spacing: 0.2px; }
-.at-sub { font-size: 12px; color: var(--muted); margin: 2px 0 16px; }
-.at-list { display: flex; flex-direction: column; gap: 8px; }
-.at-opt { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; background: var(--panel-2); border: 1px solid var(--line); color: var(--text); padding: 12px 14px; font: inherit; font-size: 14px; cursor: pointer; }
-.at-opt:hover { border-color: var(--accent); }
-.at-opt.at-focus { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
-.at-opt-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.at-tag { flex: 0 0 auto; font-size: 10px; font-weight: 800; letter-spacing: 0.4px; text-transform: uppercase; color: var(--muted); border: 1px solid var(--line); padding: 2px 6px; }
-.at-best .at-tag { color: var(--accent); border-color: var(--accent); }
-.at-foot { font-size: 11.5px; margin-top: 14px; }
-
 /* ---- End card: a film has finished and there is nowhere to roll on to ---- */
 .vp-endcard { position: absolute; inset: 0; z-index: 40; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.86); }
 .ec-card { width: min(92vw, 560px); text-align: center; }
@@ -1521,6 +1511,5 @@ body.tv-nav .card:not(.tv-focus) { opacity: 1; }
 .un-count { font-variant-numeric: tabular-nums; opacity: 0.85; }
 
 @media (max-width: 620px) {
-  .at-card { padding: 16px; }
   .ec-title { font-size: 20px; }
 }
