@@ -152,3 +152,8 @@ npm run test:optimizer            # the test suite
 ```
 
 The version comes from `optimizer/package.json`.
+
+## Licence
+
+Apache License 2.0 — see [LICENSE](../LICENSE) and [NOTICE](../NOTICE).
+Copyright 2026 Kevin Wagner.
