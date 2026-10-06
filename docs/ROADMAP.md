@@ -190,7 +190,7 @@ filters, instant scrolling, 12-card rows, per-row layout+paint containment); nat
 ---
 
 ## ✅ Done
-- **Owner's tvOS batch (2026-10-05, committed, not yet pushed).** (1) **Wrong posters**:
+- **Owner's tvOS batch (2026-10-05, pushed to main and TestFlight 2026-10-05; Dell Update applies server, web and Roku).** (1) **Wrong posters**:
   Lion (2016) and The Lion King (2019) wore the 1994 film's match, left over from the old
   matcher; a one-time re-check (`src/rematch.js`) moves a movie only when the current
   matcher is confident about a different film, logging the old row to `rematch_log`.
